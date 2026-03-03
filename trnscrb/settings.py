@@ -5,8 +5,10 @@ from pathlib import Path
 _SETTINGS_FILE = Path.home() / ".config" / "trnscrb" / "settings.json"
 
 _DEFAULTS: dict = {
-    "auto_record": True,    # start watching for mic activity on launch
-    "model_size": "small",  # whisper model
+    "auto_record": True,  # start watching for mic activity on launch
+    "transcription_backend": "parakeet",  # parakeet | whisper
+    "parakeet_model_id": "mlx-community/parakeet-tdt-0.6b-v3",
+    "model_size": "small",  # whisper model size (used when backend=whisper)
 }
 
 

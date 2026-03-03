@@ -2,7 +2,7 @@
 
 > Offline meeting transcription for macOS — no cloud, no subscription.
 
-trnscrb lives in your menu bar, listens for meetings, transcribes them locally with Whisper, and makes every transcript searchable from Claude Desktop via MCP.
+trnscrb lives in your menu bar, listens for meetings, transcribes them locally with Parakeet (default) or Whisper (optional), and makes every transcript searchable from Claude Desktop via MCP.
 
 ---
 
@@ -25,7 +25,7 @@ uv tool install trnscrb && trnscrb install
 
 - BlackHole 2ch audio driver (captures system audio alongside mic)
 - HuggingFace token for speaker diarization (pyannote)
-- Whisper `small` model download (~500 MB, one-time)
+- Default Parakeet model download (one-time, cached locally)
 - Claude Desktop MCP config
 - Launch-at-login agent
 
@@ -41,6 +41,16 @@ With **Auto-transcribe** on (the default), trnscrb detects when a meeting starts
 
 You can also trigger manually from the menu bar: **Start Transcribing / Stop Transcribing**.
 
+Backend selection is stored in `~/.config/trnscrb/settings.json`:
+
+```json
+{
+  "transcription_backend": "parakeet",
+  "parakeet_model_id": "mlx-community/parakeet-tdt-0.6b-v3",
+  "model_size": "small"
+}
+```
+
 ---
 
 ## How it works
@@ -49,7 +59,7 @@ You can also trigger manually from the menu bar: **Start Transcribing / Stop Tra
 |---|---|
 | Meeting detected | Mic active for 5 s + meeting app found |
 | Recording | Audio captured via mic or BlackHole (system + mic) |
-| Transcription | Whisper `small` model, runs locally on Apple Silicon |
+| Transcription | Parakeet (`parakeet-mlx`) by default, optional Whisper backend |
 | Diarization | Speaker labels via pyannote (needs HuggingFace token) |
 | Saved | Plain `.txt` in `~/meeting-notes/` |
 
@@ -124,7 +134,7 @@ Running `trnscrb enrich <id>` replaces `SPEAKER_00` / `SPEAKER_01` with inferred
 
 - macOS 13 or later
 - Python 3.11+
-- Apple Silicon (M1/M2/M3/M4) recommended — Whisper runs on Metal
+- Apple Silicon (M1/M2/M3/M4) recommended for fastest local transcription
 
 ---
 

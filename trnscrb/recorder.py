@@ -1,7 +1,7 @@
 """Audio capture using sounddevice.
 
 Supports mic-only or BlackHole 2ch (system audio) as input.
-Records at 16 kHz mono — the sample rate Whisper expects.
+Records at 16 kHz mono — suitable for local ASR backends used by trnscrb.
 """
 import threading
 import tempfile
@@ -11,7 +11,7 @@ import numpy as np
 import sounddevice as sd
 import scipy.io.wavfile as wavfile
 
-SAMPLE_RATE = 16_000  # Whisper expects 16 kHz
+SAMPLE_RATE = 16_000  # fixed capture rate for local transcription backends
 
 
 class Recorder:

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>trnscrb — Offline meeting transcription for macOS</title>
-  <meta name="description" content="trnscrb lives in your menu bar, auto-detects meetings, transcribes locally with Whisper, and makes every transcript searchable from Claude Desktop." />
+  <meta name="description" content="trnscrb lives in your menu bar, auto-detects meetings, transcribes locally with Parakeet (default) or Whisper, and makes every transcript searchable from Claude Desktop." />
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -314,7 +314,7 @@
   <div class="wrap">
     <div class="badge"><span></span>macOS · Local · Private</div>
     <h1>Your meetings,<br>transcribed locally.</h1>
-    <p>trnscrb lives in your menu bar, detects meetings automatically, and transcribes with Whisper — on device, no cloud. Every transcript is instantly searchable from Claude Desktop.</p>
+    <p>trnscrb lives in your menu bar, detects meetings automatically, and transcribes with Parakeet by default (or Whisper if you prefer) — on device, no cloud. Every transcript is instantly searchable from Claude Desktop.</p>
 
     <div class="install-block">
       <div class="step-label">Install</div>
@@ -351,7 +351,7 @@
       <div class="step-n">3</div>
       <div class="step-body">
         <strong>Transcribes on-device</strong>
-        <p>Whisper <code style="font-family:monospace;font-size:12px">small</code> model runs on Apple Silicon Metal. No internet required.</p>
+        <p>Parakeet runs on-device by default via MLX (Apple Silicon), with optional Whisper backend support. No cloud transcription required.</p>
       </div>
     </div>
     <div class="step">
@@ -414,7 +414,7 @@ uv tool install trnscrb &amp;&amp; trnscrb install</pre>
     </div>
   </div>
 
-  <p style="margin-top:16px;font-size:13px;"><code style="font-family:monospace;font-size:12px;background:var(--surface);border:1px solid var(--border);padding:1px 5px;border-radius:3px">trnscrb install</code> handles BlackHole, HuggingFace token, Whisper model, Claude Desktop MCP config, and launch-at-login.</p>
+  <p style="margin-top:16px;font-size:13px;"><code style="font-family:monospace;font-size:12px;background:var(--surface);border:1px solid var(--border);padding:1px 5px;border-radius:3px">trnscrb install</code> handles BlackHole, HuggingFace token, default transcription model setup (Parakeet by default), Claude Desktop MCP config, and launch-at-login.</p>
 
   <hr />
 
@@ -457,7 +457,7 @@ uv tool install trnscrb &amp;&amp; trnscrb install</pre>
     </div>
     <div class="faq-item">
       <div class="faq-q">Does it work on Intel Macs?</div>
-      <div class="faq-a">Yes, but Whisper won't use Metal acceleration so transcription will be slower. Apple Silicon (M1 and later) is recommended.</div>
+      <div class="faq-a">Yes, but local transcription is fastest on Apple Silicon. Intel Macs work, with slower performance depending on backend and meeting length.</div>
     </div>
     <div class="faq-item">
       <div class="faq-q">Where are transcripts stored?</div>
