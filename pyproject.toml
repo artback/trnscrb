@@ -35,6 +35,7 @@ dependencies = [
     "anthropic>=0.25",
     "scipy>=1.11",
     "parakeet-mlx>=0.5.1",
+    "openai>=2.24.0",
 ]
 
 [project.urls]

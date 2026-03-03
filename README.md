@@ -78,7 +78,7 @@ After `trnscrb install`, Claude Desktop has these tools available:
 | `list_transcripts` | List all saved meetings |
 | `get_transcript` | Read a specific transcript |
 | `get_calendar_context` | Current or upcoming calendar event |
-| `enrich_transcript` | Add summary + action items via Claude API |
+| `enrich_transcript` | Add summary + action items via configured local/cloud LLM |
 
 ---
 
@@ -89,11 +89,41 @@ trnscrb start               # launch menu bar app
 trnscrb install             # guided setup / re-check dependencies
 trnscrb list                # list saved transcripts
 trnscrb show <id>           # print a transcript
-trnscrb enrich <id>         # summarise + action items (needs ANTHROPIC_API_KEY)
+trnscrb enrich <id>         # summarise + action items (uses selected LLM provider/model)
 trnscrb mic-status          # live mic activity monitor — useful for debugging
 trnscrb devices             # list audio input devices
 trnscrb watch               # headless auto-transcribe, no menu bar
 ```
+
+---
+
+## Enrich Providers
+
+`enrich` now uses a configurable provider from the menu bar:
+
+- `llama.cpp` (default)
+- `Ollama API`
+- `LM Studio`
+- `Anthropic`
+- `OpenAI`
+
+Open **menu bar → Settings** to configure:
+
+1. **Provider** (active enrich backend)
+2. **Endpoint…** (base URL per provider)
+3. **API Key…** (stored in `~/.config/trnscrb/settings.json`)
+4. **Test Endpoint & Load Models** (connectivity check + model discovery)
+5. **Model** (pick a loaded model for enrich)
+
+Default endpoints:
+
+- `ollama`: `http://127.0.0.1:11434`
+- `llama.cpp`: `http://127.0.0.1:8080`
+- `lmstudio`: `http://127.0.0.1:1234`
+- `anthropic`: `https://api.anthropic.com`
+- `openai`: `https://api.openai.com/v1`
+
+For OpenAI-compatible providers (`llama.cpp`, `lmstudio`, `openai`), `trnscrb` normalizes endpoints to `/v1`.
 
 ---
 
@@ -140,7 +170,7 @@ Running `trnscrb enrich <id>` replaces `SPEAKER_00` / `SPEAKER_01` with inferred
 
 ## Privacy
 
-Everything runs on your machine. No audio or transcripts leave your device unless you explicitly run `enrich`, which sends the transcript text to the Claude API.
+Everything runs on your machine for recording/transcription. `enrich` sends transcript text to whichever provider endpoint you configure (local or cloud).
 
 ---
 

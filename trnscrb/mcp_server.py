@@ -12,7 +12,7 @@ Tools available to Claude:
   list_transcripts       — all saved meeting files
   get_transcript         — full text of one transcript
   get_calendar_context   — current/upcoming calendar event
-  enrich_transcript      — post-call summary + action items via Claude API
+  enrich_transcript      — post-call summary + action items via configured LLM
 """
 import os
 import json
@@ -181,8 +181,8 @@ def get_calendar_context() -> str:
 @mcp.tool()
 def enrich_transcript(transcript_id: str) -> str:
     """
-    Run a Claude LLM pass on a saved transcript to produce a summary,
-    action items, and inferred speaker names. Requires ANTHROPIC_API_KEY.
+    Run an LLM pass on a saved transcript to produce a summary,
+    action items, and inferred speaker names.
 
     Args:
         transcript_id: The filename stem of the transcript to enrich.
@@ -191,12 +191,14 @@ def enrich_transcript(transcript_id: str) -> str:
     if text is None:
         return f"Transcript '{transcript_id}' not found."
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        return "ANTHROPIC_API_KEY not set — cannot call Claude API."
-
-    from trnscrb.enricher import enrich_transcript as _enrich
+    from trnscrb.enricher import enrich_transcript as _enrich, get_active_provider_config, provider_label
+    provider, profile = get_active_provider_config()
     evt = get_current_or_upcoming_event()
-    result = _enrich(text, calendar_event=evt)
+    try:
+        result = _enrich(text, calendar_event=evt)
+    except Exception as e:
+        model_name = str(profile.get("model") or "<not selected>")
+        return f"Enrichment failed ({provider_label(provider)} / {model_name}): {e}"
 
     path = storage.NOTES_DIR / f"{transcript_id}.txt"
     if path.exists():

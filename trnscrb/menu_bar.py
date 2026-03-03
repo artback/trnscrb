@@ -14,14 +14,27 @@ from pathlib import Path
 
 import rumps
 
-from trnscrb import recorder as rec_module, transcriber, diarizer, storage
+from trnscrb import recorder as rec_module, transcriber, diarizer, storage, enricher
 from trnscrb.calendar_integration import get_current_or_upcoming_event
 from trnscrb.icon import icon_path, generate_icons
 from trnscrb.watcher import MicWatcher
-from trnscrb.settings import get as get_setting, put as put_setting
+from trnscrb.settings import (
+    get as get_setting,
+    put as put_setting,
+    load as load_settings,
+    save as save_settings,
+)
 
 _EMOJI_IDLE      = "🎙"
 _EMOJI_RECORDING = "🔴"
+
+
+def _notify(title: str, subtitle: str, message: str) -> None:
+    """Best-effort notification; some non-bundle launches lack Info.plist metadata."""
+    try:
+        rumps.notification(title, subtitle, message)
+    except Exception:
+        pass
 
 
 class TrnscrbApp(rumps.App):
@@ -44,12 +57,28 @@ class TrnscrbApp(rumps.App):
         self._start_item = rumps.MenuItem("Start Transcribing", callback=self.start_recording)
         self._stop_item  = rumps.MenuItem("Stop Transcribing",  callback=None)
         self._auto_item  = rumps.MenuItem("Auto-transcribe: Off", callback=self.toggle_auto_record)
+        self._settings_item = rumps.MenuItem("Settings")
+        self._provider_item = rumps.MenuItem("Provider")
+        self._endpoint_item = rumps.MenuItem("Endpoint…", callback=self.edit_enrich_endpoint)
+        self._api_key_item = rumps.MenuItem("API Key…", callback=self.edit_enrich_api_key)
+        self._test_endpoint_item = rumps.MenuItem(
+            "Test Endpoint & Load Models",
+            callback=self.test_enrich_endpoint,
+        )
+        self._model_item = rumps.MenuItem("Model")
+
+        self._settings_item.add(self._provider_item)
+        self._settings_item.add(self._endpoint_item)
+        self._settings_item.add(self._api_key_item)
+        self._settings_item.add(self._test_endpoint_item)
+        self._settings_item.add(self._model_item)
 
         self.menu = [
             self._start_item,
             self._stop_item,
             None,
             self._auto_item,
+            self._settings_item,
             None,
             rumps.MenuItem("Open Notes Folder", callback=self.open_folder),
             None,
@@ -65,6 +94,7 @@ class TrnscrbApp(rumps.App):
         if get_setting("auto_record"):
             self._start_watcher()
             self._auto_item.title = "Auto-transcribe: On ✓"
+        self._refresh_enrich_settings_menu()
 
     # ── watcher ───────────────────────────────────────────────────────────────
 
@@ -94,13 +124,185 @@ class TrnscrbApp(rumps.App):
             put_setting("auto_record", False)
             if not (self._recorder and self._recorder.is_recording):
                 self._set_icon_state("idle")
-            rumps.notification("Trnscrb", "Auto-transcribe off", "")
+            _notify("Trnscrb", "Auto-transcribe off", "")
         else:
             self._start_watcher()
             sender.title = "Auto-transcribe: On ✓"
             put_setting("auto_record", True)
-            rumps.notification("Trnscrb", "Auto-transcribe on",
-                               "Will start when mic is active for 5+ seconds")
+            _notify("Trnscrb", "Auto-transcribe on", "Will start when mic is active for 5+ seconds")
+
+    # ── enrichment settings ───────────────────────────────────────────────────
+
+    def select_enrich_provider(self, sender):
+        provider = getattr(sender, "_provider_key", "")
+        if not provider:
+            return
+        settings = load_settings()
+        enrich_cfg = settings.setdefault("enrich", {})
+        enrich_cfg["provider"] = provider
+        save_settings(settings)
+        self._refresh_enrich_settings_menu()
+        _notify("Trnscrb", "Enrich provider updated", enricher.provider_label(provider))
+
+    def edit_enrich_endpoint(self, _):
+        settings, provider, profile = self._active_enrich_profile()
+        title = f"{enricher.provider_label(provider)} endpoint"
+        window = rumps.Window(
+            message="Base URL",
+            title=title,
+            default_text=profile["endpoint"],
+            ok="Save",
+            cancel="Cancel",
+            dimensions=(440, 120),
+        )
+        result = window.run()
+        if not result.clicked:
+            return
+        endpoint = result.text.strip()
+        if not endpoint:
+            return
+        profile["endpoint"] = enricher.normalize_endpoint(provider, endpoint)
+        self._save_enrich_profile(settings, provider, profile)
+        self._refresh_enrich_settings_menu()
+        _notify("Trnscrb", "Endpoint saved", profile["endpoint"])
+
+    def edit_enrich_api_key(self, _):
+        settings, provider, profile = self._active_enrich_profile()
+        secure = provider in {"anthropic", "openai"}
+        window = rumps.Window(
+            message=f"{enricher.provider_label(provider)} API key",
+            title="LLM API Key",
+            default_text=profile["api_key"],
+            ok="Save",
+            cancel="Cancel",
+            dimensions=(440, 120),
+            secure=secure,
+        )
+        result = window.run()
+        if not result.clicked:
+            return
+        profile["api_key"] = result.text.strip()
+        self._save_enrich_profile(settings, provider, profile)
+        self._refresh_enrich_settings_menu()
+        state = "saved" if profile["api_key"] else "cleared"
+        _notify("Trnscrb", f"API key {state}", enricher.provider_label(provider))
+
+    def test_enrich_endpoint(self, _):
+        threading.Thread(target=self._test_enrich_endpoint_worker, daemon=True).start()
+
+    def _test_enrich_endpoint_worker(self):
+        settings, provider, profile = self._active_enrich_profile()
+        ok, message = enricher.test_provider_connection(
+            provider,
+            profile["endpoint"],
+            profile["api_key"],
+        )
+        enrich_cfg = settings.setdefault("enrich", {})
+        status = enrich_cfg.setdefault("last_test_status", {})
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        provider_name = enricher.provider_label(provider)
+        if not ok:
+            status[provider] = f"{stamp} FAIL: {message}"
+            save_settings(settings)
+            self._refresh_enrich_settings_menu()
+            _notify("Trnscrb", f"{provider_name} test failed", str(message)[:180])
+            return
+
+        try:
+            models = enricher.list_provider_models(
+                provider,
+                profile["endpoint"],
+                profile["api_key"],
+            )
+        except Exception as exc:
+            status[provider] = f"{stamp} FAIL: {exc}"
+            save_settings(settings)
+            self._refresh_enrich_settings_menu()
+            _notify("Trnscrb", f"{provider_name} model load failed", str(exc)[:180])
+            return
+
+        profile["models"] = models
+        if models and profile.get("model") not in models:
+            profile["model"] = models[0]
+        self._save_enrich_profile(settings, provider, profile)
+        status = settings.setdefault("enrich", {}).setdefault("last_test_status", {})
+        status[provider] = f"{stamp} OK: {len(models)} model(s)"
+        save_settings(settings)
+        self._refresh_enrich_settings_menu()
+        _notify("Trnscrb", f"{provider_name} connected", f"{len(models)} model(s) loaded")
+
+    def select_enrich_model(self, sender):
+        model = getattr(sender, "_model_name", "").strip()
+        if not model:
+            return
+        settings, provider, profile = self._active_enrich_profile()
+        profile["model"] = model
+        self._save_enrich_profile(settings, provider, profile)
+        self._refresh_enrich_settings_menu()
+        _notify("Trnscrb", "Enrich model selected", model)
+
+    def _refresh_enrich_settings_menu(self):
+        settings, provider, profile = self._active_enrich_profile()
+        endpoint_display = profile["endpoint"]
+        if len(endpoint_display) > 36:
+            endpoint_display = endpoint_display[:33] + "..."
+
+        self._settings_item.title = f"Settings ({enricher.provider_label(provider)})"
+        self._endpoint_item.title = f"Endpoint… ({endpoint_display})"
+        key_state = "Set" if profile["api_key"] else "Not set"
+        self._api_key_item.title = f"API Key… ({key_state})"
+
+        self._clear_submenu_if_initialized(self._provider_item)
+        for option in enricher.PROVIDER_ORDER:
+            item = rumps.MenuItem(enricher.provider_label(option), callback=self.select_enrich_provider)
+            item._provider_key = option
+            item.state = 1 if option == provider else 0
+            self._provider_item.add(item)
+
+        self._clear_submenu_if_initialized(self._model_item)
+        models = profile["models"]
+        selected_model = str(profile.get("model") or "")
+        if models:
+            for model in models:
+                item = rumps.MenuItem(model, callback=self.select_enrich_model)
+                item._model_name = model
+                item.state = 1 if model == selected_model else 0
+                self._model_item.add(item)
+            model_display = selected_model or "Select model"
+        else:
+            self._model_item.add(rumps.MenuItem("No models loaded"))
+            model_display = "No models loaded"
+        if len(model_display) > 32:
+            model_display = model_display[:29] + "..."
+        self._model_item.title = f"Model ({model_display})"
+
+    def _active_enrich_profile(self) -> tuple[dict, str, dict]:
+        settings = load_settings()
+        enrich_cfg = settings.setdefault("enrich", {})
+        provider = enricher.normalize_provider(enrich_cfg.get("provider"))
+        profiles = enrich_cfg.setdefault("profiles", {})
+        profile = profiles.setdefault(provider, {})
+        endpoint = profile.get("endpoint") or enricher.DEFAULT_ENDPOINTS[provider]
+        model_list = profile.get("models")
+        profile["endpoint"] = enricher.normalize_endpoint(provider, endpoint)
+        profile["api_key"] = str(profile.get("api_key") or "")
+        profile["model"] = str(profile.get("model") or "")
+        if isinstance(model_list, list):
+            profile["models"] = [str(model) for model in model_list if str(model).strip()]
+        else:
+            profile["models"] = []
+        return settings, provider, profile
+
+    def _save_enrich_profile(self, settings: dict, provider: str, profile: dict):
+        enrich_cfg = settings.setdefault("enrich", {})
+        profiles = enrich_cfg.setdefault("profiles", {})
+        profiles[provider] = profile
+        save_settings(settings)
+
+    def _clear_submenu_if_initialized(self, menu_item: rumps.MenuItem):
+        # rumps only initializes MenuItem._menu after first submenu insertion.
+        if getattr(menu_item, "_menu", None) is not None:
+            menu_item.clear()
 
     def open_folder(self, _):
         subprocess.run(["open", str(storage.ensure_notes_dir())])
@@ -127,7 +329,7 @@ class TrnscrbApp(rumps.App):
 
         source = "BlackHole (system + mic)" if device is not None else "built-in mic"
         label  = f" — {meeting_name}" if meeting_name else ""
-        rumps.notification("Trnscrb", f"Transcription started{label}", f"via {source}")
+        _notify("Trnscrb", f"Transcription started{label}", f"via {source}")
 
     def _do_stop(self):
         started_at     = self._started_at or datetime.now()
@@ -156,7 +358,7 @@ class TrnscrbApp(rumps.App):
         audio_path = recorder.stop()
         if not audio_path:
             self._restore_idle()
-            rumps.notification("Trnscrb", "Error", "No audio captured.")
+            _notify("Trnscrb", "Error", "No audio captured.")
             return
 
         evt          = get_current_or_upcoming_event()
@@ -167,7 +369,7 @@ class TrnscrbApp(rumps.App):
         except Exception as e:
             audio_path.unlink(missing_ok=True)
             self._restore_idle()
-            rumps.notification("Trnscrb", "Transcription failed", str(e))
+            _notify("Trnscrb", "Transcription failed", str(e))
             return
 
         hf_token = _read_hf_token()
@@ -185,7 +387,7 @@ class TrnscrbApp(rumps.App):
         storage.save_transcript(path, text)
 
         self._restore_idle()
-        rumps.notification("Trnscrb", f"Saved: {meeting_name}", f"~/meeting-notes/{path.name}")
+        _notify("Trnscrb", f"Saved: {meeting_name}", f"~/meeting-notes/{path.name}")
 
     def _restore_idle(self):
         """Called from background thread when transcription finishes."""

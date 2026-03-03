@@ -5,7 +5,7 @@
   trnscrb server    — start MCP server (Claude Desktop calls this)
   trnscrb list      — list saved transcripts
   trnscrb show <id> — print a transcript
-  trnscrb enrich <id> — run Claude LLM pass on a transcript
+  trnscrb enrich <id> — run LLM enrichment pass on a transcript
   trnscrb watch     — headless auto-record watcher
   trnscrb devices   — list audio input devices
 """
@@ -72,6 +72,7 @@ def install(force: bool):
         "pyannote.audio":  "pyannote.audio>=3.1",
         "mcp":             "mcp>=1.0.0",
         "anthropic":       "anthropic>=0.25",
+        "openai":          "openai>=2.24.0",
         "scipy":           "scipy>=1.11",
         "numpy":           "numpy>=1.24",
     }
@@ -345,9 +346,9 @@ def show(transcript_id: str):
 @cli.command()
 @click.argument("transcript_id")
 def enrich(transcript_id: str):
-    """Run a Claude LLM pass on a transcript: summary, action items, speaker names."""
+    """Run an LLM pass on a transcript: summary, action items, speaker names."""
     from trnscrb import storage
-    from trnscrb.enricher import enrich_transcript
+    from trnscrb.enricher import enrich_transcript, get_active_provider_config, provider_label
     from trnscrb.calendar_integration import get_current_or_upcoming_event
 
     text = storage.read_transcript(transcript_id)
@@ -355,9 +356,15 @@ def enrich(transcript_id: str):
         click.echo(f"Transcript '{transcript_id}' not found.", err=True)
         sys.exit(1)
 
-    click.echo("Running Claude enrichment…")
+    provider, config = get_active_provider_config()
+    model_name = str(config.get("model") or "<not selected>")
+    click.echo(f"Running enrichment with {provider_label(provider)} ({model_name})…")
     evt = get_current_or_upcoming_event()
-    result = enrich_transcript(text, calendar_event=evt)
+    try:
+        result = enrich_transcript(text, calendar_event=evt)
+    except Exception as e:
+        click.echo(f"Enrichment failed: {e}", err=True)
+        sys.exit(1)
 
     # Overwrite file with resolved speaker names + enrichment appended
     path = storage.NOTES_DIR / f"{transcript_id}.txt"
