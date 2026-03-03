@@ -22,6 +22,7 @@ import click
 _CLAUDE_CONFIG = (
     Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
 )
+_DEFAULT_PARAKEET_MODEL_ID = "mlx-community/parakeet-tdt-0.6b-v3"
 
 
 # ── CLI group ─────────────────────────────────────────────────────────────────
@@ -66,11 +67,12 @@ def install(force: bool):
     packages = {
         "rumps":           "rumps>=0.4.0",
         "sounddevice":     "sounddevice>=0.4.6",
+        "parakeet_mlx":    "parakeet-mlx>=0.5.1",
         "faster_whisper":  "faster-whisper>=1.0.0",
         "pyannote.audio":  "pyannote.audio>=3.1",
         "mcp":             "mcp>=1.0.0",
         "anthropic":       "anthropic>=0.25",
-        "openai":          "openai>=1.0.0",
+        "openai":          "openai>=2.24.0",
         "scipy":           "scipy>=1.11",
         "numpy":           "numpy>=1.24",
     }
@@ -104,15 +106,39 @@ def install(force: bool):
 
     click.echo()
 
-    # 5. Whisper model cache
-    model_ok = _whisper_model_cached("small")
-    _row("Whisper 'small' model", model_ok, "~500 MB, runs on Apple Silicon Metal")
-    if not model_ok:
-        if click.confirm("  Download now?", default=True):
-            click.echo("  Downloading… (first time only, ~500 MB)")
+    # 5. Default transcription model cache (active backend only)
+    from trnscrb.settings import load as load_settings, save as save_settings
+    settings = load_settings()
+    backend = _normalize_backend(settings.get("transcription_backend"))
+    if backend == "whisper":
+        model_size = str(settings.get("model_size") or "small")
+        model_ok = _whisper_model_cached(model_size)
+        _row(
+            f"Whisper '{model_size}' model",
+            model_ok,
+            "~500 MB, runs on Apple Silicon Metal",
+        )
+        if not model_ok and click.confirm("  Download now?", default=True):
+            click.echo("  Downloading Whisper model… (first time only, ~500 MB)")
             try:
                 from faster_whisper import WhisperModel  # noqa: PLC0415
-                WhisperModel("small", device="cpu")
+                WhisperModel(model_size, device="cpu")
+                click.echo(click.style("  Model ready.", fg="green"))
+            except Exception as e:
+                click.echo(click.style(f"  Download failed: {e}", fg="yellow"))
+    else:
+        model_id = str(settings.get("parakeet_model_id") or _DEFAULT_PARAKEET_MODEL_ID)
+        model_ok = _parakeet_model_cached(model_id)
+        _row(
+            f"Parakeet model ({model_id})",
+            model_ok,
+            "downloads from HuggingFace on first run",
+        )
+        if not model_ok and click.confirm("  Download now?", default=True):
+            click.echo("  Downloading Parakeet model… (first time only)")
+            try:
+                from parakeet_mlx import from_pretrained  # noqa: PLC0415
+                from_pretrained(model_id)
                 click.echo(click.style("  Model ready.", fg="green"))
             except Exception as e:
                 click.echo(click.style(f"  Download failed: {e}", fg="yellow"))
@@ -159,12 +185,23 @@ def install(force: bool):
                 click.echo(click.style("  Could not set up login item.", fg="yellow"))
 
     # 10. Default settings
-    from trnscrb.settings import load as load_settings, save as save_settings
     settings = load_settings()
+    changed = False
     if settings.get("auto_record") is not True:
         settings["auto_record"] = True
+        changed = True
+    configured_backend = str(settings.get("transcription_backend") or "").strip().lower()
+    if configured_backend not in {"parakeet", "whisper"}:
+        settings["transcription_backend"] = "parakeet"
+        changed = True
+    if not settings.get("parakeet_model_id"):
+        settings["parakeet_model_id"] = _DEFAULT_PARAKEET_MODEL_ID
+        changed = True
+    if changed:
         save_settings(settings)
+
     click.echo("\n  ✓ Auto-record on by default")
+    click.echo(f"  ✓ Transcription backend: {_normalize_backend(settings.get('transcription_backend'))}")
 
     click.echo()
     click.echo("=" * 42)
@@ -432,6 +469,20 @@ def _whisper_model_cached(size: str) -> bool:
     # also check ct2 local cache
     ct2_cache = Path.home() / ".cache" / "faster_whisper"
     return ct2_cache.exists() and any(ct2_cache.glob(f"*{size}*"))
+
+
+def _parakeet_model_cached(model_id: str) -> bool:
+    # huggingface cache paths use models--org--repo naming
+    hf_hub = Path.home() / ".cache" / "huggingface" / "hub"
+    cache_prefix = "models--" + model_id.replace("/", "--")
+    return any(hf_hub.glob(f"{cache_prefix}*"))
+
+
+def _normalize_backend(value) -> str:
+    backend = str(value or "parakeet").strip().lower()
+    if backend in {"parakeet", "whisper"}:
+        return backend
+    return "parakeet"
 
 
 def _mcp_configured() -> bool:
