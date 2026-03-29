@@ -15,6 +15,11 @@ def _settings_getter(backend: str, parakeet_model_id: str = "mlx-community/parak
     return lambda key: mapping.get(key)
 
 
+def _fake_stat():
+    """Return a stat result with non-zero size."""
+    return types.SimpleNamespace(st_size=1024)
+
+
 class TranscriberTests(unittest.TestCase):
     def _reload_transcriber(self):
         import trnscrb.transcriber as transcriber
@@ -57,7 +62,9 @@ class TranscriberTests(unittest.TestCase):
         ):
             with mock.patch("trnscrb.settings.get", side_effect=_settings_getter("parakeet")):
                 transcriber = self._reload_transcriber()
-                segments = transcriber.transcribe(Path("audio.wav"))
+                with mock.patch.object(Path, "exists", return_value=True), \
+                     mock.patch.object(Path, "stat", return_value=_fake_stat()):
+                    segments = transcriber.transcribe(Path("audio.wav"))
 
         self.assertEqual(
             segments,
@@ -81,7 +88,9 @@ class TranscriberTests(unittest.TestCase):
         with mock.patch.dict(sys.modules, {"faster_whisper": fake_whisper}, clear=False):
             with mock.patch("trnscrb.settings.get", side_effect=_settings_getter("whisper")):
                 transcriber = self._reload_transcriber()
-                segments = transcriber.transcribe(Path("audio.wav"))
+                with mock.patch.object(Path, "exists", return_value=True), \
+                     mock.patch.object(Path, "stat", return_value=_fake_stat()):
+                    segments = transcriber.transcribe(Path("audio.wav"))
 
         self.assertEqual(
             segments,
@@ -91,15 +100,19 @@ class TranscriberTests(unittest.TestCase):
     def test_fails_fast_for_unknown_backend(self):
         with mock.patch("trnscrb.settings.get", side_effect=_settings_getter("unknown")):
             transcriber = self._reload_transcriber()
-            with self.assertRaisesRegex(RuntimeError, "Unsupported transcription backend"):
-                transcriber.transcribe(Path("audio.wav"))
+            with mock.patch.object(Path, "exists", return_value=True), \
+                 mock.patch.object(Path, "stat", return_value=_fake_stat()):
+                with self.assertRaisesRegex(RuntimeError, "Unsupported transcription backend"):
+                    transcriber.transcribe(Path("audio.wav"))
 
     def test_fails_fast_when_parakeet_dependency_missing(self):
         with mock.patch("trnscrb.settings.get", side_effect=_settings_getter("parakeet")):
             with mock.patch.dict(sys.modules, {"parakeet_mlx": None}, clear=False):
                 transcriber = self._reload_transcriber()
-                with self.assertRaisesRegex(RuntimeError, "uv add parakeet-mlx"):
-                    transcriber.transcribe(Path("audio.wav"))
+                with mock.patch.object(Path, "exists", return_value=True), \
+                     mock.patch.object(Path, "stat", return_value=_fake_stat()):
+                    with self.assertRaisesRegex(RuntimeError, "uv add parakeet-mlx"):
+                        transcriber.transcribe(Path("audio.wav"))
 
 
 if __name__ == "__main__":

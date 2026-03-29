@@ -91,16 +91,20 @@ def _transcribe_whisper(audio_path: Path) -> list[dict]:
         vad_filter=True,  # skip silent gaps automatically
         language=None,  # auto-detect
     )
-    return [
-        {
-            "start": seg.start,
-            "end": seg.end,
-            "text": seg.text.strip(),
-            "speaker": None,
-        }
-        for seg in segments
-        if seg.text.strip()
-    ]
+    results = []
+    for seg in segments:
+        text = getattr(seg, "text", None)
+        if not text or not text.strip():
+            continue
+        results.append(
+            {
+                "start": seg.start,
+                "end": seg.end,
+                "text": text.strip(),
+                "speaker": None,
+            }
+        )
+    return results
 
 
 def _transcribe_parakeet(audio_path: Path) -> list[dict]:
@@ -115,10 +119,18 @@ def _transcribe_parakeet(audio_path: Path) -> list[dict]:
         text = str(getattr(sentence, "text", "")).strip()
         if not text:
             continue
+        try:
+            start = float(getattr(sentence, "start", 0.0))
+        except (TypeError, ValueError):
+            start = 0.0
+        try:
+            end = float(getattr(sentence, "end", 0.0))
+        except (TypeError, ValueError):
+            end = 0.0
         normalized.append(
             {
-                "start": float(getattr(sentence, "start", 0.0)),
-                "end": float(getattr(sentence, "end", 0.0)),
+                "start": start,
+                "end": end,
                 "text": text,
                 "speaker": None,
             }
@@ -128,6 +140,11 @@ def _transcribe_parakeet(audio_path: Path) -> list[dict]:
 
 def transcribe(audio_path: Path) -> list[dict]:
     """Return segments: [{start, end, text, speaker}] — speaker filled later by diarizer."""
+    audio_path = Path(audio_path)
+    if not audio_path.exists():
+        raise FileNotFoundError(f"Audio file not found: {audio_path}")
+    if audio_path.stat().st_size == 0:
+        raise FileNotFoundError(f"Audio file is empty: {audio_path}")
     backend = _backend()
     if backend == "parakeet":
         return _transcribe_parakeet(audio_path)

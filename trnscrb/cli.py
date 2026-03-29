@@ -266,11 +266,13 @@ def watch():
         evt          = get_current_or_upcoming_event()
         meeting_name = evt["title"] if evt else f"meeting-{started_at.strftime('%H%M')}"
 
+        from trnscrb.settings import load as _load_settings
+        _backend = _normalize_backend(_load_settings().get("transcription_backend"))
         try:
             segments = transcriber.transcribe(audio_path)
         except Exception as e:
             audio_path.unlink(missing_ok=True)
-            click.echo(f"  ✗ Transcription failed: {e}")
+            click.echo(f"  ✗ Transcription failed ({_backend}, {audio_path.name}): {e}")
             return
 
         import os
@@ -282,8 +284,8 @@ def watch():
             try:
                 diar     = diarizer.diarize(audio_path, hf_token)
                 segments = diarizer.merge(segments, diar)
-            except Exception:
-                pass
+            except Exception as e:
+                click.echo(f"  ⚠  Speaker diarization skipped: {e}")
 
         audio_path.unlink(missing_ok=True)
         text = storage.format_transcript(segments, started_at, meeting_name)
@@ -534,9 +536,11 @@ def _request_mic_permission() -> None:
         import time
         stream = sd.InputStream(channels=1, samplerate=16000, dtype="float32")
         stream.start()
-        time.sleep(0.3)
-        stream.stop()
-        stream.close()
+        try:
+            time.sleep(0.3)
+        finally:
+            stream.stop()
+            stream.close()
         click.echo(click.style("    ✓ Microphone access granted", fg="green"))
     except Exception as e:
         click.echo(click.style(f"    ⚠  Microphone: {e}", fg="yellow"))

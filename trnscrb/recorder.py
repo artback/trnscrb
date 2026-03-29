@@ -42,9 +42,13 @@ class Recorder:
         """Stop recording and return the path to a temporary WAV file."""
         self._recording = False
         if self._stream:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass
+            finally:
+                self._stream = None
 
         with self._lock:
             frames = list(self._frames)
@@ -56,8 +60,11 @@ class Recorder:
         audio_int16 = (audio * 32_767).astype(np.int16)
 
         tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        wavfile.write(tmp.name, SAMPLE_RATE, audio_int16)
-        return Path(tmp.name)
+        try:
+            wavfile.write(tmp.name, SAMPLE_RATE, audio_int16)
+            return Path(tmp.name)
+        finally:
+            tmp.close()
 
     @property
     def is_recording(self) -> bool:
@@ -66,9 +73,12 @@ class Recorder:
     # ── helpers ─────────────────────────────────────────────────────────────
 
     def _callback(self, indata, frames, time_info, status):
-        if self._recording:
-            with self._lock:
-                self._frames.append(indata.copy())
+        try:
+            if self._recording:
+                with self._lock:
+                    self._frames.append(indata.copy())
+        except Exception:
+            pass
 
     # ── class-level utilities ────────────────────────────────────────────────
 
