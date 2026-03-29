@@ -4,8 +4,12 @@ No extra dependencies — uses the osascript CLI that ships with macOS.
 Returns the current or next upcoming meeting within a 30-minute window.
 """
 import subprocess
+import time
 from typing import Optional
 
+from trnscrb.log import get_logger
+
+_log = get_logger("trnscrb.calendar_integration")
 
 _SCRIPT = """
 tell application "Calendar"
@@ -33,27 +37,45 @@ tell application "Calendar"
 end tell
 """
 
+_CACHE_TTL = 30  # seconds
+_cache: Optional[dict] = None
+_cache_time: float = 0
+
 
 def get_current_or_upcoming_event() -> Optional[dict]:
     """Return the nearest calendar event, or None if none found / Calendar denied."""
+    global _cache, _cache_time
+
+    now = time.time()
+    if _cache is not None and (now - _cache_time) < _CACHE_TTL:
+        return _cache
+
     try:
         result = subprocess.run(
             ["osascript", "-e", _SCRIPT],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=3,
         )
         output = result.stdout.strip()
         if not output or "||" not in output:
+            _cache = None
+            _cache_time = now
             return None
 
         parts = output.split("||")
         attendees = [a for a in parts[3].split(",") if a] if len(parts) > 3 else []
-        return {
+        evt = {
             "title": parts[0],
             "start": parts[1],
             "end": parts[2] if len(parts) > 2 else "",
             "attendees": attendees,
         }
+        _cache = evt
+        _cache_time = now
+        return evt
+    except subprocess.TimeoutExpired:
+        _log.debug("Calendar lookup timed out, returning cached result")
+        return _cache
     except Exception:
-        return None
+        return _cache

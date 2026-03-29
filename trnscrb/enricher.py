@@ -472,8 +472,29 @@ def generate_weekly_summary(
         transcripts=combined,
     )
 
-    _log.info("Generating weekly summary with provider=%s model=%s (%d transcripts)",
-              active_provider, selected_model, len(transcripts))
+    # Rough token estimate: ~4 chars per token. Warn if prompt is very large.
+    token_estimate = len(prompt) // 4
+    if token_estimate > 150_000:
+        _log.warning("Weekly prompt is very large (~%dk tokens, %d transcripts). "
+                     "Truncating to fit context window.",
+                     token_estimate // 1000, len(transcripts))
+        # Truncate transcripts to ~600k chars (~150k tokens), keeping newest first
+        max_chars = 600_000
+        combined = ""
+        for t in reversed(transcripts):
+            entry = f"\n--- {t['name']} ---\n{t['text']}\n"
+            if len(combined) + len(entry) > max_chars:
+                combined = f"\n[Earlier transcripts truncated for size]\n" + combined
+                break
+            combined = entry + combined
+        prompt = template.format(
+            week_start=week_start,
+            week_end=week_end,
+            transcripts=combined,
+        )
+
+    _log.info("Generating weekly summary with provider=%s model=%s (%d transcripts, ~%dk tokens)",
+              active_provider, selected_model, len(transcripts), len(prompt) // 4000)
     adapter = _ADAPTERS[active_provider]
     return adapter.enrich(prompt, config)
 

@@ -537,26 +537,44 @@ return ""
 """
 
 
+def _run_osascript(label: str, script: str) -> str | None:
+    """Run a single osascript and return the stripped output, or None."""
+    try:
+        r = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=4,
+        )
+        name = r.stdout.strip()
+        if name:
+            _log.debug("_browser_has_meeting_tab: found tab in %s (name=%s)",
+                       label, name)
+            return name
+    except subprocess.TimeoutExpired:
+        _log.debug("_browser_has_meeting_tab: osascript timeout for %s", label)
+    except Exception:
+        pass
+    return None
+
+
 def _browser_has_meeting_tab(return_name: bool = False):
     """
-    Check Chrome and Safari for open meeting tabs.
+    Check Chrome and Safari for open meeting tabs in parallel.
     return_name=False → returns bool (fast presence check)
     return_name=True  → returns str name or None
     """
-    for label, script in [("Chrome", _CHROME_TAB_SCRIPT),
-                           ("Safari", _SAFARI_TAB_SCRIPT)]:
-        try:
-            r = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=4,
-            )
-            name = r.stdout.strip()
-            if name:
-                _log.debug("_browser_has_meeting_tab: found tab in %s (name=%s)",
-                           label, name)
-                return name if return_name else True
-        except subprocess.TimeoutExpired:
-            _log.debug("_browser_has_meeting_tab: osascript timeout for %s", label)
-        except Exception:
-            pass
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    browsers = [("Chrome", _CHROME_TAB_SCRIPT), ("Safari", _SAFARI_TAB_SCRIPT)]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = {
+            pool.submit(_run_osascript, label, script): label
+            for label, script in browsers
+        }
+        for future in as_completed(futures, timeout=5):
+            try:
+                name = future.result()
+                if name:
+                    return name if return_name else True
+            except Exception:
+                pass
     return None if return_name else False

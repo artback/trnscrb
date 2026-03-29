@@ -134,6 +134,8 @@ class Recorder:
     # ── helpers ─────────────────────────────────────────────────────────────
 
     def _callback(self, indata, frames, time_info, status):
+        if status:
+            _log.warning("Audio stream status: %s", status)
         try:
             if self._recording and self._tmpfile:
                 audio_int16 = np.clip(indata, -1.0, 1.0)

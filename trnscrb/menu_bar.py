@@ -105,6 +105,22 @@ class TrnscrbApp(rumps.App):
             self._auto_item.title = "Auto-transcribe: On ✓"
         self._refresh_enrich_settings_menu()
 
+        # Preload transcription model in background so first recording is fast
+        threading.Thread(target=self._preload_model, daemon=True).start()
+
+    def _preload_model(self):
+        try:
+            backend = get_setting("transcription_backend") or "parakeet"
+            if backend == "parakeet":
+                from trnscrb.transcriber import _get_parakeet_model
+                _get_parakeet_model()
+            else:
+                from trnscrb.transcriber import _get_whisper_model
+                _get_whisper_model()
+            _log.info("Transcription model preloaded (%s)", backend)
+        except Exception as e:
+            _log.debug("Model preload skipped: %s", e)
+
     # ── watcher ───────────────────────────────────────────────────────────────
 
     def _start_watcher(self):
