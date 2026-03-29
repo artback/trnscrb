@@ -861,6 +861,11 @@ def _setup_login_item(binary_path: str) -> bool:
     <true/>
     <key>KeepAlive</key>
     <false/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>DYLD_LIBRARY_PATH</key>
+        <string>/opt/homebrew/lib:/usr/local/lib</string>
+    </dict>
     <key>StandardOutPath</key>
     <string>/tmp/trnscrb.log</string>
     <key>StandardErrorPath</key>

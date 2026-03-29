@@ -154,11 +154,22 @@ class Recorder:
 
     @staticmethod
     def find_blackhole_device() -> int | None:
+        # Prefer BlackHole, fall back to Aggregate Device (enterprise setups
+        # with Zoom/Teams virtual audio routed through an aggregate).
+        aggregate_idx = None
         for i, dev in enumerate(sd.query_devices()):
-            if "BlackHole" in dev["name"] and dev["max_input_channels"] > 0:
+            name = dev["name"]
+            if dev["max_input_channels"] <= 0:
+                continue
+            if "BlackHole" in name:
                 _log.debug("BlackHole device found at index %d", i)
                 return i
-        _log.debug("BlackHole device not found")
+            if "Aggregate Device" in name and aggregate_idx is None:
+                aggregate_idx = i
+        if aggregate_idx is not None:
+            _log.debug("Aggregate Device found at index %d (BlackHole not found)", aggregate_idx)
+            return aggregate_idx
+        _log.debug("No BlackHole or Aggregate Device found")
         return None
 
     @staticmethod

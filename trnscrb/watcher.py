@@ -50,7 +50,7 @@ APP_GONE_POLLS = 3  # N consecutive app-gone checks → start cooling (~12s)
 # activity signal already confirms something real is happening.
 _NATIVE_APPS = [
     ("zoom.us", "Zoom"),
-    ("Slack Helper", "Slack Huddle"),
+    ("Slack Helper (Renderer)", "Slack Huddle"),
     ("Microsoft Teams Helper", "Microsoft Teams"),
     ("Webex", "Webex"),
     ("Around Helper", "Around"),
@@ -69,6 +69,7 @@ _NATIVE_APPS = [
 # per-process CoreAudio mic check (step 1) when actually in a call.
 _ACTIVE_SESSION_PROCS = [
     "CptHost",  # Zoom: meeting capture host — only present during an active Zoom call
+    "caphost",  # Zoom: secondary capture process (newer versions)
     "Tuple",  # Tuple — only runs during an active screen-share session
 ]
 
@@ -449,7 +450,12 @@ def is_meeting_app_running() -> bool:
     except Exception:
         pass
 
-    # 3. Browser tab URL + title check
+    # 3. Teams desktop app — window count > 1 means active call
+    if _teams_call_active():
+        _log.debug("is_meeting_app_running: Teams window count check succeeded")
+        return True
+
+    # 4. Browser tab URL + title check
     result = _browser_has_meeting_tab()
     if result:
         _log.debug("is_meeting_app_running: browser tab check succeeded")
@@ -554,7 +560,7 @@ tell application "Google Chrome"
                 -- Filter out post-meeting pages ("Meeting ended", "You left the meeting")
                 if ttl does not contain "ended" and ttl does not contain "left" then return "Google Meet"
             end if
-            if u contains "teams.microsoft.com" then return "Microsoft Teams"
+            if u contains "teams.microsoft.com/meet" or u contains "teams.microsoft.com/v2/meet" then return "Microsoft Teams"
             if u contains "app.huddle.team" then return "Huddle"
             if u contains "zoom.us/j/" then return "Zoom"
         end repeat
@@ -577,7 +583,7 @@ tell application "Safari"
                     -- Filter out post-meeting pages ("Meeting ended", "You left the meeting")
                     if ttl does not contain "ended" and ttl does not contain "left" then return "Google Meet"
                 end if
-                if u contains "teams.microsoft.com" then return "Microsoft Teams"
+                if u contains "teams.microsoft.com/meet" or u contains "teams.microsoft.com/v2/meet" then return "Microsoft Teams"
                 if u contains "app.huddle.team" then return "Huddle"
                 if u contains "zoom.us/j/" then return "Zoom"
             end try
@@ -586,6 +592,25 @@ tell application "Safari"
 end tell
 return ""
 """
+
+
+def _teams_call_active() -> bool:
+    """True if Microsoft Teams has an active call (detected by window count > 1)."""
+    try:
+        r = subprocess.run(
+            [
+                "osascript",
+                "-e",
+                'tell application "System Events" to tell process "MSTeams"'
+                " to get count of windows",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=4,
+        )
+        return int(r.stdout.strip()) > 1
+    except Exception:
+        return False
 
 
 def _run_osascript(label: str, script: str) -> str | None:
