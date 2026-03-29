@@ -10,6 +10,9 @@ from trnscrb.log import get_logger
 
 _log = get_logger("trnscrb.enricher")
 
+_CONNECT_TIMEOUT = 10   # seconds – quick check for test_connection / list_models
+_ENRICH_TIMEOUT = 120   # seconds – local LLMs need time for long transcripts
+
 _PROMPT_TEMPLATE = """You are analyzing a meeting transcript.{context}
 
 Transcript:
@@ -74,7 +77,7 @@ class OllamaAdapter:
             "stream": False,
             "messages": [{"role": "user", "content": prompt}],
         }
-        response = _json_request(config["endpoint"], "/api/chat", method="POST", payload=payload)
+        response = _json_request(config["endpoint"], "/api/chat", method="POST", payload=payload, timeout=_ENRICH_TIMEOUT)
         message = response.get("message", {})
         content = str(message.get("content") or "").strip()
         if not content:
@@ -350,7 +353,7 @@ def _build_runtime_config(provider: str, endpoint: str | None, api_key: str, mod
     }
 
 
-def _json_request(base_endpoint: str, path: str, method: str = "GET", payload: dict | None = None) -> dict:
+def _json_request(base_endpoint: str, path: str, method: str = "GET", payload: dict | None = None, timeout: int = _CONNECT_TIMEOUT) -> dict:
     url = base_endpoint.rstrip("/") + path
     body = json.dumps(payload).encode("utf-8") if payload is not None else None
     req = request.Request(
@@ -359,7 +362,7 @@ def _json_request(base_endpoint: str, path: str, method: str = "GET", payload: d
         method=method,
         headers={"Content-Type": "application/json"},
     )
-    response = request.urlopen(req, timeout=10)
+    response = request.urlopen(req, timeout=timeout)
     try:
         raw = response.read()
     finally:

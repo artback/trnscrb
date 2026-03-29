@@ -6,21 +6,37 @@ Requires a HuggingFace token with access to:
 """
 from pathlib import Path
 
+from trnscrb.log import get_logger
+
+log = get_logger(__name__)
+
+_pipeline = None
+
+
+def _get_pipeline(hf_token: str):
+    """Return the cached pyannote pipeline, loading it on first call."""
+    global _pipeline
+    if _pipeline is None:
+        from pyannote.audio import Pipeline
+        import torch
+
+        log.info("Loading pyannote speaker-diarization pipeline …")
+        _pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.1",
+            use_auth_token=hf_token,
+        )
+
+        # Prefer Apple Silicon Metal, fallback to CPU
+        if torch.backends.mps.is_available():
+            _pipeline = _pipeline.to(torch.device("mps"))
+
+        log.info("Diarization pipeline ready")
+    return _pipeline
+
 
 def diarize(audio_path: Path, hf_token: str) -> list[dict]:
     """Return [{start, end, speaker}] segments."""
-    from pyannote.audio import Pipeline
-    import torch
-
-    pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-3.1",
-        use_auth_token=hf_token,
-    )
-
-    # Prefer Apple Silicon Metal, fallback to CPU
-    if torch.backends.mps.is_available():
-        pipeline = pipeline.to(torch.device("mps"))
-
+    pipeline = _get_pipeline(hf_token)
     diarization = pipeline(str(audio_path))
 
     return [
