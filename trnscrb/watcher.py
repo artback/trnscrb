@@ -4,7 +4,9 @@ Uses CoreAudio's kAudioDevicePropertyDeviceIsRunningSomewhere to detect
 microphone activity — the same signal that lights up the orange menu-bar dot.
 
 Two stop conditions (whichever comes first):
-  1. Mic goes idle for GRACE_SECS (normal call end)
+  1. Mic goes idle AND meeting app/tab is no longer detected for GRACE_SECS.
+     When mic is off but the meeting app is still running (user is muted),
+     recording continues to avoid splitting a single call into multiple files.
   2. No meeting app/tab detected for APP_GONE_POLLS consecutive app-checks,
      even if mic is still technically active (handles Chrome keeping mic warm
      after leaving Google Meet).  App is checked every APP_POLL_EVERY mic
@@ -13,12 +15,12 @@ Two stop conditions (whichever comes first):
 State machine:
   idle  ──(mic on 5s)──► warming ──(5s elapsed)──► recording
                              │                          │
-                         (mic off)          (mic off OR meeting gone)
-                             │                          │
-                             ▼                          ▼
+                         (mic off)          (mic off AND app gone)
+                             │                 OR (meeting gone)
+                             ▼                          │
                            idle                      cooling
                                                         │
-                                                 (5s elapsed)
+                                              (5s elapsed + app gone)
                                                         │
                                                   stop + save
 """
@@ -126,6 +128,7 @@ class MicWatcher:
         # Separate the fast mic check (every POLL_SECS) from the slow app check
         # (osascript can take 3-4 s — running it every poll would block the loop).
         _app_counter = 0   # counts mic polls; app is checked every APP_POLL_EVERY
+        _app_running = False  # cached result of the last meeting-app check
 
         while self._running:
             active  = is_mic_in_use()
@@ -149,40 +152,64 @@ class MicWatcher:
                     self._since        = now
                     self._no_app_polls = 0
                     _app_counter       = APP_POLL_EVERY  # check app on first recording poll
+                    _app_running       = True   # assume running at recording start
                     meeting_name       = detect_meeting()
                     self.on_start(meeting_name)
 
             elif self._state == "recording":
+                # Periodically check if the meeting app is still running.
+                # This is the slow check (osascript) so we only do it every
+                # APP_POLL_EVERY polls.
+                _app_counter += 1
+                if _app_counter >= APP_POLL_EVERY:
+                    _app_counter = 0
+                    _app_running = is_meeting_app_running()
+                    if _app_running:
+                        self._no_app_polls = 0
+                    else:
+                        self._no_app_polls += 1
+
                 if not active:
-                    # Mic went silent — start grace period immediately
-                    self._state        = "cooling"
-                    self._since        = now
-                    self._no_app_polls = 0
+                    if _app_running:
+                        # Mic off but meeting app still open — user is muted.
+                        # Stay in recording to avoid splitting the call.
+                        pass
+                    else:
+                        # Mic off AND meeting app not detected → start grace period
+                        self._state        = "cooling"
+                        self._since        = now
+                        self._no_app_polls = 0
+                        _app_counter       = APP_POLL_EVERY  # check app immediately in cooling
                 else:
-                    # Mic still active — periodically check if the meeting app is
-                    # still open.  Chrome keeps mic "warm" after leaving Meet, so
-                    # we need this secondary signal.
-                    _app_counter += 1
-                    if _app_counter >= APP_POLL_EVERY:
-                        _app_counter = 0
-                        if is_meeting_app_running():
-                            self._no_app_polls = 0
-                        else:
-                            self._no_app_polls += 1
-                            if self._no_app_polls >= APP_GONE_POLLS:
-                                # Meeting app gone — treat as call ended
-                                self._state        = "cooling"
-                                self._since        = now
-                                self._no_app_polls = 0
+                    # Mic still active — if meeting app has been gone for multiple
+                    # consecutive checks, Chrome is keeping mic "warm" after leaving.
+                    if self._no_app_polls >= APP_GONE_POLLS:
+                        self._state        = "cooling"
+                        self._since        = now
+                        self._no_app_polls = 0
 
             elif self._state == "cooling":
-                if active and is_meeting_app_running():
-                    # Meeting came back (e.g. rejoined)
+                if active:
+                    # Mic came back — resume recording
                     self._state        = "recording"
                     self._since        = now
                     self._no_app_polls = 0
                     _app_counter       = APP_POLL_EVERY
-                elif elapsed >= GRACE_SECS:
+                else:
+                    # Mic still off — check if meeting app is still running
+                    _app_counter += 1
+                    if _app_counter >= APP_POLL_EVERY:
+                        _app_counter = 0
+                        _app_running = is_meeting_app_running()
+                        if _app_running:
+                            # Meeting still active — user is muted, resume recording
+                            self._state        = "recording"
+                            self._since        = now
+                            self._no_app_polls = 0
+
+                # Only stop if still in cooling (app check may have moved us back)
+                # and the grace period has elapsed.
+                if self._state == "cooling" and elapsed >= GRACE_SECS:
                     duration = (
                         (now - self._rec_started).total_seconds()
                         if self._rec_started else 0
