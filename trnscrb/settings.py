@@ -51,6 +51,7 @@ _DEFAULT_ENRICH_PROFILES = {
 
 _DEFAULTS: dict = {
     "auto_record": True,  # start watching for mic activity on launch
+    "auto_enrich": True,  # run LLM enrichment automatically after transcription
     "transcription_backend": "parakeet",  # parakeet | whisper
     "parakeet_model_id": "mlx-community/parakeet-tdt-0.6b-v3",
     "model_size": "small",  # whisper model size (used when backend=whisper)

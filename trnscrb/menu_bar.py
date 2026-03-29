@@ -15,6 +15,7 @@ from pathlib import Path
 import rumps
 
 from trnscrb import recorder as rec_module, transcriber, diarizer, storage, enricher
+from trnscrb.enricher import enrich_transcript
 from trnscrb.recorder import cleanup_stale_temp_files
 from trnscrb.calendar_integration import get_current_or_upcoming_event
 from trnscrb.icon import icon_path, generate_icons
@@ -441,6 +442,21 @@ class TrnscrbApp(rumps.App):
             storage.save_transcript(path, text)
             _log.info("Transcription complete: %s -> %s", meeting_name, path.name)
             _notify("Trnscrb", f"Saved: {meeting_name}", f"~/meeting-notes/{path.name}")
+
+            # Auto-enrich if enabled
+            if get_setting("auto_enrich"):
+                try:
+                    _log.info("Auto-enriching: %s", meeting_name)
+                    calendar_event = evt if evt else None
+                    result = enrich_transcript(text, calendar_event=calendar_event)
+                    enriched = result["enriched_transcript"]
+                    updated = enriched + "\n\n" + "=" * 60 + "\n\n" + result["enrichment"]
+                    storage.save_transcript(path, updated)
+                    _log.info("Auto-enrich complete: %s (provider=%s)", meeting_name, result["provider"])
+                    _notify("Trnscrb", f"Enriched: {meeting_name}", f"Summary + action items added")
+                except Exception as e:
+                    _log.warning("Auto-enrich failed for %s: %s", meeting_name, e)
+                    _notify("Trnscrb", "Enrichment skipped", str(e)[:180])
         except Exception as e:
             _log.error("Unexpected error in _process: %s", e, exc_info=True)
             _notify("Trnscrb", "Error", str(e)[:180])

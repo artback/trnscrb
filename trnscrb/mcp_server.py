@@ -195,6 +195,42 @@ def get_calendar_context() -> str:
 
 
 @mcp.tool()
+def search_transcripts(query: str) -> str:
+    """
+    Search across all saved transcripts for a keyword or phrase.
+    Returns matching lines with context from each transcript.
+
+    Args:
+        query: The search term (case-insensitive).
+    """
+    import re
+    files = sorted(storage.NOTES_DIR.glob("*.txt"), reverse=True)
+    if not files:
+        return "No transcripts found in ~/meeting-notes/"
+
+    pattern = re.compile(re.escape(query), re.IGNORECASE)
+    results = []
+    for f in files:
+        try:
+            lines = f.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            continue
+        hits = [i for i, line in enumerate(lines) if pattern.search(line)]
+        if not hits:
+            continue
+        matches = []
+        for hit in hits:
+            start = max(0, hit - 1)
+            end = min(len(lines), hit + 2)
+            matches.append("\n".join(lines[start:end]))
+        results.append(f"## {f.name}\n" + "\n---\n".join(matches))
+
+    if not results:
+        return f"No matches for '{query}'."
+    return "\n\n".join(results[:10])
+
+
+@mcp.tool()
 def enrich_transcript(transcript_id: str) -> str:
     """
     Run an LLM pass on a saved transcript to produce a summary,

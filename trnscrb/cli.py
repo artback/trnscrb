@@ -283,6 +283,20 @@ def watch():
         storage.save_transcript(path, text)
         click.echo(f"  ✓ Saved: {path.name}")
 
+        from trnscrb.settings import get as _get_setting
+        if _get_setting("auto_enrich"):
+            click.echo("  🔄 Enriching transcript…")
+            try:
+                from trnscrb.enricher import enrich_transcript
+                result = enrich_transcript(text, calendar_event=evt)
+                enriched = result["enriched_transcript"]
+                updated = enriched + "\n\n" + "=" * 60 + "\n\n" + result["enrichment"]
+                storage.save_transcript(path, updated)
+                click.echo(f"  ✓ Enriched: summary + action items added ({result['provider']})")
+            except Exception as e:
+                _log.warning("Auto-enrich failed: %s", e)
+                click.echo(f"  ⚠  Enrichment skipped: {e}")
+
     watcher = MicWatcher(on_start=on_start, on_stop=on_stop)
     watcher.start()
 
@@ -317,6 +331,62 @@ def list_cmd():
     for t in transcripts:
         size_kb = t["size"] // 1024 or 1
         click.echo(f"  {t['id']}  ({t['modified'][:16]})  {size_kb} KB")
+
+
+# ── search ────────────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.argument("query")
+@click.option("-n", "--context", default=1, help="Number of context lines around each match.")
+def search(query: str, context: int):
+    """Search across all transcripts for a keyword or phrase."""
+    from trnscrb import storage
+    import re
+
+    files = sorted(storage.NOTES_DIR.glob("*.txt"), reverse=True)
+    if not files:
+        click.echo("No transcripts found in ~/meeting-notes/")
+        return
+
+    pattern = re.compile(re.escape(query), re.IGNORECASE)
+    total_matches = 0
+
+    for f in files:
+        try:
+            lines = f.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            continue
+
+        hits = [i for i, line in enumerate(lines) if pattern.search(line)]
+        if not hits:
+            continue
+
+        total_matches += len(hits)
+        click.echo(click.style(f"\n{f.name}", fg="cyan", bold=True))
+
+        shown = set()
+        for hit in hits:
+            start = max(0, hit - context)
+            end = min(len(lines), hit + context + 1)
+            for i in range(start, end):
+                if i in shown:
+                    continue
+                shown.add(i)
+                line = lines[i]
+                if i == hit:
+                    # Highlight matches
+                    highlighted = pattern.sub(
+                        lambda m: click.style(m.group(), fg="yellow", bold=True),
+                        line,
+                    )
+                    click.echo(f"  {i + 1:4d}  {highlighted}")
+                else:
+                    click.echo(click.style(f"  {i + 1:4d}  {line}", dim=True))
+
+    if total_matches:
+        click.echo(f"\n{total_matches} match(es) across {len(files)} transcript(s).")
+    else:
+        click.echo(f"No matches for '{query}'.")
 
 
 # ── show ──────────────────────────────────────────────────────────────────────
