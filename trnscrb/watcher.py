@@ -32,6 +32,10 @@ import time
 from datetime import datetime
 from typing import Callable
 
+from trnscrb.log import get_logger
+
+_log = get_logger("trnscrb.watcher")
+
 # ── Timing thresholds ─────────────────────────────────────────────────────────
 WARMUP_SECS    = 5    # mic must be active this long before we start
 GRACE_SECS     = 5    # mic must be idle this long before we stop
@@ -137,6 +141,7 @@ class MicWatcher:
 
             if self._state == "idle":
                 if active:
+                    _log.debug("state %s → %s", "idle", "warming")
                     self._state        = "warming"
                     self._since        = now
                     self._no_app_polls = 0
@@ -144,9 +149,11 @@ class MicWatcher:
             elif self._state == "warming":
                 if not active:
                     # False positive — Siri, dictation, brief mic check
+                    _log.debug("state %s → %s", "warming", "idle")
                     self._state = "idle"
                     self._since = None
                 elif elapsed >= WARMUP_SECS:
+                    _log.debug("state %s → %s", "warming", "recording")
                     self._rec_started  = now
                     self._state        = "recording"
                     self._since        = now
@@ -154,6 +161,7 @@ class MicWatcher:
                     _app_counter       = APP_POLL_EVERY  # check app on first recording poll
                     _app_running       = True   # assume running at recording start
                     meeting_name       = detect_meeting()
+                    _log.info("on_start firing — meeting_name=%s", meeting_name)
                     self.on_start(meeting_name)
 
             elif self._state == "recording":
@@ -168,17 +176,21 @@ class MicWatcher:
                         self._no_app_polls = 0
                     else:
                         self._no_app_polls += 1
+                    _log.debug("app check: running=%s, _no_app_polls=%d",
+                               _app_running, self._no_app_polls)
 
                 if not active:
                     if _app_running:
                         # Mic off but meeting app still open — user is muted.
                         # Stay in recording to avoid splitting the call.
+                        _log.debug("mic idle, meeting app active — treating as muted")
                         self._no_app_polls = 0
                     elif self._no_app_polls >= APP_GONE_POLLS:
                         # Mic off AND meeting app gone for multiple consecutive
                         # checks — start grace period.  Requiring multiple checks
                         # prevents a single slow/failed osascript from stopping
                         # the recording while the user is just muted.
+                        _log.debug("state %s → %s", "recording", "cooling")
                         self._state        = "cooling"
                         self._since        = now
                         self._no_app_polls = 0
@@ -187,6 +199,7 @@ class MicWatcher:
                     # consecutive checks, Chrome/Safari is keeping mic "warm"
                     # after leaving the meeting.
                     if self._no_app_polls >= APP_GONE_POLLS:
+                        _log.debug("state %s → %s", "recording", "cooling")
                         self._state        = "cooling"
                         self._since        = now
                         self._no_app_polls = 0

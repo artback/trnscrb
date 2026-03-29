@@ -11,6 +11,10 @@ import numpy as np
 import sounddevice as sd
 import scipy.io.wavfile as wavfile
 
+from trnscrb.log import get_logger
+
+_log = get_logger("trnscrb.recorder")
+
 SAMPLE_RATE = 16_000  # fixed capture rate for local transcription backends
 
 
@@ -37,6 +41,7 @@ class Recorder:
             blocksize=1024,
         )
         self._stream.start()
+        _log.info("Recording started (device=%s)", self.device)
 
     def stop(self) -> Path | None:
         """Stop recording and return the path to a temporary WAV file."""
@@ -46,7 +51,7 @@ class Recorder:
                 self._stream.stop()
                 self._stream.close()
             except Exception:
-                pass
+                _log.warning("Stream cleanup failed", exc_info=True)
             finally:
                 self._stream = None
 
@@ -54,6 +59,7 @@ class Recorder:
             frames = list(self._frames)
 
         if not frames:
+            _log.warning("Recording stopped with no frames captured")
             return None
 
         audio = np.concatenate(frames, axis=0).flatten()
@@ -62,7 +68,9 @@ class Recorder:
         tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         try:
             wavfile.write(tmp.name, SAMPLE_RATE, audio_int16)
-            return Path(tmp.name)
+            out = Path(tmp.name)
+            _log.info("Recording stopped: %d frames, saved to %s", len(frames), out)
+            return out
         finally:
             tmp.close()
 

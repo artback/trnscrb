@@ -24,6 +24,9 @@ from mcp.server.fastmcp import FastMCP
 
 from trnscrb import storage, recorder as rec_module, diarizer, transcriber
 from trnscrb.calendar_integration import get_current_or_upcoming_event
+from trnscrb.log import get_logger
+
+_log = get_logger("trnscrb.mcp_server")
 
 mcp = FastMCP("trnscrb")
 
@@ -52,6 +55,7 @@ def start_recording() -> str:
         _recorder.start()
         _recording_started_at = datetime.now()
     source = "BlackHole (system + mic)" if device is not None else "built-in mic"
+    _log.info("start_recording: device=%s", source)
     return f"Recording started at {_recording_started_at.strftime('%H:%M')} using {source}."
 
 
