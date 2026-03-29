@@ -15,6 +15,7 @@ from pathlib import Path
 import rumps
 
 from trnscrb import recorder as rec_module, transcriber, diarizer, storage, enricher
+from trnscrb.recorder import cleanup_stale_temp_files
 from trnscrb.calendar_integration import get_current_or_upcoming_event
 from trnscrb.icon import icon_path, generate_icons
 from trnscrb.watcher import MicWatcher
@@ -42,6 +43,8 @@ def _notify(title: str, subtitle: str, message: str) -> None:
 
 class TrnscrbApp(rumps.App):
     def __init__(self):
+        cleanup_stale_temp_files()
+
         try:
             generate_icons()
         except Exception:
@@ -91,6 +94,7 @@ class TrnscrbApp(rumps.App):
         self._recorder:   rec_module.Recorder | None = None
         self._started_at: datetime | None = None
         self._watcher:    MicWatcher | None = None
+        self._process_thread: threading.Thread | None = None
 
         self._set_state("idle")
 
@@ -313,8 +317,30 @@ class TrnscrbApp(rumps.App):
     def quit_app(self, _):
         if self._watcher:
             self._watcher.stop()
+
+        # If a recording is in progress, stop it and save the WAV so it isn't lost.
         if self._recorder and self._recorder.is_recording:
-            self._recorder.stop()
+            _log.info("Quit requested while recording; stopping recorder and saving audio")
+            audio_path = self._recorder.stop()
+            self._recorder = None
+            if audio_path:
+                notes_dir = storage.ensure_notes_dir()
+                stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                saved = notes_dir / f"{stamp}_unsaved-recording.wav"
+                try:
+                    import shutil
+                    shutil.move(str(audio_path), str(saved))
+                    _log.info("Saved in-progress recording to %s", saved)
+                except Exception:
+                    _log.error("Failed to rescue recording from %s", audio_path, exc_info=True)
+
+        # If a background transcription thread is running, give it a few seconds.
+        if self._process_thread and self._process_thread.is_alive():
+            _log.info("Waiting up to 5 s for transcription thread to finish")
+            self._process_thread.join(timeout=5)
+            if self._process_thread.is_alive():
+                _log.warning("Transcription thread still running; quitting anyway")
+
         rumps.quit_application()
 
     # ── shared start / stop ───────────────────────────────────────────────────
@@ -342,9 +368,10 @@ class TrnscrbApp(rumps.App):
         self._recorder = None
         self._set_state("transcribing")
 
-        threading.Thread(
+        self._process_thread = threading.Thread(
             target=self._process, args=(recorder, started_at), daemon=True
-        ).start()
+        )
+        self._process_thread.start()
 
     # ── auto-record callbacks ─────────────────────────────────────────────────
 
