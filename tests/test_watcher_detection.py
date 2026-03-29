@@ -3,7 +3,7 @@
 All tests mock subprocess, osascript, and CoreAudio — no real devices or
 network access required.
 """
-import time
+
 import unittest
 from datetime import datetime
 from unittest.mock import MagicMock, patch
@@ -21,11 +21,14 @@ class WatcherCrashRecoveryTest(unittest.TestCase):
         w._running = True
 
         import threading
+
         new_thread = MagicMock(spec=threading.Thread)
 
-        with patch.object(w, "_loop_inner", side_effect=RuntimeError("crash")), \
-             patch.object(watcher.time, "sleep") as mock_sleep, \
-             patch("threading.Thread", return_value=new_thread) as mock_thread_cls:
+        with (
+            patch.object(w, "_loop_inner", side_effect=RuntimeError("crash")),
+            patch.object(watcher.time, "sleep") as mock_sleep,
+            patch("threading.Thread", return_value=new_thread) as mock_thread_cls,
+        ):
             w._loop()
 
         # Should have slept 5s before restart
@@ -42,8 +45,10 @@ class WatcherCrashRecoveryTest(unittest.TestCase):
         def crashing_inner():
             raise RuntimeError("simulated crash")
 
-        with patch.object(w, "_loop_inner", side_effect=crashing_inner), \
-             patch.object(watcher.time, "sleep"):
+        with (
+            patch.object(w, "_loop_inner", side_effect=crashing_inner),
+            patch.object(watcher.time, "sleep"),
+        ):
             w._loop()
 
         # _running was False, so no new thread should be started
@@ -60,8 +65,10 @@ class WatcherCrashRecoveryTest(unittest.TestCase):
             w._running = False  # prevent infinite restart loop
             raise RuntimeError("boom")
 
-        with patch.object(w, "_loop_inner", side_effect=crashing_inner), \
-             patch.object(watcher.time, "sleep") as mock_sleep:
+        with (
+            patch.object(w, "_loop_inner", side_effect=crashing_inner),
+            patch.object(watcher.time, "sleep") as mock_sleep,
+        ):
             w._loop()
 
         mock_sleep.assert_called_once_with(5)
@@ -72,9 +79,13 @@ class DetectMeetingPriorityTest(unittest.TestCase):
 
     def test_browser_tab_checked_before_native_apps(self):
         """If browser has a meeting tab, native app check should be skipped."""
-        with patch.object(watcher, "_browser_has_meeting_tab", return_value="Google Meet") as mock_browser, \
-             patch.object(watcher, "_pids_using_mic_input") as mock_pids, \
-             patch.object(watcher, "_meeting_app_pids") as mock_app_pids:
+        with (
+            patch.object(
+                watcher, "_browser_has_meeting_tab", return_value="Google Meet"
+            ) as mock_browser,
+            patch.object(watcher, "_pids_using_mic_input") as mock_pids,
+            patch.object(watcher, "_meeting_app_pids"),
+        ):
             result = detect_meeting()
 
         self.assertEqual(result, "Google Meet")
@@ -84,10 +95,12 @@ class DetectMeetingPriorityTest(unittest.TestCase):
 
     def test_native_app_used_when_no_browser_tab(self):
         """If no browser tab, should fall through to native app detection."""
-        with patch.object(watcher, "_browser_has_meeting_tab", return_value=None), \
-             patch.object(watcher, "_pids_using_mic_input", return_value={42}), \
-             patch.object(watcher, "_meeting_app_pids", return_value={42}), \
-             patch("subprocess.run") as mock_run:
+        with (
+            patch.object(watcher, "_browser_has_meeting_tab", return_value=None),
+            patch.object(watcher, "_pids_using_mic_input", return_value={42}),
+            patch.object(watcher, "_meeting_app_pids", return_value={42}),
+            patch("subprocess.run") as mock_run,
+        ):
             # ps output: PID 42 is zoom.us
             mock_run.return_value = MagicMock(
                 stdout="   42 /Applications/zoom.us.app/Contents/Frameworks/zoom.us",
@@ -99,10 +112,12 @@ class DetectMeetingPriorityTest(unittest.TestCase):
 
     def test_session_only_fallback_when_no_pid_match(self):
         """Fallback to session-only process list (CptHost for Zoom)."""
-        with patch.object(watcher, "_browser_has_meeting_tab", return_value=None), \
-             patch.object(watcher, "_pids_using_mic_input", return_value=set()), \
-             patch.object(watcher, "_meeting_app_pids", return_value=set()), \
-             patch("subprocess.run") as mock_run:
+        with (
+            patch.object(watcher, "_browser_has_meeting_tab", return_value=None),
+            patch.object(watcher, "_pids_using_mic_input", return_value=set()),
+            patch.object(watcher, "_meeting_app_pids", return_value=set()),
+            patch("subprocess.run") as mock_run,
+        ):
             # First call: native app PID check (empty intersection, falls through)
             # Second call: session-only process check
             mock_run.return_value = MagicMock(
@@ -116,17 +131,20 @@ class DetectMeetingPriorityTest(unittest.TestCase):
     def test_facetime_background_not_matched_in_fallback(self):
         """FaceTime persists as a background process — it should NOT match
         in the session-only fallback (_SESSION_FALLBACK does not include it)."""
-        with patch.object(watcher, "_browser_has_meeting_tab", return_value=None), \
-             patch.object(watcher, "_pids_using_mic_input", return_value=set()), \
-             patch.object(watcher, "_meeting_app_pids", return_value=set()), \
-             patch("subprocess.run") as mock_run, \
-             patch.dict("sys.modules", {"trnscrb.calendar_integration": MagicMock()}):
+        with (
+            patch.object(watcher, "_browser_has_meeting_tab", return_value=None),
+            patch.object(watcher, "_pids_using_mic_input", return_value=set()),
+            patch.object(watcher, "_meeting_app_pids", return_value=set()),
+            patch("subprocess.run") as mock_run,
+            patch.dict("sys.modules", {"trnscrb.calendar_integration": MagicMock()}),
+        ):
             mock_run.return_value = MagicMock(
                 stdout="/System/Applications/FaceTime.app/Contents/MacOS/FaceTime\n",
                 returncode=0,
             )
             # Also mock the calendar import so it doesn't try real calendar access
             import sys
+
             cal_mod = sys.modules["trnscrb.calendar_integration"]
             cal_mod.get_current_or_upcoming_event.return_value = None
 
@@ -134,16 +152,19 @@ class DetectMeetingPriorityTest(unittest.TestCase):
 
         # FaceTime is NOT in _SESSION_FALLBACK, so it should fall through
         # to the calendar check (which returns None) then to the timestamp fallback
-        self.assertTrue(result.startswith("meeting-"),
-                        f"Expected timestamp fallback, got: {result}")
+        self.assertTrue(
+            result.startswith("meeting-"), f"Expected timestamp fallback, got: {result}"
+        )
 
     def test_facetime_matched_only_when_using_mic(self):
         """FaceTime should be detected via native app path only when its PID
         is actively using the mic (cross-referenced with CoreAudio)."""
-        with patch.object(watcher, "_browser_has_meeting_tab", return_value=None), \
-             patch.object(watcher, "_pids_using_mic_input", return_value={99}), \
-             patch.object(watcher, "_meeting_app_pids", return_value={99}), \
-             patch("subprocess.run") as mock_run:
+        with (
+            patch.object(watcher, "_browser_has_meeting_tab", return_value=None),
+            patch.object(watcher, "_pids_using_mic_input", return_value={99}),
+            patch.object(watcher, "_meeting_app_pids", return_value={99}),
+            patch("subprocess.run") as mock_run,
+        ):
             mock_run.return_value = MagicMock(
                 stdout="   99 /System/Applications/FaceTime.app/Contents/MacOS/FaceTime",
                 returncode=0,
@@ -170,7 +191,8 @@ class BrowserMeetingTabFilterTest(unittest.TestCase):
         """_browser_has_meeting_tab returns str when return_name=True, bool otherwise."""
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
-                stdout="Google Meet\n", returncode=0,
+                stdout="Google Meet\n",
+                returncode=0,
             )
             # return_name=True → str
             result = watcher._browser_has_meeting_tab(return_name=True)
@@ -178,7 +200,8 @@ class BrowserMeetingTabFilterTest(unittest.TestCase):
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
-                stdout="Google Meet\n", returncode=0,
+                stdout="Google Meet\n",
+                returncode=0,
             )
             # return_name=False → bool
             result = watcher._browser_has_meeting_tab(return_name=False)
@@ -199,7 +222,10 @@ class BrowserMeetingTabFilterTest(unittest.TestCase):
     def test_browser_timeout_does_not_raise(self):
         """osascript timeout should be handled gracefully."""
         import subprocess as sp
-        with patch("subprocess.run", side_effect=sp.TimeoutExpired(cmd="osascript", timeout=4)):
+
+        with patch(
+            "subprocess.run", side_effect=sp.TimeoutExpired(cmd="osascript", timeout=4)
+        ):
             result = watcher._browser_has_meeting_tab(return_name=False)
             self.assertIs(result, False)
 
@@ -243,8 +269,10 @@ class WatcherStopDuringTransitionsTest(unittest.TestCase):
                 w._running = False  # simulate stop() after a few iterations
             return True
 
-        with patch("trnscrb.watcher.is_mic_in_use", side_effect=fake_mic_in_use), \
-             patch("trnscrb.watcher.time.sleep"):
+        with (
+            patch("trnscrb.watcher.is_mic_in_use", side_effect=fake_mic_in_use),
+            patch("trnscrb.watcher.time.sleep"),
+        ):
             w._loop_inner()
 
         # Loop exited cleanly — state should be warming (never reached recording
@@ -266,9 +294,11 @@ class WatcherStopDuringTransitionsTest(unittest.TestCase):
                 w._running = False
             return True
 
-        with patch("trnscrb.watcher.is_mic_in_use", side_effect=fake_mic_in_use), \
-             patch("trnscrb.watcher.time.sleep"), \
-             patch("trnscrb.watcher.is_meeting_app_running", return_value=True):
+        with (
+            patch("trnscrb.watcher.is_mic_in_use", side_effect=fake_mic_in_use),
+            patch("trnscrb.watcher.time.sleep"),
+            patch("trnscrb.watcher.is_meeting_app_running", return_value=True),
+        ):
             w._loop_inner()
 
         self.assertFalse(w._running)
@@ -290,9 +320,11 @@ class WatcherStopDuringTransitionsTest(unittest.TestCase):
                 w._running = False
             return False
 
-        with patch("trnscrb.watcher.is_mic_in_use", side_effect=fake_mic_in_use), \
-             patch("trnscrb.watcher.time.sleep"), \
-             patch("trnscrb.watcher.is_meeting_app_running", return_value=False):
+        with (
+            patch("trnscrb.watcher.is_mic_in_use", side_effect=fake_mic_in_use),
+            patch("trnscrb.watcher.time.sleep"),
+            patch("trnscrb.watcher.is_meeting_app_running", return_value=False),
+        ):
             w._loop_inner()
 
         self.assertFalse(w._running)
@@ -309,7 +341,9 @@ class MinSaveSecsTest(unittest.TestCase):
         # Recording started 10 seconds ago — shorter than MIN_SAVE_SECS
         now = datetime(2026, 3, 29, 12, 0, 30)
         w._rec_started = datetime(2026, 3, 29, 12, 0, 20)  # 10s duration
-        w._since = datetime(2026, 3, 29, 12, 0, 20)  # cooling started 10s ago (> GRACE_SECS)
+        w._since = datetime(
+            2026, 3, 29, 12, 0, 20
+        )  # cooling started 10s ago (> GRACE_SECS)
 
         call_count = [0]
 
@@ -319,10 +353,12 @@ class MinSaveSecsTest(unittest.TestCase):
                 w._running = False
             return False
 
-        with patch("trnscrb.watcher.is_mic_in_use", side_effect=fake_mic_in_use), \
-             patch("trnscrb.watcher.time.sleep"), \
-             patch("trnscrb.watcher.is_meeting_app_running", return_value=False), \
-             patch("trnscrb.watcher.datetime") as mock_dt:
+        with (
+            patch("trnscrb.watcher.is_mic_in_use", side_effect=fake_mic_in_use),
+            patch("trnscrb.watcher.time.sleep"),
+            patch("trnscrb.watcher.is_meeting_app_running", return_value=False),
+            patch("trnscrb.watcher.datetime") as mock_dt,
+        ):
             mock_dt.now.return_value = now
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
             w._loop_inner()
@@ -337,7 +373,9 @@ class MinSaveSecsTest(unittest.TestCase):
         w._state = "cooling"
         now = datetime(2026, 3, 29, 12, 5, 0)
         w._rec_started = datetime(2026, 3, 29, 12, 0, 0)  # 5 minutes = 300s
-        w._since = datetime(2026, 3, 29, 12, 4, 50)  # cooling started 10s ago (> GRACE_SECS)
+        w._since = datetime(
+            2026, 3, 29, 12, 4, 50
+        )  # cooling started 10s ago (> GRACE_SECS)
 
         call_count = [0]
 
@@ -347,10 +385,12 @@ class MinSaveSecsTest(unittest.TestCase):
                 w._running = False
             return False
 
-        with patch("trnscrb.watcher.is_mic_in_use", side_effect=fake_mic_in_use), \
-             patch("trnscrb.watcher.time.sleep"), \
-             patch("trnscrb.watcher.is_meeting_app_running", return_value=False), \
-             patch("trnscrb.watcher.datetime") as mock_dt:
+        with (
+            patch("trnscrb.watcher.is_mic_in_use", side_effect=fake_mic_in_use),
+            patch("trnscrb.watcher.time.sleep"),
+            patch("trnscrb.watcher.is_meeting_app_running", return_value=False),
+            patch("trnscrb.watcher.datetime") as mock_dt,
+        ):
             mock_dt.now.return_value = now
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
             w._loop_inner()

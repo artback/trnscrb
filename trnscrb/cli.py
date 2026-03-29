@@ -1,14 +1,15 @@
 """CLI entry point.
 
-  trnscrb install   — smart dependency checker / installer
-  trnscrb start     — launch the menu bar app
-  trnscrb server    — start MCP server (Claude Desktop calls this)
-  trnscrb list      — list saved transcripts
-  trnscrb show <id> — print a transcript
-  trnscrb enrich <id> — run LLM enrichment pass on a transcript
-  trnscrb watch     — headless auto-record watcher
-  trnscrb devices   — list audio input devices
+trnscrb install   — smart dependency checker / installer
+trnscrb start     — launch the menu bar app
+trnscrb server    — start MCP server (Claude Desktop calls this)
+trnscrb list      — list saved transcripts
+trnscrb show <id> — print a transcript
+trnscrb enrich <id> — run LLM enrichment pass on a transcript
+trnscrb watch     — headless auto-record watcher
+trnscrb devices   — list audio input devices
 """
+
 import importlib.util
 import json
 from datetime import datetime
@@ -24,12 +25,17 @@ _log = get_logger("trnscrb.cli")
 
 # Path to Claude Desktop's MCP config file
 _CLAUDE_CONFIG = (
-    Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+    Path.home()
+    / "Library"
+    / "Application Support"
+    / "Claude"
+    / "claude_desktop_config.json"
 )
 _DEFAULT_PARAKEET_MODEL_ID = "mlx-community/parakeet-tdt-0.6b-v3"
 
 
 # ── CLI group ─────────────────────────────────────────────────────────────────
+
 
 @click.group()
 def cli():
@@ -38,8 +44,11 @@ def cli():
 
 # ── install ───────────────────────────────────────────────────────────────────
 
+
 @cli.command()
-@click.option("--force", is_flag=True, help="Re-install packages even if already present.")
+@click.option(
+    "--force", is_flag=True, help="Re-install packages even if already present."
+)
 def install(force: bool):
     """Smart installer — checks each dependency and skips what's already installed."""
     click.echo()
@@ -50,23 +59,27 @@ def install(force: bool):
     py_ok = sys.version_info >= (3, 11)
     _row("Python 3.11+", py_ok, sys.version.split()[0])
     if not py_ok:
-        click.echo(click.style("  Python 3.11+ is required. Install from python.org.", fg="red"))
+        click.echo(
+            click.style(
+                "  Python 3.11+ is required. Install from python.org.", fg="red"
+            )
+        )
         sys.exit(1)
     click.echo()
 
     # ── 2. Python packages ───────────────────────────────────────────────────
     click.echo("  Python packages:")
     packages = {
-        "rumps":           "rumps>=0.4.0",
-        "sounddevice":     "sounddevice>=0.4.6",
-        "parakeet_mlx":    "parakeet-mlx>=0.5.1",
-        "faster_whisper":  "faster-whisper>=1.0.0",
-        "pyannote.audio":  "pyannote.audio>=3.1",
-        "mcp":             "mcp>=1.0.0",
-        "anthropic":       "anthropic>=0.25",
-        "openai":          "openai>=2.24.0",
-        "scipy":           "scipy>=1.11",
-        "numpy":           "numpy>=1.24",
+        "rumps": "rumps>=0.4.0",
+        "sounddevice": "sounddevice>=0.4.6",
+        "parakeet_mlx": "parakeet-mlx>=0.5.1",
+        "faster_whisper": "faster-whisper>=1.0.0",
+        "pyannote.audio": "pyannote.audio>=3.1",
+        "mcp": "mcp>=1.0.0",
+        "anthropic": "anthropic>=0.25",
+        "openai": "openai>=2.24.0",
+        "scipy": "scipy>=1.11",
+        "numpy": "numpy>=1.24",
     }
     to_install = []
     for import_name, pkg_spec in packages.items():
@@ -77,7 +90,9 @@ def install(force: bool):
 
     if to_install:
         click.echo()
-        if click.confirm(f"  Install {len(to_install)} missing package(s)?", default=True):
+        if click.confirm(
+            f"  Install {len(to_install)} missing package(s)?", default=True
+        ):
             _run([sys.executable, "-m", "pip", "install", "--quiet", *to_install])
     click.echo()
 
@@ -87,12 +102,17 @@ def install(force: bool):
     if not bh_ok:
         if click.confirm("  Install BlackHole via Homebrew?", default=True):
             _run(["brew", "install", "blackhole-2ch"])
-            click.echo("  After install: open System Settings → Sound → Output and select")
-            click.echo("  'Multi-Output Device' that includes BlackHole to capture system audio.")
+            click.echo(
+                "  After install: open System Settings → Sound → Output and select"
+            )
+            click.echo(
+                "  'Multi-Output Device' that includes BlackHole to capture system audio."
+            )
     click.echo()
 
     # ── 4. Transcription model ───────────────────────────────────────────────
     from trnscrb.settings import load as load_settings, save as save_settings
+
     settings = load_settings()
     backend = _normalize_backend(settings.get("transcription_backend"))
     if backend == "whisper":
@@ -102,6 +122,7 @@ def install(force: bool):
         if not model_ok and click.confirm("  Download now? (~500 MB)", default=True):
             try:
                 from faster_whisper import WhisperModel  # noqa: PLC0415
+
                 WhisperModel(model_size, device="cpu")
                 click.echo(click.style("  Model ready.", fg="green"))
             except Exception as e:
@@ -109,10 +130,11 @@ def install(force: bool):
     else:
         model_id = str(settings.get("parakeet_model_id") or _DEFAULT_PARAKEET_MODEL_ID)
         model_ok = _parakeet_model_cached(model_id)
-        _row(f"Parakeet model", model_ok)
+        _row("Parakeet model", model_ok)
         if not model_ok and click.confirm("  Download now?", default=True):
             try:
                 from parakeet_mlx import from_pretrained  # noqa: PLC0415
+
                 from_pretrained(model_id)
                 click.echo(click.style("  Model ready.", fg="green"))
             except Exception as e:
@@ -127,7 +149,8 @@ def install(force: bool):
         click.echo("  Accept terms at https://hf.co/pyannote/speaker-diarization-3.1")
         token = click.prompt(
             "  Paste token (or Enter to skip)",
-            default="", show_default=False,
+            default="",
+            show_default=False,
         )
         if token.strip():
             _save_hf_token(token.strip())
@@ -142,6 +165,7 @@ def install(force: bool):
 
     # ── 7. Notes directory ───────────────────────────────────────────────────
     from trnscrb.storage import ensure_notes_dir
+
     folder = ensure_notes_dir()
     click.echo(f"  Transcripts saved to: {folder}")
     click.echo()
@@ -154,7 +178,9 @@ def install(force: bool):
         if not mcp_ok:
             if click.confirm("  Register trnscrb with Claude Desktop?", default=True):
                 _write_mcp_config()
-                click.echo(click.style("  Done. Restart Claude Desktop to apply.", fg="green"))
+                click.echo(
+                    click.style("  Done. Restart Claude Desktop to apply.", fg="green")
+                )
         click.echo()
 
     # Launch at login
@@ -163,6 +189,7 @@ def install(force: bool):
     if not login_ok:
         if click.confirm("  Start trnscrb automatically on login?", default=False):
             import shutil
+
             binary = shutil.which("trnscrb") or sys.executable
             if _setup_login_item(binary):
                 click.echo(click.style("  Enabled.", fg="green"))
@@ -175,7 +202,9 @@ def install(force: bool):
     if settings.get("auto_record") is not True:
         settings["auto_record"] = True
         changed = True
-    configured_backend = str(settings.get("transcription_backend") or "").strip().lower()
+    configured_backend = (
+        str(settings.get("transcription_backend") or "").strip().lower()
+    )
     if configured_backend not in {"parakeet", "whisper"}:
         settings["transcription_backend"] = "parakeet"
         changed = True
@@ -197,23 +226,28 @@ def install(force: bool):
 
 # ── start ──────────────────────────────────────────────────────────────────────
 
+
 @cli.command()
 def start():
     """Launch the menu bar app."""
     from trnscrb.menu_bar import main
+
     main()
 
 
 # ── server ────────────────────────────────────────────────────────────────────
 
+
 @cli.command()
 def server():
     """Start the MCP server (used internally by Claude Desktop)."""
     from trnscrb.mcp_server import main
+
     main()
 
 
 # ── watch ─────────────────────────────────────────────────────────────────────
+
 
 @cli.command()
 def watch():
@@ -227,7 +261,7 @@ def watch():
     from trnscrb.calendar_integration import get_current_or_upcoming_event
 
     _recorder_ref: list = [None]
-    _started_ref:  list = [None]
+    _started_ref: list = [None]
 
     def on_start(meeting_name: str):
         _log.info("watch: recording started, meeting=%s", meeting_name)
@@ -236,10 +270,10 @@ def watch():
         r = rec_module.Recorder(device=device)
         r.start()
         _recorder_ref[0] = r
-        _started_ref[0]  = datetime.now()
+        _started_ref[0] = datetime.now()
 
     def on_stop():
-        r          = _recorder_ref[0]
+        r = _recorder_ref[0]
         started_at = _started_ref[0] or datetime.now()
         _recorder_ref[0] = None
         if not r:
@@ -251,27 +285,34 @@ def watch():
             click.echo("  ⚠️  No audio captured.")
             return
 
-        evt          = get_current_or_upcoming_event()
+        evt = get_current_or_upcoming_event()
         meeting_name = evt["title"] if evt else f"meeting-{started_at.strftime('%H%M')}"
 
         from trnscrb.settings import load as _load_settings
+
         _backend = _normalize_backend(_load_settings().get("transcription_backend"))
         try:
             segments = transcriber.transcribe(audio_path)
         except Exception as e:
             audio_path.unlink(missing_ok=True)
-            _log.error("Transcription failed: backend=%s file=%s err=%s", _backend, audio_path.name, e)
+            _log.error(
+                "Transcription failed: backend=%s file=%s err=%s",
+                _backend,
+                audio_path.name,
+                e,
+            )
             click.echo(f"  ✗ Transcription failed ({_backend}, {audio_path.name}): {e}")
             return
 
         import os
+
         hf_token = os.environ.get("HF_TOKEN")
         if not hf_token:
             tf = Path.home() / ".cache" / "huggingface" / "token"
             hf_token = tf.read_text().strip() if tf.exists() else None
         if hf_token and segments:
             try:
-                diar     = diarizer.diarize(audio_path, hf_token)
+                diar = diarizer.diarize(audio_path, hf_token)
                 segments = diarizer.merge(segments, diar)
             except Exception as e:
                 _log.warning("Diarization skipped: %s", e)
@@ -284,15 +325,19 @@ def watch():
         click.echo(f"  ✓ Saved: {path.name}")
 
         from trnscrb.settings import get as _get_setting
+
         if _get_setting("auto_enrich"):
             click.echo("  🔄 Enriching transcript…")
             try:
                 from trnscrb.enricher import enrich_transcript
+
                 result = enrich_transcript(text, calendar_event=evt)
                 enriched = result["enriched_transcript"]
                 updated = enriched + "\n\n" + "=" * 60 + "\n\n" + result["enrichment"]
                 storage.save_transcript(path, updated)
-                click.echo(f"  ✓ Enriched: summary + action items added ({result['provider']})")
+                click.echo(
+                    f"  ✓ Enriched: summary + action items added ({result['provider']})"
+                )
             except Exception as e:
                 _log.warning("Auto-enrich failed: %s", e)
                 click.echo(f"  ⚠  Enrichment skipped: {e}")
@@ -300,7 +345,9 @@ def watch():
     watcher = MicWatcher(on_start=on_start, on_stop=on_stop)
     watcher.start()
 
-    click.echo(f"Watching for mic activity (warmup={WARMUP_SECS}s, grace={GRACE_SECS}s).")
+    click.echo(
+        f"Watching for mic activity (warmup={WARMUP_SECS}s, grace={GRACE_SECS}s)."
+    )
     click.echo("Press Ctrl-C to stop.\n")
 
     def _shutdown(sig, frame):
@@ -310,20 +357,23 @@ def watch():
             on_stop()
         raise SystemExit(0)
 
-    signal.signal(signal.SIGINT,  _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
     import time
+
     while watcher.is_watching:
         time.sleep(1)
 
 
 # ── list ──────────────────────────────────────────────────────────────────────
 
+
 @cli.command(name="list")
 def list_cmd():
     """List all saved meeting transcripts."""
     from trnscrb import storage
+
     transcripts = storage.list_transcripts()
     if not transcripts:
         click.echo("No transcripts found in ~/meeting-notes/")
@@ -335,9 +385,12 @@ def list_cmd():
 
 # ── search ────────────────────────────────────────────────────────────────────
 
+
 @cli.command()
 @click.argument("query")
-@click.option("-n", "--context", default=1, help="Number of context lines around each match.")
+@click.option(
+    "-n", "--context", default=1, help="Number of context lines around each match."
+)
 def search(query: str, context: int):
     """Search across all transcripts for a keyword or phrase."""
     from trnscrb import storage
@@ -391,11 +444,13 @@ def search(query: str, context: int):
 
 # ── show ──────────────────────────────────────────────────────────────────────
 
+
 @cli.command()
 @click.argument("transcript_id")
 def show(transcript_id: str):
     """Print a transcript to stdout."""
     from trnscrb import storage
+
     text = storage.read_transcript(transcript_id)
     if text is None:
         click.echo(f"Transcript '{transcript_id}' not found.", err=True)
@@ -405,12 +460,17 @@ def show(transcript_id: str):
 
 # ── enrich ────────────────────────────────────────────────────────────────────
 
+
 @cli.command()
 @click.argument("transcript_id")
 def enrich(transcript_id: str):
     """Run an LLM pass on a transcript: summary, action items, speaker names."""
     from trnscrb import storage
-    from trnscrb.enricher import enrich_transcript, get_active_provider_config, provider_label
+    from trnscrb.enricher import (
+        enrich_transcript,
+        get_active_provider_config,
+        provider_label,
+    )
     from trnscrb.calendar_integration import get_current_or_upcoming_event
 
     text = storage.read_transcript(transcript_id)
@@ -430,7 +490,13 @@ def enrich(transcript_id: str):
 
     # Overwrite file with resolved speaker names + enrichment appended
     path = storage.NOTES_DIR / f"{transcript_id}.txt"
-    updated = result["enriched_transcript"] + "\n\n" + "=" * 60 + "\n\n" + result["enrichment"]
+    updated = (
+        result["enriched_transcript"]
+        + "\n\n"
+        + "=" * 60
+        + "\n\n"
+        + result["enrichment"]
+    )
     storage.save_transcript(path, updated)
 
     click.echo(result["enrichment"])
@@ -439,10 +505,18 @@ def enrich(transcript_id: str):
 
 # ── weekly / annual ──────────────────────────────────────────────────────────
 
+
 @cli.command()
-@click.option("--week", default=None, help="ISO week (e.g. 2026-W13). Defaults to last week.")
-@click.option("--prompt", "prompt_file", default=None, type=click.Path(exists=True),
-              help="Custom prompt template file. Use {week_start}, {week_end}, {transcripts} as placeholders.")
+@click.option(
+    "--week", default=None, help="ISO week (e.g. 2026-W13). Defaults to last week."
+)
+@click.option(
+    "--prompt",
+    "prompt_file",
+    default=None,
+    type=click.Path(exists=True),
+    help="Custom prompt template file. Use {week_start}, {week_end}, {transcripts} as placeholders.",
+)
 @click.option("--save/--no-save", default=True, help="Save summary to ~/meeting-notes/")
 def weekly(week: str | None, prompt_file: str | None, save: bool):
     """Generate a weekly summary from all transcripts in a given week.
@@ -454,14 +528,21 @@ def weekly(week: str | None, prompt_file: str | None, save: bool):
     """
     from datetime import date, timedelta
     from trnscrb import storage
-    from trnscrb.enricher import generate_weekly_summary, get_active_provider_config, provider_label
+    from trnscrb.enricher import (
+        generate_weekly_summary,
+        get_active_provider_config,
+        provider_label,
+    )
 
     if week:
         try:
             year, w = week.split("-W")
             monday = date.fromisocalendar(int(year), int(w), 1)
         except (ValueError, TypeError):
-            click.echo(f"Invalid week format: '{week}'. Use YYYY-WNN (e.g. 2026-W13).", err=True)
+            click.echo(
+                f"Invalid week format: '{week}'. Use YYYY-WNN (e.g. 2026-W13).",
+                err=True,
+            )
             sys.exit(1)
     else:
         today = date.today()
@@ -498,11 +579,16 @@ def weekly(week: str | None, prompt_file: str | None, save: bool):
 
     provider, profile = get_active_provider_config()
     model_name = str(profile.get("model") or "default")
-    click.echo(f"Found {len(transcripts)} transcript(s). Summarizing with {provider_label(provider)} ({model_name})…")
+    click.echo(
+        f"Found {len(transcripts)} transcript(s). Summarizing with {provider_label(provider)} ({model_name})…"
+    )
 
     try:
         summary = generate_weekly_summary(
-            transcripts, week_start, week_end, prompt_override=prompt_override,
+            transcripts,
+            week_start,
+            week_end,
+            prompt_override=prompt_override,
         )
     except Exception as e:
         click.echo(f"Summary generation failed: {e}", err=True)
@@ -518,9 +604,18 @@ def weekly(week: str | None, prompt_file: str | None, save: bool):
 
 
 @cli.command()
-@click.option("--year", default=None, help="Year to summarize (e.g. 2026). Defaults to current year.")
-@click.option("--prompt", "prompt_file", default=None, type=click.Path(exists=True),
-              help="Custom prompt template file. Use {summaries} and {year} as placeholders.")
+@click.option(
+    "--year",
+    default=None,
+    help="Year to summarize (e.g. 2026). Defaults to current year.",
+)
+@click.option(
+    "--prompt",
+    "prompt_file",
+    default=None,
+    type=click.Path(exists=True),
+    help="Custom prompt template file. Use {summaries} and {year} as placeholders.",
+)
 @click.option("--save/--no-save", default=True, help="Save summary to ~/meeting-notes/")
 def annual(year: str | None, prompt_file: str | None, save: bool):
     """Generate an annual summary from all weekly summaries.
@@ -532,14 +627,20 @@ def annual(year: str | None, prompt_file: str | None, save: bool):
     """
     from datetime import date
     from trnscrb import storage
-    from trnscrb.enricher import generate_annual_summary, get_active_provider_config, provider_label
+    from trnscrb.enricher import (
+        generate_annual_summary,
+        get_active_provider_config,
+        provider_label,
+    )
 
     target_year = year or str(date.today().year)
     click.echo(f"Collecting weekly summaries for {target_year}…")
 
     files = sorted(storage.NOTES_DIR.glob(f"weekly-{target_year}-W*.txt"))
     if not files:
-        click.echo(f"No weekly summaries found for {target_year}. Run `trnscrb weekly` first.")
+        click.echo(
+            f"No weekly summaries found for {target_year}. Run `trnscrb weekly` first."
+        )
         return
 
     combined = ""
@@ -554,10 +655,14 @@ def annual(year: str | None, prompt_file: str | None, save: bool):
 
     provider, profile = get_active_provider_config()
     model_name = str(profile.get("model") or "default")
-    click.echo(f"Found {len(files)} weekly summary(ies). Summarizing with {provider_label(provider)} ({model_name})…")
+    click.echo(
+        f"Found {len(files)} weekly summary(ies). Summarizing with {provider_label(provider)} ({model_name})…"
+    )
 
     try:
-        summary = generate_annual_summary(combined, target_year, prompt_override=prompt_override)
+        summary = generate_annual_summary(
+            combined, target_year, prompt_override=prompt_override
+        )
     except Exception as e:
         click.echo(f"Annual summary failed: {e}", err=True)
         sys.exit(1)
@@ -573,10 +678,12 @@ def annual(year: str | None, prompt_file: str | None, save: bool):
 
 # ── devices ───────────────────────────────────────────────────────────────────
 
+
 @cli.command()
 def icons():
     """Generate menu bar icons (mic PNG). Run once after install."""
     from trnscrb.icon import generate_icons_cli
+
     generate_icons_cli()
 
 
@@ -587,19 +694,25 @@ def mic_status():
     from trnscrb.watcher import is_mic_in_use, detect_meeting, WARMUP_SECS, GRACE_SECS
 
     active = is_mic_in_use()
-    status = click.style("IN USE 🔴", fg="red") if active else click.style("idle  ⚪", fg="white")
+    status = (
+        click.style("IN USE 🔴", fg="red")
+        if active
+        else click.style("idle  ⚪", fg="white")
+    )
     click.echo(f"\n  Microphone: {status}")
 
     if active:
         click.echo(f"  Detected app: {detect_meeting()}")
-    click.echo(f"\n  Watcher thresholds: warmup={WARMUP_SECS}s  grace={GRACE_SECS}s  min_save={30}s")
+    click.echo(
+        f"\n  Watcher thresholds: warmup={WARMUP_SECS}s  grace={GRACE_SECS}s  min_save={30}s"
+    )
     click.echo()
     click.echo("  Watching for 10 seconds (press Ctrl-C to stop early)…")
     for i in range(10):
         time.sleep(1)
         active = is_mic_in_use()
         mark = "🔴" if active else "⚪"
-        click.echo(f"  {i+1:2d}s  {mark}", nl=True)
+        click.echo(f"  {i + 1:2d}s  {mark}", nl=True)
     click.echo()
 
 
@@ -607,6 +720,7 @@ def mic_status():
 def devices():
     """List available audio input devices."""
     from trnscrb.recorder import Recorder
+
     devs = Recorder.list_input_devices()
     if not devs:
         click.echo("No input devices found.")
@@ -618,9 +732,12 @@ def devices():
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
+
 def _row(label: str, ok: bool, detail: str = "", indent: int = 2):
     mark = click.style("✓", fg="green") if ok else click.style("✗", fg="red")
-    status = click.style("ok", fg="green") if ok else click.style("missing", fg="yellow")
+    status = (
+        click.style("ok", fg="green") if ok else click.style("missing", fg="yellow")
+    )
     pad = " " * indent
     click.echo(f"{pad}{mark} {label:<30} {status}  {detail}")
 
@@ -632,14 +749,19 @@ def _pkg_installed(import_name: str) -> bool:
 def _blackhole_installed() -> bool:
     try:
         import sounddevice as sd
-        return any("BlackHole" in d["name"] for d in sd.query_devices()
-                    if d["max_input_channels"] > 0)
+
+        return any(
+            "BlackHole" in d["name"]
+            for d in sd.query_devices()
+            if d["max_input_channels"] > 0
+        )
     except Exception:
         return False
 
 
 def _get_hf_token() -> str | None:
     import os
+
     token = os.environ.get("HF_TOKEN")
     if token:
         return token
@@ -698,6 +820,7 @@ def _write_mcp_config():
             pass
     # Prefer the installed binary on PATH; fall back to python -m
     import shutil
+
     binary = shutil.which("trnscrb") or sys.executable
     if binary.endswith("trnscrb"):
         cmd_entry = {"command": binary, "args": ["server"]}
@@ -721,11 +844,13 @@ def _run(cmd: list[str]):
 
 # ── permission helpers ────────────────────────────────────────────────────────
 
+
 def _request_mic_permission() -> None:
     """Briefly open the audio input stream to trigger the macOS mic permission dialog."""
     try:
         import sounddevice as sd
         import time
+
         stream = sd.InputStream(channels=1, samplerate=16000, dtype="float32")
         stream.start()
         try:
@@ -742,8 +867,11 @@ def _request_calendar_permission() -> None:
     """Call Calendar via AppleScript to trigger the macOS calendar permission dialog."""
     try:
         from trnscrb.calendar_integration import get_current_or_upcoming_event
+
         get_current_or_upcoming_event()
-        click.echo(click.style("    ✓ Calendar access granted (or skipped)", fg="green"))
+        click.echo(
+            click.style("    ✓ Calendar access granted (or skipped)", fg="green")
+        )
     except Exception as e:
         click.echo(click.style(f"    ⚠  Calendar: {e}", fg="yellow"))
 
@@ -792,7 +920,8 @@ def _setup_login_item(binary_path: str) -> bool:
         )
         subprocess.run(
             ["launchctl", "load", str(_PLIST_PATH)],
-            capture_output=True, check=True,
+            capture_output=True,
+            check=True,
         )
         return True
     except Exception:

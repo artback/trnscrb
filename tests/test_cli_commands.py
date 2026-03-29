@@ -3,7 +3,7 @@
 import os
 import tempfile
 import unittest
-from datetime import datetime, date
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -24,6 +24,7 @@ class _TmpNotesMixin:
     def tearDown(self):
         self._patcher.stop()
         import shutil
+
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _write(self, name: str, text: str) -> Path:
@@ -81,11 +82,18 @@ class TestCLIWeeklyCommand(_TmpNotesMixin, unittest.TestCase):
         self._write("2026-03-23_09-00-00_standup.txt", "standup content")
         self._write("2026-03-30_09-00-00_other.txt", "other content")
 
-        with mock.patch("trnscrb.enricher.generate_weekly_summary", return_value="WEEKLY SUMMARY") as gen_mock, \
-             mock.patch("trnscrb.enricher.get_active_provider_config",
-                        return_value=("claude_code", {"model": "sonnet"})), \
-             mock.patch("trnscrb.enricher.provider_label", return_value="Claude Code"), \
-             mock.patch("trnscrb.storage.save_transcript"):
+        with (
+            mock.patch(
+                "trnscrb.enricher.generate_weekly_summary",
+                return_value="WEEKLY SUMMARY",
+            ) as gen_mock,
+            mock.patch(
+                "trnscrb.enricher.get_active_provider_config",
+                return_value=("claude_code", {"model": "sonnet"}),
+            ),
+            mock.patch("trnscrb.enricher.provider_label", return_value="Claude Code"),
+            mock.patch("trnscrb.storage.save_transcript"),
+        ):
             result = CliRunner().invoke(cli, ["weekly", "--week", "2026-W13"])
 
         self.assertEqual(result.exit_code, 0)
@@ -113,12 +121,22 @@ class TestCLIWeeklyCommand(_TmpNotesMixin, unittest.TestCase):
             tmp_path = tmp.name
 
         try:
-            with mock.patch("trnscrb.enricher.generate_weekly_summary", return_value="RESULT") as gen_mock, \
-                 mock.patch("trnscrb.enricher.get_active_provider_config",
-                            return_value=("claude_code", {"model": "sonnet"})), \
-                 mock.patch("trnscrb.enricher.provider_label", return_value="Claude Code"), \
-                 mock.patch("trnscrb.storage.save_transcript"):
-                result = CliRunner().invoke(cli, ["weekly", "--week", "2026-W13", "--prompt", tmp_path])
+            with (
+                mock.patch(
+                    "trnscrb.enricher.generate_weekly_summary", return_value="RESULT"
+                ) as gen_mock,
+                mock.patch(
+                    "trnscrb.enricher.get_active_provider_config",
+                    return_value=("claude_code", {"model": "sonnet"}),
+                ),
+                mock.patch(
+                    "trnscrb.enricher.provider_label", return_value="Claude Code"
+                ),
+                mock.patch("trnscrb.storage.save_transcript"),
+            ):
+                result = CliRunner().invoke(
+                    cli, ["weekly", "--week", "2026-W13", "--prompt", tmp_path]
+                )
 
             self.assertEqual(result.exit_code, 0)
             call_kwargs = gen_mock.call_args[1]
@@ -135,16 +153,20 @@ class TestCLIWeeklyCommand(_TmpNotesMixin, unittest.TestCase):
 class TestGetTranscriptPath(unittest.TestCase):
     def test_includes_seconds_in_filename(self):
         dt = datetime(2026, 3, 23, 14, 30, 45)
-        with mock.patch("trnscrb.storage.NOTES_DIR", Path("/tmp/test-notes")), \
-             mock.patch("trnscrb.storage.ensure_notes_dir"):
+        with (
+            mock.patch("trnscrb.storage.NOTES_DIR", Path("/tmp/test-notes")),
+            mock.patch("trnscrb.storage.ensure_notes_dir"),
+        ):
             path = storage.get_transcript_path("standup", dt)
         self.assertIn("2026-03-23_14-30-45", path.name)
         self.assertIn("standup", path.name)
 
     def test_sanitizes_meeting_name(self):
         dt = datetime(2026, 3, 23, 14, 30, 0)
-        with mock.patch("trnscrb.storage.NOTES_DIR", Path("/tmp/test-notes")), \
-             mock.patch("trnscrb.storage.ensure_notes_dir"):
+        with (
+            mock.patch("trnscrb.storage.NOTES_DIR", Path("/tmp/test-notes")),
+            mock.patch("trnscrb.storage.ensure_notes_dir"),
+        ):
             path = storage.get_transcript_path("My Meeting! @home", dt)
         self.assertNotIn("!", path.name)
         self.assertNotIn("@", path.name)
@@ -152,8 +174,10 @@ class TestGetTranscriptPath(unittest.TestCase):
 
     def test_truncates_long_names(self):
         dt = datetime(2026, 3, 23, 14, 30, 0)
-        with mock.patch("trnscrb.storage.NOTES_DIR", Path("/tmp/test-notes")), \
-             mock.patch("trnscrb.storage.ensure_notes_dir"):
+        with (
+            mock.patch("trnscrb.storage.NOTES_DIR", Path("/tmp/test-notes")),
+            mock.patch("trnscrb.storage.ensure_notes_dir"),
+        ):
             path = storage.get_transcript_path("a" * 100, dt)
         stem = path.stem
         name_part = stem.split("_", 3)[-1]
@@ -168,7 +192,9 @@ class TestGetTranscriptPath(unittest.TestCase):
 class TestFormatTranscript(unittest.TestCase):
     def test_duration_spacing(self):
         segments = [{"start": 0.0, "end": 65.0, "text": "Hello", "speaker": "Alice"}]
-        text = storage.format_transcript(segments, datetime(2026, 3, 23, 14, 30, 0), "standup")
+        text = storage.format_transcript(
+            segments, datetime(2026, 3, 23, 14, 30, 0), "standup"
+        )
         self.assertIn("Duration: 01:05", text)
 
     def test_empty_segments(self):
@@ -181,7 +207,9 @@ class TestFormatTranscript(unittest.TestCase):
             {"start": 5.0, "end": 10.0, "text": "World", "speaker": "Alice"},
             {"start": 10.0, "end": 15.0, "text": "Hi", "speaker": "Bob"},
         ]
-        text = storage.format_transcript(segments, datetime(2026, 1, 1, 0, 0, 0), "test")
+        text = storage.format_transcript(
+            segments, datetime(2026, 1, 1, 0, 0, 0), "test"
+        )
         self.assertEqual(text.count("[Alice]"), 1)
         self.assertEqual(text.count("[Bob]"), 1)
 
@@ -234,11 +262,18 @@ class AnnualCommandTest(_TmpNotesMixin, unittest.TestCase):
         self._write("weekly-2026-W10.txt", "Week 10 summary content")
         self._write("weekly-2026-W11.txt", "Week 11 summary content")
 
-        with mock.patch("trnscrb.enricher.generate_annual_summary", return_value="ANNUAL SUMMARY") as gen_mock, \
-             mock.patch("trnscrb.enricher.get_active_provider_config",
-                        return_value=("claude_code", {"model": "sonnet"})), \
-             mock.patch("trnscrb.enricher.provider_label", return_value="Claude Code"), \
-             mock.patch("trnscrb.storage.save_transcript"):
+        with (
+            mock.patch(
+                "trnscrb.enricher.generate_annual_summary",
+                return_value="ANNUAL SUMMARY",
+            ) as gen_mock,
+            mock.patch(
+                "trnscrb.enricher.get_active_provider_config",
+                return_value=("claude_code", {"model": "sonnet"}),
+            ),
+            mock.patch("trnscrb.enricher.provider_label", return_value="Claude Code"),
+            mock.patch("trnscrb.storage.save_transcript"),
+        ):
             result = CliRunner().invoke(cli, ["annual", "--year", "2026"])
 
         self.assertEqual(result.exit_code, 0)
@@ -268,7 +303,9 @@ class PathTraversalTest(unittest.TestCase):
 
     def test_normal_id_works(self):
         """A normal transcript_id should work (if file exists)."""
-        import tempfile, shutil
+        import tempfile
+        import shutil
+
         tmpdir = tempfile.mkdtemp()
         try:
             p = Path(tmpdir) / "2026-03-23_standup.txt"
@@ -298,6 +335,7 @@ class DevicesCommandTest(unittest.TestCase):
     def setUpClass(cls):
         """Ensure trnscrb.recorder can be imported even without sounddevice."""
         import sys
+
         if "sounddevice" not in sys.modules:
             sys.modules["sounddevice"] = mock.MagicMock()
             cls._sd_injected = True
@@ -310,6 +348,7 @@ class DevicesCommandTest(unittest.TestCase):
     def tearDownClass(cls):
         if cls._sd_injected:
             import sys
+
             sys.modules.pop("sounddevice", None)
 
     def _run_devices(self, device_list):

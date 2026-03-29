@@ -24,6 +24,7 @@ State machine:
                                                         │
                                                   stop + save
 """
+
 import ctypes
 import os
 import subprocess
@@ -37,26 +38,26 @@ from trnscrb.log import get_logger
 _log = get_logger("trnscrb.watcher")
 
 # ── Timing thresholds ─────────────────────────────────────────────────────────
-WARMUP_SECS    = 5    # mic must be active this long before we start
-GRACE_SECS     = 5    # mic must be idle this long before we stop
-MIN_SAVE_SECS  = 30   # recordings shorter than this are discarded
-POLL_SECS      = 1.0  # how often we check mic (fast CoreAudio call)
-APP_POLL_EVERY = 4    # run the slow meeting-app check every N mic polls (~4s)
-APP_GONE_POLLS = 3    # N consecutive app-gone checks → start cooling (~12s)
+WARMUP_SECS = 5  # mic must be active this long before we start
+GRACE_SECS = 5  # mic must be idle this long before we stop
+MIN_SAVE_SECS = 30  # recordings shorter than this are discarded
+POLL_SECS = 1.0  # how often we check mic (fast CoreAudio call)
+APP_POLL_EVERY = 4  # run the slow meeting-app check every N mic polls (~4s)
+APP_GONE_POLLS = 3  # N consecutive app-gone checks → start cooling (~12s)
 
 # ── Meeting app detection ─────────────────────────────────────────────────────
 # Used by detect_meeting() at recording START — can be broad because the mic
 # activity signal already confirms something real is happening.
 _NATIVE_APPS = [
-    ("zoom.us",                 "Zoom"),
-    ("Slack Helper",            "Slack Huddle"),
-    ("Microsoft Teams Helper",  "Microsoft Teams"),
-    ("Webex",                   "Webex"),
-    ("Around Helper",           "Around"),
-    ("Tuple",                   "Tuple"),
-    ("Loom",                    "Loom"),
-    ("FaceTime",                "FaceTime"),
-    ("Discord Helper",          "Discord"),
+    ("zoom.us", "Zoom"),
+    ("Slack Helper", "Slack Huddle"),
+    ("Microsoft Teams Helper", "Microsoft Teams"),
+    ("Webex", "Webex"),
+    ("Around Helper", "Around"),
+    ("Tuple", "Tuple"),
+    ("Loom", "Loom"),
+    ("FaceTime", "FaceTime"),
+    ("Discord Helper", "Discord"),
 ]
 
 # Used by is_meeting_app_running() during STOP detection — must be NARROW.
@@ -67,22 +68,24 @@ _NATIVE_APPS = [
 # modern macOS even when no call is active.  It is still detected via the
 # per-process CoreAudio mic check (step 1) when actually in a call.
 _ACTIVE_SESSION_PROCS = [
-    "CptHost",   # Zoom: meeting capture host — only present during an active Zoom call
-    "Tuple",     # Tuple — only runs during an active screen-share session
+    "CptHost",  # Zoom: meeting capture host — only present during an active Zoom call
+    "Tuple",  # Tuple — only runs during an active screen-share session
 ]
 
 # CoreAudio process-level constants (macOS 14+)
 # Powers the orange privacy indicator — lets us see which PID is using mic input.
-_kProcessObjectList    = 0x706C7374  # 'plst'
-_kProcessPID           = 0x70706964  # 'ppid'
-_kProcessIsRunningIn   = 0x70697220  # 'pir ' — is this process using audio input?
+_kProcessObjectList = 0x706C7374  # 'plst'
+_kProcessPID = 0x70706964  # 'ppid'
+_kProcessIsRunningIn = 0x70697220  # 'pir ' — is this process using audio input?
 
 # ── CoreAudio constants ───────────────────────────────────────────────────────
-_kSysObject          = 1
-_kDefaultInputDevice = 0x64496E20   # 'dIn '
-_kScopeGlobal        = 0x676C6F62   # 'glob'
-_kElementMain        = 0
-_kIsRunningSomewhere = 0x676F6E65   # 'gone' (kAudioDevicePropertyDeviceIsRunningSomewhere)
+_kSysObject = 1
+_kDefaultInputDevice = 0x64496E20  # 'dIn '
+_kScopeGlobal = 0x676C6F62  # 'glob'
+_kElementMain = 0
+_kIsRunningSomewhere = (
+    0x676F6E65  # 'gone' (kAudioDevicePropertyDeviceIsRunningSomewhere)
+)
 
 
 class MicWatcher:
@@ -95,24 +98,24 @@ class MicWatcher:
     def __init__(
         self,
         on_start: Callable[[str], None],
-        on_stop:  Callable[[], None],
+        on_stop: Callable[[], None],
     ):
         self.on_start = on_start
-        self.on_stop  = on_stop
+        self.on_stop = on_stop
 
         self._thread: threading.Thread | None = None
-        self._running  = False
-        self._state    = "idle"   # idle | warming | recording | cooling
-        self._since:   datetime | None = None
+        self._running = False
+        self._state = "idle"  # idle | warming | recording | cooling
+        self._since: datetime | None = None
         self._rec_started: datetime | None = None
-        self._no_app_polls = 0    # consecutive polls without a meeting app
+        self._no_app_polls = 0  # consecutive polls without a meeting app
 
     def start(self) -> None:
         if self._running:
             return
-        self._running      = True
-        self._state        = "idle"
-        self._since        = None
+        self._running = True
+        self._state = "idle"
+        self._since = None
         self._no_app_polls = 0
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
@@ -143,19 +146,19 @@ class MicWatcher:
     def _loop_inner(self) -> None:
         # Separate the fast mic check (every POLL_SECS) from the slow app check
         # (osascript can take 3-4 s — running it every poll would block the loop).
-        _app_counter = 0   # counts mic polls; app is checked every APP_POLL_EVERY
+        _app_counter = 0  # counts mic polls; app is checked every APP_POLL_EVERY
         _app_running = False  # cached result of the last meeting-app check
 
         while self._running:
-            active  = is_mic_in_use()
-            now     = datetime.now()
+            active = is_mic_in_use()
+            now = datetime.now()
             elapsed = (now - self._since).total_seconds() if self._since else 0
 
             if self._state == "idle":
                 if active:
                     _log.debug("state %s → %s", "idle", "warming")
-                    self._state        = "warming"
-                    self._since        = now
+                    self._state = "warming"
+                    self._since = now
                     self._no_app_polls = 0
 
             elif self._state == "warming":
@@ -166,13 +169,13 @@ class MicWatcher:
                     self._since = None
                 elif elapsed >= WARMUP_SECS:
                     _log.debug("state %s → %s", "warming", "recording")
-                    self._rec_started  = now
-                    self._state        = "recording"
-                    self._since        = now
+                    self._rec_started = now
+                    self._state = "recording"
+                    self._since = now
                     self._no_app_polls = 0
-                    _app_counter       = APP_POLL_EVERY  # check app on first recording poll
-                    _app_running       = True   # assume running at recording start
-                    meeting_name       = detect_meeting()
+                    _app_counter = APP_POLL_EVERY  # check app on first recording poll
+                    _app_running = True  # assume running at recording start
+                    meeting_name = detect_meeting()
                     _log.info("on_start firing — meeting_name=%s", meeting_name)
                     self.on_start(meeting_name)
 
@@ -188,8 +191,11 @@ class MicWatcher:
                         self._no_app_polls = 0
                     else:
                         self._no_app_polls += 1
-                    _log.debug("app check: running=%s, _no_app_polls=%d",
-                               _app_running, self._no_app_polls)
+                    _log.debug(
+                        "app check: running=%s, _no_app_polls=%d",
+                        _app_running,
+                        self._no_app_polls,
+                    )
 
                 if not active:
                     if _app_running:
@@ -203,8 +209,8 @@ class MicWatcher:
                         # prevents a single slow/failed osascript from stopping
                         # the recording while the user is just muted.
                         _log.debug("state %s → %s", "recording", "cooling")
-                        self._state        = "cooling"
-                        self._since        = now
+                        self._state = "cooling"
+                        self._since = now
                         self._no_app_polls = 0
                 else:
                     # Mic still active — if meeting app has been gone for multiple
@@ -212,18 +218,18 @@ class MicWatcher:
                     # after leaving the meeting.
                     if self._no_app_polls >= APP_GONE_POLLS:
                         _log.debug("state %s → %s", "recording", "cooling")
-                        self._state        = "cooling"
-                        self._since        = now
+                        self._state = "cooling"
+                        self._since = now
                         self._no_app_polls = 0
 
             elif self._state == "cooling":
                 if active:
                     # Mic came back — resume recording
                     _log.debug("state %s → %s", "cooling", "recording")
-                    self._state        = "recording"
-                    self._since        = now
+                    self._state = "recording"
+                    self._since = now
                     self._no_app_polls = 0
-                    _app_counter       = APP_POLL_EVERY
+                    _app_counter = APP_POLL_EVERY
                 else:
                     # Mic still off — check if meeting app is still running
                     _app_counter += 1
@@ -233,8 +239,8 @@ class MicWatcher:
                         if _app_running:
                             # Meeting still active — user is muted, resume recording
                             _log.debug("state %s → %s", "cooling", "recording")
-                            self._state        = "recording"
-                            self._since        = now
+                            self._state = "recording"
+                            self._since = now
                             self._no_app_polls = 0
 
                 # Only stop if still in cooling (app check may have moved us back)
@@ -242,12 +248,13 @@ class MicWatcher:
                 if self._state == "cooling" and elapsed >= GRACE_SECS:
                     duration = (
                         (now - self._rec_started).total_seconds()
-                        if self._rec_started else 0
+                        if self._rec_started
+                        else 0
                     )
                     _log.debug("state %s → %s", "cooling", "idle")
-                    self._state        = "idle"
-                    self._since        = None
-                    self._rec_started  = None
+                    self._state = "idle"
+                    self._since = None
+                    self._rec_started = None
                     self._no_app_polls = 0
                     if duration >= MIN_SAVE_SECS:
                         _log.info("on_stop firing — recording duration=%.1fs", duration)
@@ -258,36 +265,43 @@ class MicWatcher:
 
 # ── CoreAudio mic detection ────────────────────────────────────────────────────
 
+
 class _PropAddr(ctypes.Structure):
     _fields_ = [
         ("mSelector", ctypes.c_uint32),
-        ("mScope",    ctypes.c_uint32),
-        ("mElement",  ctypes.c_uint32),
+        ("mScope", ctypes.c_uint32),
+        ("mElement", ctypes.c_uint32),
     ]
 
 
 def is_mic_in_use() -> bool:
     """True if ANY process is currently using the default audio input device."""
     try:
-        ca = ctypes.CDLL(
-            "/System/Library/Frameworks/CoreAudio.framework/CoreAudio"
-        )
+        ca = ctypes.CDLL("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")
         addr = _PropAddr(_kDefaultInputDevice, _kScopeGlobal, _kElementMain)
-        dev  = ctypes.c_uint32(0)
-        sz   = ctypes.c_uint32(ctypes.sizeof(dev))
+        dev = ctypes.c_uint32(0)
+        sz = ctypes.c_uint32(ctypes.sizeof(dev))
         ca.AudioObjectGetPropertyData(
-            _kSysObject, ctypes.byref(addr),
-            0, None, ctypes.byref(sz), ctypes.byref(dev),
+            _kSysObject,
+            ctypes.byref(addr),
+            0,
+            None,
+            ctypes.byref(sz),
+            ctypes.byref(dev),
         )
         if dev.value == 0:
             return False
 
-        addr2   = _PropAddr(_kIsRunningSomewhere, _kScopeGlobal, _kElementMain)
+        addr2 = _PropAddr(_kIsRunningSomewhere, _kScopeGlobal, _kElementMain)
         running = ctypes.c_uint32(0)
-        sz2     = ctypes.c_uint32(ctypes.sizeof(running))
-        status  = ca.AudioObjectGetPropertyData(
-            dev.value, ctypes.byref(addr2),
-            0, None, ctypes.byref(sz2), ctypes.byref(running),
+        sz2 = ctypes.c_uint32(ctypes.sizeof(running))
+        status = ca.AudioObjectGetPropertyData(
+            dev.value,
+            ctypes.byref(addr2),
+            0,
+            None,
+            ctypes.byref(sz2),
+            ctypes.byref(running),
         )
         return status == 0 and bool(running.value)
     except Exception:
@@ -296,13 +310,16 @@ def is_mic_in_use() -> bool:
 
 # ── Meeting presence checks ───────────────────────────────────────────────────
 
+
 def _meeting_app_pids() -> set[int]:
     """Return PIDs of known native meeting apps that are currently running."""
     pids: set[int] = set()
     try:
         ps = subprocess.run(
             ["ps", "-ax", "-o", "pid=,comm="],
-            capture_output=True, text=True, timeout=3,
+            capture_output=True,
+            text=True,
+            timeout=3,
         )
         for line in ps.stdout.splitlines():
             parts = line.split(None, 1)
@@ -329,23 +346,32 @@ def _pids_using_mic_input() -> set[int]:
     """
     pids: set[int] = set()
     try:
-        ca = ctypes.CDLL(
-            "/System/Library/Frameworks/CoreAudio.framework/CoreAudio"
-        )
+        ca = ctypes.CDLL("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")
         # 1. How many process objects are there?
         addr = _PropAddr(_kProcessObjectList, _kScopeGlobal, _kElementMain)
         sz = ctypes.c_uint32(0)
-        if ca.AudioObjectGetPropertyDataSize(
-            _kSysObject, ctypes.byref(addr), 0, None, ctypes.byref(sz)
-        ) != 0 or sz.value == 0:
+        if (
+            ca.AudioObjectGetPropertyDataSize(
+                _kSysObject, ctypes.byref(addr), 0, None, ctypes.byref(sz)
+            )
+            != 0
+            or sz.value == 0
+        ):
             return pids
 
         n = sz.value // ctypes.sizeof(ctypes.c_uint32)
         objs = (ctypes.c_uint32 * n)()
-        if ca.AudioObjectGetPropertyData(
-            _kSysObject, ctypes.byref(addr), 0, None,
-            ctypes.byref(sz), ctypes.byref(objs)
-        ) != 0:
+        if (
+            ca.AudioObjectGetPropertyData(
+                _kSysObject,
+                ctypes.byref(addr),
+                0,
+                None,
+                ctypes.byref(sz),
+                ctypes.byref(objs),
+            )
+            != 0
+        ):
             return pids
 
         own_pid = os.getpid()
@@ -354,19 +380,35 @@ def _pids_using_mic_input() -> set[int]:
             addr_in = _PropAddr(_kProcessIsRunningIn, _kScopeGlobal, _kElementMain)
             running = ctypes.c_uint32(0)
             sz_r = ctypes.c_uint32(ctypes.sizeof(running))
-            if ca.AudioObjectGetPropertyData(
-                obj_id, ctypes.byref(addr_in), 0, None,
-                ctypes.byref(sz_r), ctypes.byref(running)
-            ) != 0 or not running.value:
+            if (
+                ca.AudioObjectGetPropertyData(
+                    obj_id,
+                    ctypes.byref(addr_in),
+                    0,
+                    None,
+                    ctypes.byref(sz_r),
+                    ctypes.byref(running),
+                )
+                != 0
+                or not running.value
+            ):
                 continue
             # Get the PID
             addr_pid = _PropAddr(_kProcessPID, _kScopeGlobal, _kElementMain)
             pid = ctypes.c_int32(0)
             sz_p = ctypes.c_uint32(ctypes.sizeof(pid))
-            if ca.AudioObjectGetPropertyData(
-                obj_id, ctypes.byref(addr_pid), 0, None,
-                ctypes.byref(sz_p), ctypes.byref(pid)
-            ) == 0 and pid.value != own_pid:
+            if (
+                ca.AudioObjectGetPropertyData(
+                    obj_id,
+                    ctypes.byref(addr_pid),
+                    0,
+                    None,
+                    ctypes.byref(sz_p),
+                    ctypes.byref(pid),
+                )
+                == 0
+                and pid.value != own_pid
+            ):
                 pids.add(pid.value)
     except Exception:
         pass
@@ -389,8 +431,10 @@ def is_meeting_app_running() -> bool:
         meeting_pids = _meeting_app_pids()
         # If any process using the mic belongs to a meeting app → still in meeting
         if mic_pids & meeting_pids:
-            _log.debug("is_meeting_app_running: per-process mic check succeeded "
-                       "(pids=%s)", mic_pids & meeting_pids)
+            _log.debug(
+                "is_meeting_app_running: per-process mic check succeeded (pids=%s)",
+                mic_pids & meeting_pids,
+            )
             return True
         # If mic_pids is non-empty but no meeting app PID matches,
         # fall through — browser-based meeting processes may not be in
@@ -400,11 +444,15 @@ def is_meeting_app_running() -> bool:
     try:
         ps = subprocess.run(
             ["ps", "-ax", "-o", "comm="],
-            capture_output=True, text=True, timeout=3,
+            capture_output=True,
+            text=True,
+            timeout=3,
         )
         for frag in _ACTIVE_SESSION_PROCS:
             if frag in ps.stdout:
-                _log.debug("is_meeting_app_running: ps check succeeded (process=%s)", frag)
+                _log.debug(
+                    "is_meeting_app_running: ps check succeeded (process=%s)", frag
+                )
                 return True
     except Exception:
         pass
@@ -431,8 +479,12 @@ def detect_meeting() -> str:
     active_meeting_pids = mic_pids & meeting_pids
     if active_meeting_pids:
         try:
-            ps = subprocess.run(["ps", "-ax", "-o", "pid=,comm="],
-                                capture_output=True, text=True, timeout=3)
+            ps = subprocess.run(
+                ["ps", "-ax", "-o", "pid=,comm="],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
             for line in ps.stdout.splitlines():
                 parts = line.split(None, 1)
                 if len(parts) == 2:
@@ -444,9 +496,13 @@ def detect_meeting() -> str:
                     if pid in active_meeting_pids:
                         for fragment, name in _NATIVE_APPS:
                             if fragment in comm:
-                                _log.debug("detect_meeting: native app match "
-                                           "(process=%s, name=%s, pid=%d)",
-                                           fragment, name, pid)
+                                _log.debug(
+                                    "detect_meeting: native app match "
+                                    "(process=%s, name=%s, pid=%d)",
+                                    fragment,
+                                    name,
+                                    pid,
+                                )
                                 return name
         except Exception:
             pass
@@ -454,22 +510,27 @@ def detect_meeting() -> str:
     # 3. Fallback: check for session-only processes (CptHost for Zoom, etc.).
     #    Skip apps like FaceTime / Slack Helper that persist when idle.
     try:
-        ps = subprocess.run(["ps", "-ax", "-o", "comm="],
-                            capture_output=True, text=True, timeout=3)
+        ps = subprocess.run(
+            ["ps", "-ax", "-o", "comm="], capture_output=True, text=True, timeout=3
+        )
         _SESSION_FALLBACK = [
-            ("CptHost",  "Zoom"),
-            ("Tuple",    "Tuple"),
+            ("CptHost", "Zoom"),
+            ("Tuple", "Tuple"),
         ]
         for frag, name in _SESSION_FALLBACK:
             if frag in ps.stdout:
-                _log.debug("detect_meeting: session-only process match (process=%s, name=%s)",
-                           frag, name)
+                _log.debug(
+                    "detect_meeting: session-only process match (process=%s, name=%s)",
+                    frag,
+                    name,
+                )
                 return name
     except Exception:
         pass
 
     try:
         from trnscrb.calendar_integration import get_current_or_upcoming_event
+
         evt = get_current_or_upcoming_event()
         if evt and evt.get("title"):
             _log.debug("detect_meeting: calendar match (title=%s)", evt["title"])
@@ -542,12 +603,15 @@ def _run_osascript(label: str, script: str) -> str | None:
     try:
         r = subprocess.run(
             ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=4,
+            capture_output=True,
+            text=True,
+            timeout=4,
         )
         name = r.stdout.strip()
         if name:
-            _log.debug("_browser_has_meeting_tab: found tab in %s (name=%s)",
-                       label, name)
+            _log.debug(
+                "_browser_has_meeting_tab: found tab in %s (name=%s)", label, name
+            )
             return name
     except subprocess.TimeoutExpired:
         _log.debug("_browser_has_meeting_tab: osascript timeout for %s", label)

@@ -3,6 +3,7 @@
 Patches is_mic_in_use() and is_meeting_app_running() to simulate
 various meeting scenarios without requiring CoreAudio or osascript.
 """
+
 import time
 import unittest
 from unittest.mock import patch
@@ -64,7 +65,6 @@ class WatcherStateMachineTest(unittest.TestCase):
         Uses very fast timing (WARMUP=0.01, GRACE=0.05, POLL=0.01) so tests
         complete quickly.  Returns (started_count, stopped_count, final_state).
         """
-        step_iter = iter(steps)
         current_mic = False
         current_app = False
 

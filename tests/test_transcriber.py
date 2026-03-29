@@ -6,7 +6,9 @@ from pathlib import Path
 from unittest import mock
 
 
-def _settings_getter(backend: str, parakeet_model_id: str = "mlx-community/parakeet-tdt-0.6b-v3"):
+def _settings_getter(
+    backend: str, parakeet_model_id: str = "mlx-community/parakeet-tdt-0.6b-v3"
+):
     mapping = {
         "transcription_backend": backend,
         "parakeet_model_id": parakeet_model_id,
@@ -43,7 +45,9 @@ class TranscriberTests(unittest.TestCase):
                     ]
                 )
 
-        fake_parakeet = types.SimpleNamespace(from_pretrained=lambda _model_id: ParakeetModel())
+        fake_parakeet = types.SimpleNamespace(
+            from_pretrained=lambda _model_id: ParakeetModel()
+        )
 
         class WhisperModel:
             def __init__(self, *_args, **_kwargs):
@@ -60,10 +64,14 @@ class TranscriberTests(unittest.TestCase):
             {"parakeet_mlx": fake_parakeet, "faster_whisper": fake_whisper},
             clear=False,
         ):
-            with mock.patch("trnscrb.settings.get", side_effect=_settings_getter("parakeet")):
+            with mock.patch(
+                "trnscrb.settings.get", side_effect=_settings_getter("parakeet")
+            ):
                 transcriber = self._reload_transcriber()
-                with mock.patch.object(Path, "exists", return_value=True), \
-                     mock.patch.object(Path, "stat", return_value=_fake_stat()):
+                with (
+                    mock.patch.object(Path, "exists", return_value=True),
+                    mock.patch.object(Path, "stat", return_value=_fake_stat()),
+                ):
                     segments = transcriber.transcribe(Path("audio.wav"))
 
         self.assertEqual(
@@ -85,11 +93,17 @@ class TranscriberTests(unittest.TestCase):
 
         fake_whisper = types.SimpleNamespace(WhisperModel=WhisperModel)
 
-        with mock.patch.dict(sys.modules, {"faster_whisper": fake_whisper}, clear=False):
-            with mock.patch("trnscrb.settings.get", side_effect=_settings_getter("whisper")):
+        with mock.patch.dict(
+            sys.modules, {"faster_whisper": fake_whisper}, clear=False
+        ):
+            with mock.patch(
+                "trnscrb.settings.get", side_effect=_settings_getter("whisper")
+            ):
                 transcriber = self._reload_transcriber()
-                with mock.patch.object(Path, "exists", return_value=True), \
-                     mock.patch.object(Path, "stat", return_value=_fake_stat()):
+                with (
+                    mock.patch.object(Path, "exists", return_value=True),
+                    mock.patch.object(Path, "stat", return_value=_fake_stat()),
+                ):
                     segments = transcriber.transcribe(Path("audio.wav"))
 
         self.assertEqual(
@@ -98,19 +112,29 @@ class TranscriberTests(unittest.TestCase):
         )
 
     def test_fails_fast_for_unknown_backend(self):
-        with mock.patch("trnscrb.settings.get", side_effect=_settings_getter("unknown")):
+        with mock.patch(
+            "trnscrb.settings.get", side_effect=_settings_getter("unknown")
+        ):
             transcriber = self._reload_transcriber()
-            with mock.patch.object(Path, "exists", return_value=True), \
-                 mock.patch.object(Path, "stat", return_value=_fake_stat()):
-                with self.assertRaisesRegex(RuntimeError, "Unsupported transcription backend"):
+            with (
+                mock.patch.object(Path, "exists", return_value=True),
+                mock.patch.object(Path, "stat", return_value=_fake_stat()),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "Unsupported transcription backend"
+                ):
                     transcriber.transcribe(Path("audio.wav"))
 
     def test_fails_fast_when_parakeet_dependency_missing(self):
-        with mock.patch("trnscrb.settings.get", side_effect=_settings_getter("parakeet")):
+        with mock.patch(
+            "trnscrb.settings.get", side_effect=_settings_getter("parakeet")
+        ):
             with mock.patch.dict(sys.modules, {"parakeet_mlx": None}, clear=False):
                 transcriber = self._reload_transcriber()
-                with mock.patch.object(Path, "exists", return_value=True), \
-                     mock.patch.object(Path, "stat", return_value=_fake_stat()):
+                with (
+                    mock.patch.object(Path, "exists", return_value=True),
+                    mock.patch.object(Path, "stat", return_value=_fake_stat()),
+                ):
                     with self.assertRaisesRegex(RuntimeError, "uv add parakeet-mlx"):
                         transcriber.transcribe(Path("audio.wav"))
 

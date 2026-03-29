@@ -6,6 +6,7 @@ States:
   recording   — red icon, Start disabled, Stop enabled
   transcribing— red icon, Start disabled, Stop shows "Transcribing…" (disabled)
 """
+
 import os
 import subprocess
 import threading
@@ -30,7 +31,7 @@ from trnscrb.settings import (
 
 _log = get_logger("trnscrb.menu_bar")
 
-_EMOJI_IDLE      = "🎙"
+_EMOJI_IDLE = "🎙"
 _EMOJI_RECORDING = "🔴"
 
 
@@ -61,13 +62,21 @@ class TrnscrbApp(rumps.App):
         )
 
         # Keep direct references so we can retitle without re-lookup
-        self._start_item = rumps.MenuItem("Start Transcribing", callback=self.start_recording)
-        self._stop_item  = rumps.MenuItem("Stop Transcribing",  callback=None)
-        self._auto_item  = rumps.MenuItem("Auto-transcribe: Off", callback=self.toggle_auto_record)
+        self._start_item = rumps.MenuItem(
+            "Start Transcribing", callback=self.start_recording
+        )
+        self._stop_item = rumps.MenuItem("Stop Transcribing", callback=None)
+        self._auto_item = rumps.MenuItem(
+            "Auto-transcribe: Off", callback=self.toggle_auto_record
+        )
         self._settings_item = rumps.MenuItem("Settings")
         self._provider_item = rumps.MenuItem("Provider")
-        self._endpoint_item = rumps.MenuItem("Endpoint…", callback=self.edit_enrich_endpoint)
-        self._api_key_item = rumps.MenuItem("API Key…", callback=self.edit_enrich_api_key)
+        self._endpoint_item = rumps.MenuItem(
+            "Endpoint…", callback=self.edit_enrich_endpoint
+        )
+        self._api_key_item = rumps.MenuItem(
+            "API Key…", callback=self.edit_enrich_api_key
+        )
         self._test_endpoint_item = rumps.MenuItem(
             "Test Endpoint & Load Models",
             callback=self.test_enrich_endpoint,
@@ -92,9 +101,9 @@ class TrnscrbApp(rumps.App):
             rumps.MenuItem("Quit", callback=self.quit_app),
         ]
 
-        self._recorder:   rec_module.Recorder | None = None
+        self._recorder: rec_module.Recorder | None = None
         self._started_at: datetime | None = None
-        self._watcher:    MicWatcher | None = None
+        self._watcher: MicWatcher | None = None
         self._process_thread: threading.Thread | None = None
         self._rec_lock = threading.Lock()  # guards _do_start / _do_stop
 
@@ -113,9 +122,11 @@ class TrnscrbApp(rumps.App):
             backend = get_setting("transcription_backend") or "parakeet"
             if backend == "parakeet":
                 from trnscrb.transcriber import _get_parakeet_model
+
                 _get_parakeet_model()
             else:
                 from trnscrb.transcriber import _get_whisper_model
+
                 _get_whisper_model()
             _log.info("Transcription model preloaded (%s)", backend)
         except Exception as e:
@@ -154,7 +165,11 @@ class TrnscrbApp(rumps.App):
             self._start_watcher()
             sender.title = "Auto-transcribe: On ✓"
             put_setting("auto_record", True)
-            _notify("Trnscrb", "Auto-transcribe on", "Will start when mic is active for 5+ seconds")
+            _notify(
+                "Trnscrb",
+                "Auto-transcribe on",
+                "Will start when mic is active for 5+ seconds",
+            )
 
     # ── enrichment settings ───────────────────────────────────────────────────
 
@@ -254,7 +269,9 @@ class TrnscrbApp(rumps.App):
         status[provider] = f"{stamp} OK: {len(models)} model(s)"
         save_settings(settings)
         self._refresh_enrich_settings_menu()
-        _notify("Trnscrb", f"{provider_name} connected", f"{len(models)} model(s) loaded")
+        _notify(
+            "Trnscrb", f"{provider_name} connected", f"{len(models)} model(s) loaded"
+        )
 
     def select_enrich_model(self, sender):
         model = getattr(sender, "_model_name", "").strip()
@@ -289,7 +306,9 @@ class TrnscrbApp(rumps.App):
 
         self._clear_submenu_if_initialized(self._provider_item)
         for option in enricher.PROVIDER_ORDER:
-            item = rumps.MenuItem(enricher.provider_label(option), callback=self.select_enrich_provider)
+            item = rumps.MenuItem(
+                enricher.provider_label(option), callback=self.select_enrich_provider
+            )
             item._provider_key = option
             item.state = 1 if option == provider else 0
             self._provider_item.add(item)
@@ -323,7 +342,9 @@ class TrnscrbApp(rumps.App):
         profile["api_key"] = str(profile.get("api_key") or "")
         profile["model"] = str(profile.get("model") or "")
         if isinstance(model_list, list):
-            profile["models"] = [str(model) for model in model_list if str(model).strip()]
+            profile["models"] = [
+                str(model) for model in model_list if str(model).strip()
+            ]
         else:
             profile["models"] = []
         return settings, provider, profile
@@ -348,7 +369,9 @@ class TrnscrbApp(rumps.App):
 
         # If a recording is in progress, stop it and save the WAV so it isn't lost.
         if self._recorder and self._recorder.is_recording:
-            _log.info("Quit requested while recording; stopping recorder and saving audio")
+            _log.info(
+                "Quit requested while recording; stopping recorder and saving audio"
+            )
             audio_path = self._recorder.stop()
             self._recorder = None
             if audio_path:
@@ -357,10 +380,13 @@ class TrnscrbApp(rumps.App):
                 saved = notes_dir / f"{stamp}_unsaved-recording.wav"
                 try:
                     import shutil
+
                     shutil.move(str(audio_path), str(saved))
                     _log.info("Saved in-progress recording to %s", saved)
                 except Exception:
-                    _log.error("Failed to rescue recording from %s", audio_path, exc_info=True)
+                    _log.error(
+                        "Failed to rescue recording from %s", audio_path, exc_info=True
+                    )
 
         # If a background transcription thread is running, give it a few seconds.
         if self._process_thread and self._process_thread.is_alive():
@@ -386,14 +412,18 @@ class TrnscrbApp(rumps.App):
         with self._rec_lock:
             if self._recorder and self._recorder.is_recording:
                 return
-            self._recorder   = rec_module.Recorder(device=device)
+            self._recorder = rec_module.Recorder(device=device)
             self._started_at = datetime.now()
             self._recorder.start()
             self._set_state("recording")
 
         source = "BlackHole (system + mic)" if device is not None else "built-in mic"
-        _log.info("Recording started: meeting=%s device=%s", meeting_name or "(unnamed)", source)
-        label  = f" — {meeting_name}" if meeting_name else ""
+        _log.info(
+            "Recording started: meeting=%s device=%s",
+            meeting_name or "(unnamed)",
+            source,
+        )
+        label = f" — {meeting_name}" if meeting_name else ""
         _notify("Trnscrb", f"Transcription started{label}", f"via {source}")
 
     def _do_stop(self):
@@ -401,8 +431,8 @@ class TrnscrbApp(rumps.App):
             if not self._recorder or not self._recorder.is_recording:
                 return
             _log.info("Recording stopped, starting transcription")
-            started_at     = self._started_at or datetime.now()
-            recorder       = self._recorder
+            started_at = self._started_at or datetime.now()
+            recorder = self._recorder
             self._recorder = None
             self._set_state("transcribing")
 
@@ -451,7 +481,7 @@ class TrnscrbApp(rumps.App):
             hf_token = _read_hf_token()
             if hf_token and segments:
                 try:
-                    diar     = diarizer.diarize(audio_path, hf_token)
+                    diar = diarizer.diarize(audio_path, hf_token)
                     segments = diarizer.merge(segments, diar)
                 except Exception as e:
                     _log.warning("Diarization skipped: %s", e)
@@ -470,10 +500,20 @@ class TrnscrbApp(rumps.App):
                     calendar_event = evt if evt else None
                     result = enrich_transcript(text, calendar_event=calendar_event)
                     enriched = result["enriched_transcript"]
-                    updated = enriched + "\n\n" + "=" * 60 + "\n\n" + result["enrichment"]
+                    updated = (
+                        enriched + "\n\n" + "=" * 60 + "\n\n" + result["enrichment"]
+                    )
                     storage.save_transcript(path, updated)
-                    _log.info("Auto-enrich complete: %s (provider=%s)", meeting_name, result["provider"])
-                    _notify("Trnscrb", f"Enriched: {meeting_name}", f"Summary + action items added")
+                    _log.info(
+                        "Auto-enrich complete: %s (provider=%s)",
+                        meeting_name,
+                        result["provider"],
+                    )
+                    _notify(
+                        "Trnscrb",
+                        f"Enriched: {meeting_name}",
+                        "Summary + action items added",
+                    )
                 except Exception as e:
                     _log.warning("Auto-enrich failed for %s: %s", meeting_name, e)
                     _notify("Trnscrb", "Enrichment skipped", str(e)[:180])
@@ -511,12 +551,16 @@ class TrnscrbApp(rumps.App):
         self._set_icon_state(state)
 
     def _set_icon_state(self, state: str):
-        rec_icon  = icon_path(recording=True)
+        rec_icon = icon_path(recording=True)
         idle_icon = icon_path(recording=False)
         if state in ("recording", "transcribing"):
-            self.icon, self.title = (rec_icon, None) if rec_icon else (None, _EMOJI_RECORDING)
+            self.icon, self.title = (
+                (rec_icon, None) if rec_icon else (None, _EMOJI_RECORDING)
+            )
         else:
-            self.icon, self.title = (idle_icon, None) if idle_icon else (None, _EMOJI_IDLE)
+            self.icon, self.title = (
+                (idle_icon, None) if idle_icon else (None, _EMOJI_IDLE)
+            )
 
 
 def _read_hf_token() -> str | None:
@@ -531,6 +575,7 @@ def _read_hf_token() -> str | None:
 
 def main():
     import AppKit
+
     app = TrnscrbApp()
     AppKit.NSApplication.sharedApplication().setActivationPolicy_(
         AppKit.NSApplicationActivationPolicyAccessory

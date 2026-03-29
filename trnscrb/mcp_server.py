@@ -14,6 +14,7 @@ Tools available to Claude:
   get_calendar_context   — current/upcoming calendar event
   enrich_transcript      — post-call summary + action items via configured LLM
 """
+
 import os
 import json
 import threading
@@ -36,12 +37,13 @@ _recording_started_at: datetime | None = None
 _state_lock = threading.Lock()
 
 # Background processing state
-_processing = False          # True while transcription/diarization is running
-_last_result: str | None = None   # last stop_recording outcome (path + preview)
-_last_error: str | None = None    # last processing error if any
+_processing = False  # True while transcription/diarization is running
+_last_result: str | None = None  # last stop_recording outcome (path + preview)
+_last_error: str | None = None  # last processing error if any
 
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
+
 
 @mcp.tool()
 def start_recording() -> str:
@@ -73,7 +75,7 @@ def stop_recording(meeting_name: str = "") -> str:
         if not _recorder or not _recorder.is_recording:
             return "Not currently recording."
         started_at = _recording_started_at or datetime.now()
-        audio_path = _recorder.stop()   # stops the stream, returns WAV path
+        audio_path = _recorder.stop()  # stops the stream, returns WAV path
         _recorder = None
 
     if not audio_path:
@@ -100,7 +102,7 @@ def stop_recording(meeting_name: str = "") -> str:
 
     duration_s = int((datetime.now() - started_at).total_seconds())
     return (
-        f"Recording stopped. {duration_s}s of audio captured for \"{meeting_name}\".\n"
+        f'Recording stopped. {duration_s}s of audio captured for "{meeting_name}".\n'
         f"Transcription is running in the background.\n"
         f"Ask me for `recording_status` to check progress, or `get_last_transcript` once done."
     )
@@ -130,7 +132,7 @@ def recording_status() -> str:
         return f"Last transcription failed: {last_error}"
 
     if last_result:
-        return f"Transcription complete. Use get_last_transcript to read it."
+        return "Transcription complete. Use get_last_transcript to read it."
 
     return "Idle — no active recording or pending transcription."
 
@@ -204,6 +206,7 @@ def get_weekly_transcripts(week: str = "") -> str:
         week: ISO week (e.g. '2026-W13'). Defaults to the current week.
     """
     from datetime import date, timedelta
+
     if week:
         try:
             year, w = week.split("-W")
@@ -246,6 +249,7 @@ def get_weekly_summaries(year: str = "") -> str:
         year: Year (e.g. '2026'). Defaults to current year.
     """
     from datetime import date
+
     target_year = year or str(date.today().year)
     files = sorted(storage.NOTES_DIR.glob(f"weekly-{target_year}-W*.txt"))
     if not files:
@@ -256,7 +260,9 @@ def get_weekly_summaries(year: str = "") -> str:
         text = f.read_text(encoding="utf-8").strip()
         parts.append(f"{'=' * 40}\n{f.stem}\n{'=' * 40}\n{text}")
 
-    return f"Year: {target_year}\nWeekly summaries: {len(files)}\n\n" + "\n\n".join(parts)
+    return f"Year: {target_year}\nWeekly summaries: {len(files)}\n\n" + "\n\n".join(
+        parts
+    )
 
 
 @mcp.tool()
@@ -269,6 +275,7 @@ def search_transcripts(query: str) -> str:
         query: The search term (case-insensitive).
     """
     import re
+
     files = sorted(storage.NOTES_DIR.glob("*.txt"), reverse=True)
     if not files:
         return "No transcripts found in ~/meeting-notes/"
@@ -308,7 +315,12 @@ def enrich_transcript(transcript_id: str) -> str:
     if text is None:
         return f"Transcript '{transcript_id}' not found."
 
-    from trnscrb.enricher import enrich_transcript as _enrich, get_active_provider_config, provider_label
+    from trnscrb.enricher import (
+        enrich_transcript as _enrich,
+        get_active_provider_config,
+        provider_label,
+    )
+
     provider, profile = get_active_provider_config()
     evt = get_current_or_upcoming_event()
     try:
@@ -321,7 +333,9 @@ def enrich_transcript(transcript_id: str) -> str:
     if path.exists():
         updated = (
             result["enriched_transcript"]
-            + "\n\n" + "=" * 60 + "\n\n"
+            + "\n\n"
+            + "=" * 60
+            + "\n\n"
             + result["enrichment"]
         )
         storage.save_transcript(path, updated)
@@ -330,6 +344,7 @@ def enrich_transcript(transcript_id: str) -> str:
 
 
 # ── Background processing ─────────────────────────────────────────────────────
+
 
 def _process_audio(audio_path: Path, started_at: datetime, meeting_name: str) -> None:
     global _processing, _last_result, _last_error
@@ -371,6 +386,7 @@ def _process_audio(audio_path: Path, started_at: datetime, meeting_name: str) ->
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _read_hf_token() -> str | None:
     token = os.environ.get("HF_TOKEN")

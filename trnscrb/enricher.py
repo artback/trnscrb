@@ -1,4 +1,5 @@
 """Post-call LLM enrichment via configurable local/cloud providers."""
+
 from __future__ import annotations
 
 import json
@@ -11,8 +12,8 @@ from trnscrb.log import get_logger
 
 _log = get_logger("trnscrb.enricher")
 
-_CONNECT_TIMEOUT = 10   # seconds – quick check for test_connection / list_models
-_ENRICH_TIMEOUT = 120   # seconds – local LLMs need time for long transcripts
+_CONNECT_TIMEOUT = 10  # seconds – quick check for test_connection / list_models
+_ENRICH_TIMEOUT = 120  # seconds – local LLMs need time for long transcripts
 
 _PROMPTS_DIR = Path.home() / ".config" / "trnscrb" / "prompts"
 
@@ -83,6 +84,7 @@ def _load_prompt(name: str, default: str) -> str:
         return path.read_text(encoding="utf-8")
     return default
 
+
 _PROMPT_TEMPLATE = """You are analyzing a meeting transcript.{context}
 
 Transcript:
@@ -107,7 +109,14 @@ SPEAKER MAPPING:
 - SPEAKER_01 → <inferred name or "Participant 2">
 """
 
-PROVIDER_ORDER = ("claude_code", "ollama", "llama_cpp", "lmstudio", "anthropic", "openai")
+PROVIDER_ORDER = (
+    "claude_code",
+    "ollama",
+    "llama_cpp",
+    "lmstudio",
+    "anthropic",
+    "openai",
+)
 OPENAI_COMPATIBLE_PROVIDERS = {"llama_cpp", "lmstudio", "openai"}
 DEFAULT_ENDPOINTS = {
     "claude_code": "",
@@ -133,6 +142,7 @@ class ClaudeCodeAdapter:
     @staticmethod
     def _find_cli() -> str | None:
         import shutil
+
         return shutil.which("claude")
 
     def test_connection(self, config: dict) -> tuple[bool, str]:
@@ -141,9 +151,12 @@ class ClaudeCodeAdapter:
             return False, "`claude` CLI not found on PATH"
         try:
             import subprocess
+
             r = subprocess.run(
                 [cli, "--version"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             version = r.stdout.strip() or "unknown"
             return True, f"Claude Code CLI found ({version})"
@@ -155,13 +168,18 @@ class ClaudeCodeAdapter:
 
     def enrich(self, prompt: str, config: dict) -> str:
         import subprocess
+
         cli = self._find_cli()
         if not cli:
-            raise RuntimeError("`claude` CLI not found on PATH. Install it from https://claude.ai/code")
+            raise RuntimeError(
+                "`claude` CLI not found on PATH. Install it from https://claude.ai/code"
+            )
         model = config.get("model") or "sonnet"
         result = subprocess.run(
             [cli, "-p", prompt, "--model", model, "--output-format", "text"],
-            capture_output=True, text=True, timeout=_ENRICH_TIMEOUT,
+            capture_output=True,
+            text=True,
+            timeout=_ENRICH_TIMEOUT,
         )
         content = result.stdout.strip()
         if result.returncode != 0:
@@ -194,7 +212,13 @@ class OllamaAdapter:
             "stream": False,
             "messages": [{"role": "user", "content": prompt}],
         }
-        response = _json_request(config["endpoint"], "/api/chat", method="POST", payload=payload, timeout=_ENRICH_TIMEOUT)
+        response = _json_request(
+            config["endpoint"],
+            "/api/chat",
+            method="POST",
+            payload=payload,
+            timeout=_ENRICH_TIMEOUT,
+        )
         message = response.get("message", {})
         content = str(message.get("content") or "").strip()
         if not content:
@@ -223,7 +247,11 @@ class OpenAICompatibleAdapter:
     def list_models(self, config: dict) -> list[str]:
         client = self._client(config)
         response = client.models.list()
-        models = [str(model.id) for model in getattr(response, "data", []) if getattr(model, "id", None)]
+        models = [
+            str(model.id)
+            for model in getattr(response, "data", [])
+            if getattr(model, "id", None)
+        ]
         return models
 
     def enrich(self, prompt: str, config: dict) -> str:
@@ -259,7 +287,9 @@ class AnthropicAdapter:
         api_key = str(config.get("api_key") or "")
         if not api_key:
             raise RuntimeError("Anthropic API key is required.")
-        endpoint = str(config.get("endpoint") or DEFAULT_ENDPOINTS["anthropic"]).rstrip("/")
+        endpoint = str(config.get("endpoint") or DEFAULT_ENDPOINTS["anthropic"]).rstrip(
+            "/"
+        )
         kwargs = {"api_key": api_key}
         if endpoint and endpoint != DEFAULT_ENDPOINTS["anthropic"]:
             kwargs["base_url"] = endpoint
@@ -292,7 +322,9 @@ class AnthropicAdapter:
             messages=[{"role": "user", "content": prompt}],
         )
         blocks = getattr(response, "content", [])
-        parts = [str(block.text).strip() for block in blocks if getattr(block, "text", None)]
+        parts = [
+            str(block.text).strip() for block in blocks if getattr(block, "text", None)
+        ]
         content = "\n".join(part for part in parts if part).strip()
         if not content:
             raise RuntimeError("Anthropic returned an empty response.")
@@ -338,15 +370,21 @@ def get_active_provider_config() -> tuple[str, dict]:
     return provider, profile
 
 
-def test_provider_connection(provider: str, endpoint: str, api_key: str = "") -> tuple[bool, str]:
+def test_provider_connection(
+    provider: str, endpoint: str, api_key: str = ""
+) -> tuple[bool, str]:
     provider = normalize_provider(provider)
-    config = _build_runtime_config(provider, endpoint=endpoint, api_key=api_key, model="")
+    config = _build_runtime_config(
+        provider, endpoint=endpoint, api_key=api_key, model=""
+    )
     return _ADAPTERS[provider].test_connection(config)
 
 
 def list_provider_models(provider: str, endpoint: str, api_key: str = "") -> list[str]:
     provider = normalize_provider(provider)
-    config = _build_runtime_config(provider, endpoint=endpoint, api_key=api_key, model="")
+    config = _build_runtime_config(
+        provider, endpoint=endpoint, api_key=api_key, model=""
+    )
     return _ADAPTERS[provider].list_models(config)
 
 
@@ -388,11 +426,19 @@ def enrich_transcript(
             context += f"\nKnown attendees: {', '.join(calendar_event['attendees'])}"
 
     prompt = _PROMPT_TEMPLATE.format(context=context, transcript=transcript_text)
-    _log.info("Enriching transcript with provider=%s model=%s", active_provider, selected_model)
+    _log.info(
+        "Enriching transcript with provider=%s model=%s",
+        active_provider,
+        selected_model,
+    )
     try:
         enrichment = adapter.enrich(prompt, config)
     except Exception:
-        _log.error("Enrichment failed for provider=%s model=%s", active_provider, selected_model)
+        _log.error(
+            "Enrichment failed for provider=%s model=%s",
+            active_provider,
+            selected_model,
+        )
         raise
     _log.info("Enrichment succeeded for provider=%s", active_provider)
 
@@ -475,16 +521,19 @@ def generate_weekly_summary(
     # Rough token estimate: ~4 chars per token. Warn if prompt is very large.
     token_estimate = len(prompt) // 4
     if token_estimate > 150_000:
-        _log.warning("Weekly prompt is very large (~%dk tokens, %d transcripts). "
-                     "Truncating to fit context window.",
-                     token_estimate // 1000, len(transcripts))
+        _log.warning(
+            "Weekly prompt is very large (~%dk tokens, %d transcripts). "
+            "Truncating to fit context window.",
+            token_estimate // 1000,
+            len(transcripts),
+        )
         # Truncate transcripts to ~600k chars (~150k tokens), keeping newest first
         max_chars = 600_000
         combined = ""
         for t in reversed(transcripts):
             entry = f"\n--- {t['name']} ---\n{t['text']}\n"
             if len(combined) + len(entry) > max_chars:
-                combined = f"\n[Earlier transcripts truncated for size]\n" + combined
+                combined = "\n[Earlier transcripts truncated for size]\n" + combined
                 break
             combined = entry + combined
         prompt = template.format(
@@ -493,8 +542,13 @@ def generate_weekly_summary(
             transcripts=combined,
         )
 
-    _log.info("Generating weekly summary with provider=%s model=%s (%d transcripts, ~%dk tokens)",
-              active_provider, selected_model, len(transcripts), len(prompt) // 4000)
+    _log.info(
+        "Generating weekly summary with provider=%s model=%s (%d transcripts, ~%dk tokens)",
+        active_provider,
+        selected_model,
+        len(transcripts),
+        len(prompt) // 4000,
+    )
     adapter = _ADAPTERS[active_provider]
     return adapter.enrich(prompt, config)
 
@@ -523,8 +577,11 @@ def generate_annual_summary(
     template = prompt_override or _load_prompt("annual", _DEFAULT_ANNUAL_PROMPT)
     prompt = template.format(summaries=weekly_summaries, year=year)
 
-    _log.info("Generating annual summary with provider=%s model=%s",
-              active_provider, selected_model)
+    _log.info(
+        "Generating annual summary with provider=%s model=%s",
+        active_provider,
+        selected_model,
+    )
     adapter = _ADAPTERS[active_provider]
     return adapter.enrich(prompt, config)
 
@@ -561,14 +618,20 @@ def _get_provider_profile(provider: str, loaded_settings: dict | None = None) ->
         "endpoint": raw_profile.get("endpoint") or DEFAULT_ENDPOINTS[provider],
         "api_key": str(raw_profile.get("api_key") or ""),
         "model": str(raw_profile.get("model") or ""),
-        "models": raw_profile.get("models") if isinstance(raw_profile.get("models"), list) else [],
+        "models": raw_profile.get("models")
+        if isinstance(raw_profile.get("models"), list)
+        else [],
     }
     merged["endpoint"] = normalize_endpoint(provider, str(merged["endpoint"]))
-    merged["models"] = [str(model).strip() for model in merged["models"] if str(model).strip()]
+    merged["models"] = [
+        str(model).strip() for model in merged["models"] if str(model).strip()
+    ]
     return merged
 
 
-def _build_runtime_config(provider: str, endpoint: str | None, api_key: str, model: str) -> dict:
+def _build_runtime_config(
+    provider: str, endpoint: str | None, api_key: str, model: str
+) -> dict:
     return {
         "provider": provider,
         "endpoint": normalize_endpoint(provider, endpoint),
@@ -577,7 +640,13 @@ def _build_runtime_config(provider: str, endpoint: str | None, api_key: str, mod
     }
 
 
-def _json_request(base_endpoint: str, path: str, method: str = "GET", payload: dict | None = None, timeout: int = _CONNECT_TIMEOUT) -> dict:
+def _json_request(
+    base_endpoint: str,
+    path: str,
+    method: str = "GET",
+    payload: dict | None = None,
+    timeout: int = _CONNECT_TIMEOUT,
+) -> dict:
     url = base_endpoint.rstrip("/") + path
     body = json.dumps(payload).encode("utf-8") if payload is not None else None
     req = request.Request(

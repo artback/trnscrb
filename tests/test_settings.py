@@ -23,7 +23,9 @@ class SettingsTests(unittest.TestCase):
         )
         self.assertEqual(settings._DEFAULTS["model_size"], "small")
 
-    def test_load_backfills_nested_enrich_and_backend_defaults_without_overwriting_values(self):
+    def test_load_backfills_nested_enrich_and_backend_defaults_without_overwriting_values(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_settings = Path(tmpdir) / "settings.json"
             tmp_settings.write_text(
@@ -59,13 +61,17 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("llama_cpp", loaded["enrich"]["profiles"])
         self.assertIn("last_test_status", loaded["enrich"])
         self.assertEqual(loaded["transcription_backend"], "parakeet")
-        self.assertEqual(loaded["parakeet_model_id"], "mlx-community/parakeet-tdt-0.6b-v3")
+        self.assertEqual(
+            loaded["parakeet_model_id"], "mlx-community/parakeet-tdt-0.6b-v3"
+        )
         self.assertEqual(loaded["model_size"], "small")
 
     def test_load_backfills_missing_backend_keys_and_enrich_defaults(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_settings = Path(tmpdir) / "settings.json"
-            tmp_settings.write_text(json.dumps({"auto_record": False, "model_size": "small"}))
+            tmp_settings.write_text(
+                json.dumps({"auto_record": False, "model_size": "small"})
+            )
             original = settings._SETTINGS_FILE
             settings._SETTINGS_FILE = tmp_settings
             try:
@@ -76,7 +82,9 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(loaded["auto_record"], False)
         self.assertEqual(loaded["model_size"], "small")
         self.assertEqual(loaded["transcription_backend"], "parakeet")
-        self.assertEqual(loaded["parakeet_model_id"], "mlx-community/parakeet-tdt-0.6b-v3")
+        self.assertEqual(
+            loaded["parakeet_model_id"], "mlx-community/parakeet-tdt-0.6b-v3"
+        )
         self.assertIn("enrich", loaded)
         self.assertEqual(loaded["enrich"]["provider"], "llama_cpp")
 

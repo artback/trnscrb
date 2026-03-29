@@ -4,6 +4,7 @@ Requires a HuggingFace token with access to:
   pyannote/speaker-diarization-3.1
 (accept the model's conditions at hf.co once, then it works offline).
 """
+
 from pathlib import Path
 
 from trnscrb.log import get_logger

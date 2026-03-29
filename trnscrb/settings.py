@@ -1,4 +1,5 @@
 """Persistent user settings stored in ~/.config/trnscrb/settings.json."""
+
 from copy import deepcopy
 import json
 import shutil

@@ -1,4 +1,5 @@
 """Local transcription with configurable backend (Parakeet or Whisper)."""
+
 import threading
 from pathlib import Path
 
@@ -115,7 +116,9 @@ def _transcribe_parakeet(audio_path: Path) -> list[dict]:
     result = model.transcribe(str(audio_path))
     sentences = getattr(result, "sentences", None)
     if sentences is None:
-        raise RuntimeError("Parakeet transcription did not return aligned sentences output.")
+        raise RuntimeError(
+            "Parakeet transcription did not return aligned sentences output."
+        )
 
     normalized = []
     for sentence in sentences:
@@ -125,12 +128,18 @@ def _transcribe_parakeet(audio_path: Path) -> list[dict]:
         try:
             start = float(getattr(sentence, "start", 0.0))
         except (TypeError, ValueError):
-            _log.warning("Could not parse start timestamp %r, defaulting to 0.0", getattr(sentence, "start", None))
+            _log.warning(
+                "Could not parse start timestamp %r, defaulting to 0.0",
+                getattr(sentence, "start", None),
+            )
             start = 0.0
         try:
             end = float(getattr(sentence, "end", 0.0))
         except (TypeError, ValueError):
-            _log.warning("Could not parse end timestamp %r, defaulting to 0.0", getattr(sentence, "end", None))
+            _log.warning(
+                "Could not parse end timestamp %r, defaulting to 0.0",
+                getattr(sentence, "end", None),
+            )
             end = 0.0
         normalized.append(
             {

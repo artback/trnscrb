@@ -3,6 +3,7 @@
 No extra dependencies — uses the osascript CLI that ships with macOS.
 Returns the current or next upcoming meeting within a 30-minute window.
 """
+
 import subprocess
 import time
 from typing import Optional

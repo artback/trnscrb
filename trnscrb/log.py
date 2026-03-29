@@ -3,6 +3,7 @@
 Writes to ~/Library/Logs/trnscrb.log with automatic rotation (5 MB × 3 files).
 Also emits to stderr so launchd / terminal sessions capture output.
 """
+
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -33,7 +34,9 @@ def get_logger(name: str = "trnscrb") -> logging.Logger:
         try:
             _LOG_DIR.mkdir(parents=True, exist_ok=True)
             fh = RotatingFileHandler(
-                _LOG_FILE, maxBytes=_MAX_BYTES, backupCount=_BACKUP_COUNT,
+                _LOG_FILE,
+                maxBytes=_MAX_BYTES,
+                backupCount=_BACKUP_COUNT,
             )
             fh.setLevel(logging.DEBUG)
             fh.setFormatter(fmt)

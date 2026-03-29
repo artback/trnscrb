@@ -3,7 +3,7 @@
 Supports mic-only or BlackHole 2ch (system audio) as input.
 Records at 16 kHz mono — suitable for local ASR backends used by trnscrb.
 """
-import os
+
 import struct
 import tempfile
 import threading
@@ -46,8 +46,8 @@ def _wav_header(sample_rate: int, channels: int, data_size: int) -> bytes:
         36 + data_size,
         b"WAVE",
         b"fmt ",
-        16,             # chunk size
-        1,              # PCM format
+        16,  # chunk size
+        1,  # PCM format
         channels,
         sample_rate,
         byte_rate,
