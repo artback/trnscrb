@@ -438,11 +438,17 @@ tell application "System Events"
 end tell
 tell application "Safari"
     repeat with w in windows
-        try
-            set u to URL of current tab of w
-            if u contains "meet.google.com" then return "Google Meet"
-            if u contains "teams.microsoft.com" then return "Microsoft Teams"
-        end try
+        repeat with t in tabs of w
+            try
+                set u to URL of t
+                if u contains "meet.google.com" then
+                    if not (name of t contains "ended") then return "Google Meet"
+                end if
+                if u contains "teams.microsoft.com" then return "Microsoft Teams"
+                if u contains "app.huddle.team" then return "Huddle"
+                if u contains "zoom.us/j/" then return "Zoom"
+            end try
+        end repeat
     end repeat
 end tell
 return ""
