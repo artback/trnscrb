@@ -4,6 +4,10 @@ import json
 import shutil
 from pathlib import Path
 
+from trnscrb.log import get_logger
+
+_log = get_logger("trnscrb.settings")
+
 _SETTINGS_FILE = Path.home() / ".config" / "trnscrb" / "settings.json"
 
 _DEFAULT_ENRICH_PROFILES = {
@@ -62,9 +66,12 @@ def load() -> dict:
         except json.JSONDecodeError:
             bak = _SETTINGS_FILE.with_suffix(".json.bak")
             shutil.copy2(_SETTINGS_FILE, bak)
+            _log.warning("Corrupted settings backed up to %s", bak)
         except Exception:
             pass
-    return _deep_merge(_DEFAULTS, loaded)
+    merged = _deep_merge(_DEFAULTS, loaded)
+    _log.debug("Settings loaded successfully")
+    return merged
 
 
 def save(settings: dict) -> None:

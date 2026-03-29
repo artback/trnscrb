@@ -207,6 +207,7 @@ class MicWatcher:
             elif self._state == "cooling":
                 if active:
                     # Mic came back — resume recording
+                    _log.debug("state %s → %s", "cooling", "recording")
                     self._state        = "recording"
                     self._since        = now
                     self._no_app_polls = 0
@@ -219,6 +220,7 @@ class MicWatcher:
                         _app_running = is_meeting_app_running()
                         if _app_running:
                             # Meeting still active — user is muted, resume recording
+                            _log.debug("state %s → %s", "cooling", "recording")
                             self._state        = "recording"
                             self._since        = now
                             self._no_app_polls = 0
@@ -230,11 +232,13 @@ class MicWatcher:
                         (now - self._rec_started).total_seconds()
                         if self._rec_started else 0
                     )
+                    _log.debug("state %s → %s", "cooling", "idle")
                     self._state        = "idle"
                     self._since        = None
                     self._rec_started  = None
                     self._no_app_polls = 0
                     if duration >= MIN_SAVE_SECS:
+                        _log.info("on_stop firing — recording duration=%.1fs", duration)
                         self.on_stop()
 
             time.sleep(POLL_SECS)
@@ -373,6 +377,8 @@ def is_meeting_app_running() -> bool:
         meeting_pids = _meeting_app_pids()
         # If any process using the mic belongs to a meeting app → still in meeting
         if mic_pids & meeting_pids:
+            _log.debug("is_meeting_app_running: per-process mic check succeeded "
+                       "(pids=%s)", mic_pids & meeting_pids)
             return True
         # If mic_pids is non-empty but no meeting app PID matches,
         # fall through — browser-based meeting processes may not be in
@@ -386,12 +392,16 @@ def is_meeting_app_running() -> bool:
         )
         for frag in _ACTIVE_SESSION_PROCS:
             if frag in ps.stdout:
+                _log.debug("is_meeting_app_running: ps check succeeded (process=%s)", frag)
                 return True
     except Exception:
         pass
 
     # 3. Browser tab URL + title check
-    return _browser_has_meeting_tab()
+    result = _browser_has_meeting_tab()
+    if result:
+        _log.debug("is_meeting_app_running: browser tab check succeeded")
+    return result
 
 
 def detect_meeting() -> str:
@@ -400,23 +410,29 @@ def detect_meeting() -> str:
         ps = subprocess.run(["ps", "aux"], capture_output=True, text=True, timeout=3)
         for fragment, name in _NATIVE_APPS:
             if fragment in ps.stdout:
+                _log.debug("detect_meeting: native app match (process=%s, name=%s)",
+                           fragment, name)
                 return name
     except Exception:
         pass
 
     browser_name = _browser_has_meeting_tab(return_name=True)
     if browser_name:
+        _log.debug("detect_meeting: browser tab match (name=%s)", browser_name)
         return browser_name
 
     try:
         from trnscrb.calendar_integration import get_current_or_upcoming_event
         evt = get_current_or_upcoming_event()
         if evt and evt.get("title"):
+            _log.debug("detect_meeting: calendar match (title=%s)", evt["title"])
             return evt["title"]
     except Exception:
         pass
 
-    return f"meeting-{datetime.now().strftime('%H%M')}"
+    fallback = f"meeting-{datetime.now().strftime('%H%M')}"
+    _log.debug("detect_meeting: no method matched, using fallback=%s", fallback)
+    return fallback
 
 
 _MEET_URLS = [
@@ -480,7 +496,8 @@ def _browser_has_meeting_tab(return_name: bool = False):
     return_name=False → returns bool (fast presence check)
     return_name=True  → returns str name or None
     """
-    for script in [_CHROME_TAB_SCRIPT, _SAFARI_TAB_SCRIPT]:
+    for label, script in [("Chrome", _CHROME_TAB_SCRIPT),
+                           ("Safari", _SAFARI_TAB_SCRIPT)]:
         try:
             r = subprocess.run(
                 ["osascript", "-e", script],
@@ -488,7 +505,11 @@ def _browser_has_meeting_tab(return_name: bool = False):
             )
             name = r.stdout.strip()
             if name:
+                _log.debug("_browser_has_meeting_tab: found tab in %s (name=%s)",
+                           label, name)
                 return name if return_name else True
+        except subprocess.TimeoutExpired:
+            _log.debug("_browser_has_meeting_tab: osascript timeout for %s", label)
         except Exception:
             pass
     return None if return_name else False

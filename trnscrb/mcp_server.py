@@ -84,6 +84,8 @@ def stop_recording(meeting_name: str = "") -> str:
         evt = get_current_or_upcoming_event()
         meeting_name = evt["title"] if evt else f"meeting-{started_at.strftime('%H%M')}"
 
+    _log.info("stop_recording: meeting=%s", meeting_name)
+
     with _state_lock:
         _processing = True
         _last_result = None
@@ -232,8 +234,10 @@ def _process_audio(audio_path: Path, started_at: datetime, meeting_name: str) ->
     global _processing, _last_result, _last_error
     try:
         if not audio_path.exists() or audio_path.stat().st_size == 0:
+            _log.error("Audio file missing or empty: %s", audio_path)
             raise RuntimeError(f"Audio file missing or empty: {audio_path}")
 
+        _log.info("Transcription starting: %s", meeting_name)
         segments = transcriber.transcribe(audio_path)
 
         hf_token = _read_hf_token()
@@ -242,7 +246,7 @@ def _process_audio(audio_path: Path, started_at: datetime, meeting_name: str) ->
                 diar = diarizer.diarize(audio_path, hf_token)
                 segments = diarizer.merge(segments, diar)
             except Exception:
-                # Diarization failed; fall back to unlabeled segments
+                _log.warning("Diarization skipped", exc_info=True)
                 pass
 
         audio_path.unlink(missing_ok=True)
@@ -251,10 +255,12 @@ def _process_audio(audio_path: Path, started_at: datetime, meeting_name: str) ->
         path = storage.get_transcript_path(meeting_name, started_at)
         storage.save_transcript(path, transcript_text)
 
+        _log.info("Transcription complete: %s -> %s", meeting_name, path.name)
         preview = transcript_text[:800] + ("…" if len(transcript_text) > 800 else "")
         with _state_lock:
             _last_result = f"Saved: {path.name}\n\n{preview}"
     except Exception as e:
+        _log.error("Transcription failed for %s: %s", meeting_name, e)
         audio_path.unlink(missing_ok=True)
         with _state_lock:
             _last_error = str(e)

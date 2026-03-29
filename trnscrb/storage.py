@@ -3,6 +3,10 @@ import re
 from pathlib import Path
 from datetime import datetime
 
+from trnscrb.log import get_logger
+
+_log = get_logger("trnscrb.storage")
+
 NOTES_DIR = Path.home() / "meeting-notes"
 
 
@@ -20,7 +24,9 @@ def get_transcript_path(meeting_name: str, started_at: datetime) -> Path:
 
 def save_transcript(path: Path, content: str) -> None:
     if not content or not content.strip():
+        _log.warning("Skipping save_transcript: empty content")
         return
+    _log.info("Saving transcript to %s", path)
     path.write_text(content, encoding="utf-8")
 
 
@@ -42,8 +48,12 @@ def list_transcripts() -> list[dict]:
 def read_transcript(transcript_id: str) -> str | None:
     path = (NOTES_DIR / f"{transcript_id}.txt").resolve()
     if not path.is_relative_to(NOTES_DIR.resolve()):
+        _log.warning("Path traversal blocked for transcript_id=%r", transcript_id)
         return None
-    return path.read_text(encoding="utf-8") if path.exists() else None
+    if not path.exists():
+        _log.debug("Transcript not found: %s", path)
+        return None
+    return path.read_text(encoding="utf-8")
 
 
 def format_transcript(segments: list[dict], started_at: datetime, meeting_name: str) -> str:

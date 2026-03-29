@@ -6,7 +6,9 @@ from typing import Optional
 from urllib import request
 
 from trnscrb import settings
+from trnscrb.log import get_logger
 
+_log = get_logger("trnscrb.enricher")
 
 _PROMPT_TEMPLATE = """You are analyzing a meeting transcript.{context}
 
@@ -55,7 +57,9 @@ class OllamaAdapter:
         try:
             models = self.list_models(config)
         except Exception as exc:
+            _log.debug("Ollama connection failed: %s", exc)
             return False, str(exc)
+        _log.debug("Ollama connection succeeded, %d model(s)", len(models))
         return True, f"Connected ({len(models)} model(s))"
 
     def list_models(self, config: dict) -> list[str]:
@@ -91,7 +95,9 @@ class OpenAICompatibleAdapter:
         try:
             models = self.list_models(config)
         except Exception as exc:
+            _log.debug("%s connection failed: %s", self.provider, exc)
             return False, str(exc)
+        _log.debug("%s connection succeeded, %d model(s)", self.provider, len(models))
         return True, f"Connected ({len(models)} model(s))"
 
     def list_models(self, config: dict) -> list[str]:
@@ -143,7 +149,9 @@ class AnthropicAdapter:
         try:
             models = self.list_models(config)
         except Exception as exc:
+            _log.debug("Anthropic connection failed: %s", exc)
             return False, str(exc)
+        _log.debug("Anthropic connection succeeded, %d model(s)", len(models))
         return True, f"Connected ({len(models)} model(s))"
 
     def list_models(self, config: dict) -> list[str]:
@@ -257,7 +265,13 @@ def enrich_transcript(
             context += f"\nKnown attendees: {', '.join(calendar_event['attendees'])}"
 
     prompt = _PROMPT_TEMPLATE.format(context=context, transcript=transcript_text)
-    enrichment = adapter.enrich(prompt, config)
+    _log.info("Enriching transcript with provider=%s model=%s", active_provider, selected_model)
+    try:
+        enrichment = adapter.enrich(prompt, config)
+    except Exception:
+        _log.error("Enrichment failed for provider=%s model=%s", active_provider, selected_model)
+        raise
+    _log.info("Enrichment succeeded for provider=%s", active_provider)
 
     speaker_map = _parse_speaker_map(enrichment)
     enriched = _apply_speaker_map(transcript_text, speaker_map)
@@ -292,6 +306,7 @@ def _parse_speaker_map(enrichment: str) -> dict:
                     speaker_map[raw] = name
             elif line.strip() and not line.strip().startswith("-"):
                 break  # end of section
+    _log.debug("Parsed %d speaker mapping(s)", len(speaker_map))
     return speaker_map
 
 
@@ -354,4 +369,5 @@ def _json_request(base_endpoint: str, path: str, method: str = "GET", payload: d
     try:
         return json.loads(raw.decode("utf-8"))
     except json.JSONDecodeError as exc:
+        _log.error("Invalid JSON response from %s: %s", url, exc)
         raise RuntimeError(f"Invalid JSON response from {url}: {exc}") from exc
