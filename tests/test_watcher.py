@@ -2,8 +2,13 @@
 
 Patches is_mic_in_use() and is_meeting_app_running() to simulate
 various meeting scenarios without requiring CoreAudio or osascript.
+
+These tests use real time.sleep with tiny intervals, making them
+sensitive to CI runner speed.  They are skipped when the CI env var
+is set (GitHub Actions sets CI=true by default).
 """
 
+import os
 import time
 import unittest
 from unittest.mock import patch
@@ -11,7 +16,11 @@ from unittest.mock import patch
 from trnscrb import watcher
 from trnscrb.watcher import MicWatcher
 
+_ON_CI = os.environ.get("CI", "").lower() in ("true", "1")
+_skip_on_ci = unittest.skipIf(_ON_CI, "Timing-sensitive — skipped on CI")
 
+
+@_skip_on_ci
 class WatcherStateMachineTest(unittest.TestCase):
     """Drive the state machine with controlled mic / app signals."""
 
