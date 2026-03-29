@@ -18,6 +18,10 @@ from pathlib import Path
 
 import click
 
+from trnscrb.log import get_logger
+
+_log = get_logger("trnscrb.cli")
+
 # Path to Claude Desktop's MCP config file
 _CLAUDE_CONFIG = (
     Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
@@ -244,6 +248,7 @@ def watch():
     _started_ref:  list = [None]
 
     def on_start(meeting_name: str):
+        _log.info("watch: recording started, meeting=%s", meeting_name)
         click.echo(f"  🔴 Meeting detected: {meeting_name} — recording started")
         device = rec_module.Recorder.find_blackhole_device()
         r = rec_module.Recorder(device=device)
@@ -257,6 +262,7 @@ def watch():
         _recorder_ref[0] = None
         if not r:
             return
+        _log.info("watch: recording stopped, transcribing")
         click.echo("  ⏹  Meeting ended — transcribing…")
         audio_path = r.stop()
         if not audio_path:
@@ -272,6 +278,7 @@ def watch():
             segments = transcriber.transcribe(audio_path)
         except Exception as e:
             audio_path.unlink(missing_ok=True)
+            _log.error("Transcription failed: backend=%s file=%s err=%s", _backend, audio_path.name, e)
             click.echo(f"  ✗ Transcription failed ({_backend}, {audio_path.name}): {e}")
             return
 
@@ -285,6 +292,7 @@ def watch():
                 diar     = diarizer.diarize(audio_path, hf_token)
                 segments = diarizer.merge(segments, diar)
             except Exception as e:
+                _log.warning("Diarization skipped: %s", e)
                 click.echo(f"  ⚠  Speaker diarization skipped: {e}")
 
         audio_path.unlink(missing_ok=True)

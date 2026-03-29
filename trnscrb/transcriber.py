@@ -3,6 +3,9 @@ import threading
 from pathlib import Path
 
 from trnscrb import settings
+from trnscrb.log import get_logger
+
+_log = get_logger("trnscrb.transcriber")
 
 _SUPPORTED_BACKENDS = {"parakeet", "whisper"}
 
@@ -122,10 +125,12 @@ def _transcribe_parakeet(audio_path: Path) -> list[dict]:
         try:
             start = float(getattr(sentence, "start", 0.0))
         except (TypeError, ValueError):
+            _log.warning("Could not parse start timestamp %r, defaulting to 0.0", getattr(sentence, "start", None))
             start = 0.0
         try:
             end = float(getattr(sentence, "end", 0.0))
         except (TypeError, ValueError):
+            _log.warning("Could not parse end timestamp %r, defaulting to 0.0", getattr(sentence, "end", None))
             end = 0.0
         normalized.append(
             {
@@ -141,11 +146,17 @@ def _transcribe_parakeet(audio_path: Path) -> list[dict]:
 def transcribe(audio_path: Path) -> list[dict]:
     """Return segments: [{start, end, text, speaker}] — speaker filled later by diarizer."""
     audio_path = Path(audio_path)
+    file_size = audio_path.stat().st_size if audio_path.exists() else 0
+    _log.info("Transcribing %s (%d bytes)", audio_path, file_size)
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
-    if audio_path.stat().st_size == 0:
+    if file_size == 0:
         raise FileNotFoundError(f"Audio file is empty: {audio_path}")
     backend = _backend()
+    _log.debug("Using backend: %s", backend)
     if backend == "parakeet":
-        return _transcribe_parakeet(audio_path)
-    return _transcribe_whisper(audio_path)
+        segments = _transcribe_parakeet(audio_path)
+    else:
+        segments = _transcribe_whisper(audio_path)
+    _log.info("Transcription complete: %d segments", len(segments))
+    return segments

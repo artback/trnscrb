@@ -94,7 +94,9 @@ class Recorder:
     def find_blackhole_device() -> int | None:
         for i, dev in enumerate(sd.query_devices()):
             if "BlackHole" in dev["name"] and dev["max_input_channels"] > 0:
+                _log.debug("BlackHole device found at index %d", i)
                 return i
+        _log.debug("BlackHole device not found")
         return None
 
     @staticmethod
