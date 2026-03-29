@@ -63,9 +63,11 @@ _NATIVE_APPS = [
 # "Slack Helper", "Teams Helper", "Discord Helper" etc. are ALWAYS present
 # when those apps are open, even when NOT in a meeting → false positives.
 # Only list processes that exist exclusively during an active session.
+# NOTE: FaceTime is NOT included — it persists as a background process on
+# modern macOS even when no call is active.  It is still detected via the
+# per-process CoreAudio mic check (step 1) when actually in a call.
 _ACTIVE_SESSION_PROCS = [
     "CptHost",   # Zoom: meeting capture host — only present during an active Zoom call
-    "FaceTime",  # FaceTime — only runs during an active call
     "Tuple",     # Tuple — only runs during an active screen-share session
 ]
 
@@ -129,6 +131,16 @@ class MicWatcher:
     # ── event loop ────────────────────────────────────────────────────────────
 
     def _loop(self) -> None:
+        try:
+            self._loop_inner()
+        except Exception:
+            _log.exception("watcher thread crashed — restarting in 5s")
+            time.sleep(5)
+            if self._running:
+                self._thread = threading.Thread(target=self._loop, daemon=True)
+                self._thread.start()
+
+    def _loop_inner(self) -> None:
         # Separate the fast mic check (every POLL_SECS) from the slow app check
         # (osascript can take 3-4 s — running it every poll would block the loop).
         _app_counter = 0   # counts mic polls; app is checked every APP_POLL_EVERY
@@ -406,20 +418,55 @@ def is_meeting_app_running() -> bool:
 
 def detect_meeting() -> str:
     """Best-effort: identify which meeting app is active when recording starts."""
-    try:
-        ps = subprocess.run(["ps", "aux"], capture_output=True, text=True, timeout=3)
-        for fragment, name in _NATIVE_APPS:
-            if fragment in ps.stdout:
-                _log.debug("detect_meeting: native app match (process=%s, name=%s)",
-                           fragment, name)
-                return name
-    except Exception:
-        pass
-
+    # 1. Browser tabs first — most reliable (URL + title, no false positives)
     browser_name = _browser_has_meeting_tab(return_name=True)
     if browser_name:
         _log.debug("detect_meeting: browser tab match (name=%s)", browser_name)
         return browser_name
+
+    # 2. Native apps — cross-reference with mic usage to avoid matching
+    #    background processes (e.g. FaceTime sitting idle).
+    mic_pids = _pids_using_mic_input()
+    meeting_pids = _meeting_app_pids()
+    active_meeting_pids = mic_pids & meeting_pids
+    if active_meeting_pids:
+        try:
+            ps = subprocess.run(["ps", "-ax", "-o", "pid=,comm="],
+                                capture_output=True, text=True, timeout=3)
+            for line in ps.stdout.splitlines():
+                parts = line.split(None, 1)
+                if len(parts) == 2:
+                    pid_str, comm = parts
+                    try:
+                        pid = int(pid_str)
+                    except ValueError:
+                        continue
+                    if pid in active_meeting_pids:
+                        for fragment, name in _NATIVE_APPS:
+                            if fragment in comm:
+                                _log.debug("detect_meeting: native app match "
+                                           "(process=%s, name=%s, pid=%d)",
+                                           fragment, name, pid)
+                                return name
+        except Exception:
+            pass
+
+    # 3. Fallback: check for session-only processes (CptHost for Zoom, etc.).
+    #    Skip apps like FaceTime / Slack Helper that persist when idle.
+    try:
+        ps = subprocess.run(["ps", "-ax", "-o", "comm="],
+                            capture_output=True, text=True, timeout=3)
+        _SESSION_FALLBACK = [
+            ("CptHost",  "Zoom"),
+            ("Tuple",    "Tuple"),
+        ]
+        for frag, name in _SESSION_FALLBACK:
+            if frag in ps.stdout:
+                _log.debug("detect_meeting: session-only process match (process=%s, name=%s)",
+                           frag, name)
+                return name
+    except Exception:
+        pass
 
     try:
         from trnscrb.calendar_integration import get_current_or_upcoming_event
@@ -451,7 +498,7 @@ tell application "Google Chrome"
     repeat with w in windows
         repeat with t in tabs of w
             set u to URL of t
-            if u contains "meet.google.com" then
+            if u contains "meet.google.com/" and u does not contain "/landing" then
                 set ttl to title of t
                 -- Filter out post-meeting pages ("Meeting ended", "You left the meeting")
                 if ttl does not contain "ended" and ttl does not contain "left" then return "Google Meet"
@@ -474,7 +521,7 @@ tell application "Safari"
         repeat with t in tabs of w
             try
                 set u to URL of t
-                if u contains "meet.google.com" then
+                if u contains "meet.google.com/" and u does not contain "/landing" then
                     set ttl to name of t
                     -- Filter out post-meeting pages ("Meeting ended", "You left the meeting")
                     if ttl does not contain "ended" and ttl does not contain "left" then return "Google Meet"

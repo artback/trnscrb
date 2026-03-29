@@ -95,6 +95,7 @@ class TrnscrbApp(rumps.App):
         self._started_at: datetime | None = None
         self._watcher:    MicWatcher | None = None
         self._process_thread: threading.Thread | None = None
+        self._rec_lock = threading.Lock()  # guards _do_start / _do_stop
 
         self._set_state("idle")
 
@@ -250,14 +251,24 @@ class TrnscrbApp(rumps.App):
 
     def _refresh_enrich_settings_menu(self):
         settings, provider, profile = self._active_enrich_profile()
-        endpoint_display = profile["endpoint"]
-        if len(endpoint_display) > 36:
-            endpoint_display = endpoint_display[:33] + "..."
 
         self._settings_item.title = f"Settings ({enricher.provider_label(provider)})"
-        self._endpoint_item.title = f"Endpoint… ({endpoint_display})"
-        key_state = "Set" if profile["api_key"] else "Not set"
-        self._api_key_item.title = f"API Key… ({key_state})"
+
+        # Claude Code uses the local CLI — no endpoint or API key needed.
+        if provider == "claude_code":
+            self._endpoint_item.title = "Endpoint… (n/a)"
+            self._endpoint_item.set_callback(None)
+            self._api_key_item.title = "API Key… (n/a)"
+            self._api_key_item.set_callback(None)
+        else:
+            endpoint_display = profile["endpoint"]
+            if len(endpoint_display) > 36:
+                endpoint_display = endpoint_display[:33] + "..."
+            self._endpoint_item.title = f"Endpoint… ({endpoint_display})"
+            self._endpoint_item.set_callback(self.edit_enrich_endpoint)
+            key_state = "Set" if profile["api_key"] else "Not set"
+            self._api_key_item.title = f"API Key… ({key_state})"
+            self._api_key_item.set_callback(self.edit_enrich_api_key)
 
         self._clear_submenu_if_initialized(self._provider_item)
         for option in enricher.PROVIDER_ORDER:
@@ -346,15 +357,18 @@ class TrnscrbApp(rumps.App):
     # ── shared start / stop ───────────────────────────────────────────────────
 
     def _do_start(self, meeting_name: str = ""):
-        if not meeting_name:
-            evt = get_current_or_upcoming_event()
-            meeting_name = evt["title"] if evt else ""
+        with self._rec_lock:
+            if self._recorder and self._recorder.is_recording:
+                return
+            if not meeting_name:
+                evt = get_current_or_upcoming_event()
+                meeting_name = evt["title"] if evt else ""
 
-        device = rec_module.Recorder.find_blackhole_device()
-        self._recorder   = rec_module.Recorder(device=device)
-        self._started_at = datetime.now()
-        self._recorder.start()
-        self._set_state("recording")
+            device = rec_module.Recorder.find_blackhole_device()
+            self._recorder   = rec_module.Recorder(device=device)
+            self._started_at = datetime.now()
+            self._recorder.start()
+            self._set_state("recording")
 
         source = "BlackHole (system + mic)" if device is not None else "built-in mic"
         _log.info("Recording started: meeting=%s device=%s", meeting_name or "(unnamed)", source)
@@ -362,11 +376,14 @@ class TrnscrbApp(rumps.App):
         _notify("Trnscrb", f"Transcription started{label}", f"via {source}")
 
     def _do_stop(self):
-        _log.info("Recording stopped, starting transcription")
-        started_at     = self._started_at or datetime.now()
-        recorder       = self._recorder
-        self._recorder = None
-        self._set_state("transcribing")
+        with self._rec_lock:
+            if not self._recorder or not self._recorder.is_recording:
+                return
+            _log.info("Recording stopped, starting transcription")
+            started_at     = self._started_at or datetime.now()
+            recorder       = self._recorder
+            self._recorder = None
+            self._set_state("transcribing")
 
         self._process_thread = threading.Thread(
             target=self._process, args=(recorder, started_at), daemon=True
@@ -387,43 +404,50 @@ class TrnscrbApp(rumps.App):
     # ── background transcription ──────────────────────────────────────────────
 
     def _process(self, recorder: rec_module.Recorder, started_at: datetime):
-        audio_path = recorder.stop()
-        if not audio_path:
-            self._restore_idle()
-            _notify("Trnscrb", "Error", "No audio captured.")
-            return
-
-        evt          = get_current_or_upcoming_event()
-        meeting_name = evt["title"] if evt else f"meeting-{started_at.strftime('%H%M')}"
-
-        _log.info("Transcription starting: %s", meeting_name)
+        audio_path = None
         try:
-            segments = transcriber.transcribe(audio_path)
-        except Exception as e:
-            _log.error("Transcription failed for %s: %s", meeting_name, e)
-            audio_path.unlink(missing_ok=True)
-            self._restore_idle()
-            _notify("Trnscrb", "Transcription failed", str(e))
-            return
+            audio_path = recorder.stop()
+            if not audio_path:
+                _notify("Trnscrb", "Error", "No audio captured.")
+                return
 
-        hf_token = _read_hf_token()
-        if hf_token and segments:
             try:
-                diar     = diarizer.diarize(audio_path, hf_token)
-                segments = diarizer.merge(segments, diar)
+                evt = get_current_or_upcoming_event()
+                meeting_name = evt["title"] if evt else ""
+            except Exception:
+                meeting_name = ""
+            if not meeting_name:
+                meeting_name = f"meeting-{started_at.strftime('%H%M')}"
+
+            _log.info("Transcription starting: %s", meeting_name)
+            try:
+                segments = transcriber.transcribe(audio_path)
             except Exception as e:
-                _log.warning("Diarization skipped: %s", e)
-                _notify("Trnscrb", "Speaker labels skipped", str(e)[:180])
+                _log.error("Transcription failed for %s: %s", meeting_name, e)
+                _notify("Trnscrb", "Transcription failed", str(e))
+                return
 
-        audio_path.unlink(missing_ok=True)
+            hf_token = _read_hf_token()
+            if hf_token and segments:
+                try:
+                    diar     = diarizer.diarize(audio_path, hf_token)
+                    segments = diarizer.merge(segments, diar)
+                except Exception as e:
+                    _log.warning("Diarization skipped: %s", e)
+                    _notify("Trnscrb", "Speaker labels skipped", str(e)[:180])
 
-        text = storage.format_transcript(segments, started_at, meeting_name)
-        path = storage.get_transcript_path(meeting_name, started_at)
-        storage.save_transcript(path, text)
-        _log.info("Transcription complete: %s -> %s", meeting_name, path.name)
-
-        self._restore_idle()
-        _notify("Trnscrb", f"Saved: {meeting_name}", f"~/meeting-notes/{path.name}")
+            text = storage.format_transcript(segments, started_at, meeting_name)
+            path = storage.get_transcript_path(meeting_name, started_at)
+            storage.save_transcript(path, text)
+            _log.info("Transcription complete: %s -> %s", meeting_name, path.name)
+            _notify("Trnscrb", f"Saved: {meeting_name}", f"~/meeting-notes/{path.name}")
+        except Exception as e:
+            _log.error("Unexpected error in _process: %s", e, exc_info=True)
+            _notify("Trnscrb", "Error", str(e)[:180])
+        finally:
+            if audio_path:
+                audio_path.unlink(missing_ok=True)
+            self._restore_idle()
 
     def _restore_idle(self):
         """Called from background thread when transcription finishes."""

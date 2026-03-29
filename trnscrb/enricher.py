@@ -37,9 +37,10 @@ SPEAKER MAPPING:
 - SPEAKER_01 → <inferred name or "Participant 2">
 """
 
-PROVIDER_ORDER = ("ollama", "llama_cpp", "lmstudio", "anthropic", "openai")
+PROVIDER_ORDER = ("claude_code", "ollama", "llama_cpp", "lmstudio", "anthropic", "openai")
 OPENAI_COMPATIBLE_PROVIDERS = {"llama_cpp", "lmstudio", "openai"}
 DEFAULT_ENDPOINTS = {
+    "claude_code": "",
     "ollama": "http://127.0.0.1:11434",
     "llama_cpp": "http://127.0.0.1:8080",
     "lmstudio": "http://127.0.0.1:1234",
@@ -47,12 +48,58 @@ DEFAULT_ENDPOINTS = {
     "openai": "https://api.openai.com/v1",
 }
 PROVIDER_LABELS = {
+    "claude_code": "Claude Code",
     "ollama": "Ollama API",
     "llama_cpp": "llama.cpp",
     "lmstudio": "LM Studio",
     "anthropic": "Anthropic",
     "openai": "OpenAI",
 }
+
+
+class ClaudeCodeAdapter:
+    """Uses the locally installed `claude` CLI as an enrichment backend."""
+
+    @staticmethod
+    def _find_cli() -> str | None:
+        import shutil
+        return shutil.which("claude")
+
+    def test_connection(self, config: dict) -> tuple[bool, str]:
+        cli = self._find_cli()
+        if not cli:
+            return False, "`claude` CLI not found on PATH"
+        try:
+            import subprocess
+            r = subprocess.run(
+                [cli, "--version"],
+                capture_output=True, text=True, timeout=10,
+            )
+            version = r.stdout.strip() or "unknown"
+            return True, f"Claude Code CLI found ({version})"
+        except Exception as exc:
+            return False, str(exc)
+
+    def list_models(self, config: dict) -> list[str]:
+        return ["sonnet", "opus", "haiku"]
+
+    def enrich(self, prompt: str, config: dict) -> str:
+        import subprocess
+        cli = self._find_cli()
+        if not cli:
+            raise RuntimeError("`claude` CLI not found on PATH. Install it from https://claude.ai/code")
+        model = config.get("model") or "sonnet"
+        result = subprocess.run(
+            [cli, "-p", prompt, "--model", model, "--output-format", "text"],
+            capture_output=True, text=True, timeout=_ENRICH_TIMEOUT,
+        )
+        content = result.stdout.strip()
+        if result.returncode != 0:
+            err = result.stderr.strip() or "unknown error"
+            raise RuntimeError(f"Claude Code CLI failed: {err}")
+        if not content:
+            raise RuntimeError("Claude Code CLI returned an empty response.")
+        return content
 
 
 class OllamaAdapter:
@@ -183,6 +230,7 @@ class AnthropicAdapter:
 
 
 _ADAPTERS = {
+    "claude_code": ClaudeCodeAdapter(),
     "ollama": OllamaAdapter(),
     "llama_cpp": OpenAICompatibleAdapter("llama_cpp"),
     "lmstudio": OpenAICompatibleAdapter("lmstudio"),
@@ -204,6 +252,8 @@ def normalize_provider(provider: str | None) -> str:
 
 def normalize_endpoint(provider: str, endpoint: str | None) -> str:
     normalized_provider = normalize_provider(provider)
+    if normalized_provider == "claude_code":
+        return ""
     value = str(endpoint or DEFAULT_ENDPOINTS[normalized_provider]).strip().rstrip("/")
     if normalized_provider in OPENAI_COMPATIBLE_PROVIDERS and not value.endswith("/v1"):
         value = f"{value}/v1"

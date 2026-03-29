@@ -11,6 +11,12 @@ _log = get_logger("trnscrb.settings")
 _SETTINGS_FILE = Path.home() / ".config" / "trnscrb" / "settings.json"
 
 _DEFAULT_ENRICH_PROFILES = {
+    "claude_code": {
+        "endpoint": "",
+        "api_key": "",
+        "model": "sonnet",
+        "models": ["sonnet", "opus", "haiku"],
+    },
     "ollama": {
         "endpoint": "http://127.0.0.1:11434",
         "api_key": "",

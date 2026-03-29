@@ -17,7 +17,7 @@ def ensure_notes_dir() -> Path:
 
 def get_transcript_path(meeting_name: str, started_at: datetime) -> Path:
     ensure_notes_dir()
-    date_str = started_at.strftime("%Y-%m-%d_%H-%M")
+    date_str = started_at.strftime("%Y-%m-%d_%H-%M-%S")
     safe_name = re.sub(r"[^A-Za-z0-9_-]", "-", meeting_name)[:50]
     return NOTES_DIR / f"{date_str}_{safe_name}.txt"
 
@@ -65,7 +65,7 @@ def format_transcript(segments: list[dict], started_at: datetime, meeting_name: 
     lines = [
         f"Meeting: {meeting_name}",
         f"Date:    {started_at.strftime('%Y-%m-%d %H:%M')}",
-        f"Duration:{duration}",
+        f"Duration: {duration}",
         "",
         "=" * 60,
         "",

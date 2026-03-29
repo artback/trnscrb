@@ -4,6 +4,7 @@ Supports mic-only or BlackHole 2ch (system audio) as input.
 Records at 16 kHz mono — suitable for local ASR backends used by trnscrb.
 """
 import os
+import struct
 import tempfile
 import threading
 import time
@@ -11,7 +12,6 @@ from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
-import scipy.io.wavfile as wavfile
 
 from trnscrb.log import get_logger
 
@@ -35,19 +35,46 @@ def cleanup_stale_temp_files() -> None:
             pass
 
 
+def _wav_header(sample_rate: int, channels: int, data_size: int) -> bytes:
+    """Build a 44-byte PCM WAV header."""
+    bits = 16
+    byte_rate = sample_rate * channels * bits // 8
+    block_align = channels * bits // 8
+    return struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + data_size,
+        b"WAVE",
+        b"fmt ",
+        16,             # chunk size
+        1,              # PCM format
+        channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits,
+        b"data",
+        data_size,
+    )
+
+
 class Recorder:
     def __init__(self, device: int | str | None = None):
         # device=None → system default input
         self.device = device
         self._recording = False
-        self._frames: list[np.ndarray] = []
         self._stream: sd.InputStream | None = None
         self._lock = threading.Lock()
+        self._tmpfile = None
+        self._frame_count = 0
 
     # ── public ──────────────────────────────────────────────────────────────
 
     def start(self) -> None:
-        self._frames = []
+        self._tmpfile = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        # Write a placeholder WAV header (44 bytes); finalized in stop().
+        self._tmpfile.write(b"\x00" * 44)
+        self._frame_count = 0
         self._recording = True
         self._stream = sd.InputStream(
             device=self.device,
@@ -72,24 +99,30 @@ class Recorder:
             finally:
                 self._stream = None
 
-        with self._lock:
-            frames = list(self._frames)
-
-        if not frames:
-            _log.warning("Recording stopped with no frames captured")
+        if not self._tmpfile:
+            _log.warning("Recording stopped with no temp file")
             return None
 
-        audio = np.concatenate(frames, axis=0).flatten()
-        audio_int16 = (audio * 32_767).astype(np.int16)
+        with self._lock:
+            frame_count = self._frame_count
 
-        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        try:
-            wavfile.write(tmp.name, SAMPLE_RATE, audio_int16)
-            out = Path(tmp.name)
-            _log.info("Recording stopped: %d frames, saved to %s", len(frames), out)
-            return out
-        finally:
-            tmp.close()
+        if frame_count == 0:
+            _log.warning("Recording stopped with no frames captured")
+            self._tmpfile.close()
+            Path(self._tmpfile.name).unlink(missing_ok=True)
+            self._tmpfile = None
+            return None
+
+        # Finalize WAV header now that we know the data size.
+        data_size = frame_count * 2  # int16 = 2 bytes per sample
+        self._tmpfile.seek(0)
+        self._tmpfile.write(_wav_header(SAMPLE_RATE, 1, data_size))
+        self._tmpfile.close()
+
+        out = Path(self._tmpfile.name)
+        self._tmpfile = None
+        _log.info("Recording stopped: %d samples, saved to %s", frame_count, out)
+        return out
 
     @property
     def is_recording(self) -> bool:
@@ -99,9 +132,13 @@ class Recorder:
 
     def _callback(self, indata, frames, time_info, status):
         try:
-            if self._recording:
+            if self._recording and self._tmpfile:
+                audio_int16 = np.clip(indata, -1.0, 1.0)
+                audio_int16 = (audio_int16 * 32_767).astype(np.int16)
+                raw = audio_int16.tobytes()
                 with self._lock:
-                    self._frames.append(indata.copy())
+                    self._tmpfile.write(raw)
+                    self._frame_count += len(audio_int16)
         except Exception:
             pass
 
