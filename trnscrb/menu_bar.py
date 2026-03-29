@@ -369,9 +369,11 @@ class TrnscrbApp(rumps.App):
         evt          = get_current_or_upcoming_event()
         meeting_name = evt["title"] if evt else f"meeting-{started_at.strftime('%H%M')}"
 
+        _log.info("Transcription starting: %s", meeting_name)
         try:
             segments = transcriber.transcribe(audio_path)
         except Exception as e:
+            _log.error("Transcription failed for %s: %s", meeting_name, e)
             audio_path.unlink(missing_ok=True)
             self._restore_idle()
             _notify("Trnscrb", "Transcription failed", str(e))
@@ -383,6 +385,7 @@ class TrnscrbApp(rumps.App):
                 diar     = diarizer.diarize(audio_path, hf_token)
                 segments = diarizer.merge(segments, diar)
             except Exception as e:
+                _log.warning("Diarization skipped: %s", e)
                 _notify("Trnscrb", "Speaker labels skipped", str(e)[:180])
 
         audio_path.unlink(missing_ok=True)
@@ -390,6 +393,7 @@ class TrnscrbApp(rumps.App):
         text = storage.format_transcript(segments, started_at, meeting_name)
         path = storage.get_transcript_path(meeting_name, started_at)
         storage.save_transcript(path, text)
+        _log.info("Transcription complete: %s -> %s", meeting_name, path.name)
 
         self._restore_idle()
         _notify("Trnscrb", f"Saved: {meeting_name}", f"~/meeting-notes/{path.name}")
