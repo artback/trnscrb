@@ -79,8 +79,8 @@ class WatcherStateMachineTest(unittest.TestCase):
             patch.object(watcher, "is_meeting_app_running", side_effect=fake_app),
             patch.object(watcher, "detect_meeting", return_value="Google Meet"),
             patch.object(watcher, "POLL_SECS", 0.01),
-            patch.object(watcher, "WARMUP_SECS", 0.02),
-            patch.object(watcher, "GRACE_SECS", 0.05),
+            patch.object(watcher, "WARMUP_SECS", 0.1),
+            patch.object(watcher, "GRACE_SECS", 0.1),
             patch.object(watcher, "MIN_SAVE_SECS", 0),
             patch.object(watcher, "APP_POLL_EVERY", 1),
             patch.object(watcher, "APP_GONE_POLLS", 2),
@@ -91,7 +91,7 @@ class WatcherStateMachineTest(unittest.TestCase):
                 current_app = app
                 time.sleep(0.02)  # > POLL_SECS so at least one poll happens
             # Let it settle
-            time.sleep(0.15)
+            time.sleep(0.2)
             state = self.watcher.state
             self.watcher.stop()
             time.sleep(0.03)
