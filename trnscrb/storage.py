@@ -79,9 +79,90 @@ def format_transcript(segments: list[dict], started_at: datetime, meeting_name: 
                 lines.append("")
             lines.append(f"[{speaker}]")
             current_speaker = speaker
-        lines.append(f"  {_fmt_time(seg['start'])}  {seg['text']}")
+        lines.append(f"  {_fmt_time(seg['start'])}  {clean_filler_words(seg['text'])}")
 
     return "\n".join(lines)
+
+
+_FILLER_WORDS = {
+    # Universal / cross-language hesitation sounds
+    "um",
+    "uh",
+    "uhm",
+    "umm",
+    "erm",
+    "ah",
+    "eh",
+    "hmm",
+    "hm",
+    "mm",
+    "mhm",
+    # English
+    "like",
+    "you know",
+    "I mean",
+    "sort of",
+    "kind of",
+    "basically",
+    "actually",
+    "right",
+    "so yeah",
+    # Swedish
+    "liksom",
+    "typ",
+    "alltså",
+    "asså",
+    "ba",
+    "öh",
+    "äh",
+    "ju",
+    "va",
+    "såhär",
+    "eller hur",
+    "på nåt sätt",
+    # Spanish
+    "pues",
+    "bueno",
+    "o sea",
+    "este",
+    "la verdad",
+    "en plan",
+    "digamos",
+    # German
+    "halt",
+    "also",
+    "quasi",
+    "sozusagen",
+    "eigentlich",
+    "na ja",
+    "genau",
+    # French
+    "genre",
+    "en fait",
+    "du coup",
+    "voilà",
+    "quoi",
+    "bah",
+    "ben",
+    "euh",
+}
+
+_filler_alts = "|".join(re.escape(f) for f in sorted(_FILLER_WORDS, key=len, reverse=True))
+_FILLER_PATTERN = re.compile(rf"\b(?:{_filler_alts})\b", re.IGNORECASE)
+
+
+def clean_filler_words(text: str) -> str:
+    """Remove common filler words/phrases that clutter transcripts.
+
+    Supports English, Swedish, Spanish, German, and French fillers.
+    """
+    cleaned = _FILLER_PATTERN.sub("", text)
+    # Collapse leftover punctuation artifacts and whitespace
+    cleaned = re.sub(r"(,\s*){2,}", ", ", cleaned)  # repeated commas
+    cleaned = re.sub(r"^\s*[,\s]+", "", cleaned)  # leading commas/space
+    cleaned = re.sub(r"[,\s]+$", "", cleaned)  # trailing commas/space
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    return cleaned
 
 
 def _fmt_time(seconds: float) -> str:

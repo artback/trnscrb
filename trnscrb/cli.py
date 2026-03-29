@@ -509,7 +509,7 @@ def weekly(week: str | None, prompt_file: str | None, save: bool):
         try:
             year, w = week.split("-W")
             monday = date.fromisocalendar(int(year), int(w), 1)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError):  # fmt: skip
             click.echo(
                 f"Invalid week format: '{week}'. Use YYYY-WNN (e.g. 2026-W13).",
                 err=True,
