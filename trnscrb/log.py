@@ -1,13 +1,13 @@
 """Centralised logging for trnscrb.
 
-Writes to ~/meeting-notes/trnscrb.log with automatic rotation (5 MB × 3 files).
+Writes to ~/Library/Logs/trnscrb.log with automatic rotation (5 MB × 3 files).
 Also emits to stderr so launchd / terminal sessions capture output.
 """
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-_LOG_DIR = Path.home() / "meeting-notes"
+_LOG_DIR = Path.home() / "Library" / "Logs"
 _LOG_FILE = _LOG_DIR / "trnscrb.log"
 _MAX_BYTES = 5 * 1024 * 1024  # 5 MB per file
 _BACKUP_COUNT = 3
