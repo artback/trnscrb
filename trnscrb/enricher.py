@@ -248,9 +248,7 @@ class OpenAICompatibleAdapter:
         client = self._client(config)
         response = client.models.list()
         models = [
-            str(model.id)
-            for model in getattr(response, "data", [])
-            if getattr(model, "id", None)
+            str(model.id) for model in getattr(response, "data", []) if getattr(model, "id", None)
         ]
         return models
 
@@ -287,9 +285,7 @@ class AnthropicAdapter:
         api_key = str(config.get("api_key") or "")
         if not api_key:
             raise RuntimeError("Anthropic API key is required.")
-        endpoint = str(config.get("endpoint") or DEFAULT_ENDPOINTS["anthropic"]).rstrip(
-            "/"
-        )
+        endpoint = str(config.get("endpoint") or DEFAULT_ENDPOINTS["anthropic"]).rstrip("/")
         kwargs = {"api_key": api_key}
         if endpoint and endpoint != DEFAULT_ENDPOINTS["anthropic"]:
             kwargs["base_url"] = endpoint
@@ -322,9 +318,7 @@ class AnthropicAdapter:
             messages=[{"role": "user", "content": prompt}],
         )
         blocks = getattr(response, "content", [])
-        parts = [
-            str(block.text).strip() for block in blocks if getattr(block, "text", None)
-        ]
+        parts = [str(block.text).strip() for block in blocks if getattr(block, "text", None)]
         content = "\n".join(part for part in parts if part).strip()
         if not content:
             raise RuntimeError("Anthropic returned an empty response.")
@@ -370,21 +364,15 @@ def get_active_provider_config() -> tuple[str, dict]:
     return provider, profile
 
 
-def test_provider_connection(
-    provider: str, endpoint: str, api_key: str = ""
-) -> tuple[bool, str]:
+def test_provider_connection(provider: str, endpoint: str, api_key: str = "") -> tuple[bool, str]:
     provider = normalize_provider(provider)
-    config = _build_runtime_config(
-        provider, endpoint=endpoint, api_key=api_key, model=""
-    )
+    config = _build_runtime_config(provider, endpoint=endpoint, api_key=api_key, model="")
     return _ADAPTERS[provider].test_connection(config)
 
 
 def list_provider_models(provider: str, endpoint: str, api_key: str = "") -> list[str]:
     provider = normalize_provider(provider)
-    config = _build_runtime_config(
-        provider, endpoint=endpoint, api_key=api_key, model=""
-    )
+    config = _build_runtime_config(provider, endpoint=endpoint, api_key=api_key, model="")
     return _ADAPTERS[provider].list_models(config)
 
 
@@ -618,20 +606,14 @@ def _get_provider_profile(provider: str, loaded_settings: dict | None = None) ->
         "endpoint": raw_profile.get("endpoint") or DEFAULT_ENDPOINTS[provider],
         "api_key": str(raw_profile.get("api_key") or ""),
         "model": str(raw_profile.get("model") or ""),
-        "models": raw_profile.get("models")
-        if isinstance(raw_profile.get("models"), list)
-        else [],
+        "models": raw_profile.get("models") if isinstance(raw_profile.get("models"), list) else [],
     }
     merged["endpoint"] = normalize_endpoint(provider, str(merged["endpoint"]))
-    merged["models"] = [
-        str(model).strip() for model in merged["models"] if str(model).strip()
-    ]
+    merged["models"] = [str(model).strip() for model in merged["models"] if str(model).strip()]
     return merged
 
 
-def _build_runtime_config(
-    provider: str, endpoint: str | None, api_key: str, model: str
-) -> dict:
+def _build_runtime_config(provider: str, endpoint: str | None, api_key: str, model: str) -> dict:
     return {
         "provider": provider,
         "endpoint": normalize_endpoint(provider, endpoint),

@@ -223,9 +223,7 @@ class BrowserMeetingTabFilterTest(unittest.TestCase):
         """osascript timeout should be handled gracefully."""
         import subprocess as sp
 
-        with patch(
-            "subprocess.run", side_effect=sp.TimeoutExpired(cmd="osascript", timeout=4)
-        ):
+        with patch("subprocess.run", side_effect=sp.TimeoutExpired(cmd="osascript", timeout=4)):
             result = watcher._browser_has_meeting_tab(return_name=False)
             self.assertIs(result, False)
 
@@ -341,9 +339,7 @@ class MinSaveSecsTest(unittest.TestCase):
         # Recording started 10 seconds ago — shorter than MIN_SAVE_SECS
         now = datetime(2026, 3, 29, 12, 0, 30)
         w._rec_started = datetime(2026, 3, 29, 12, 0, 20)  # 10s duration
-        w._since = datetime(
-            2026, 3, 29, 12, 0, 20
-        )  # cooling started 10s ago (> GRACE_SECS)
+        w._since = datetime(2026, 3, 29, 12, 0, 20)  # cooling started 10s ago (> GRACE_SECS)
 
         call_count = [0]
 
@@ -373,9 +369,7 @@ class MinSaveSecsTest(unittest.TestCase):
         w._state = "cooling"
         now = datetime(2026, 3, 29, 12, 5, 0)
         w._rec_started = datetime(2026, 3, 29, 12, 0, 0)  # 5 minutes = 300s
-        w._since = datetime(
-            2026, 3, 29, 12, 4, 50
-        )  # cooling started 10s ago (> GRACE_SECS)
+        w._since = datetime(2026, 3, 29, 12, 4, 50)  # cooling started 10s ago (> GRACE_SECS)
 
         call_count = [0]
 

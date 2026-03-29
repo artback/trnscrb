@@ -1,8 +1,8 @@
 """Transcript file storage — saves and reads .txt files from ~/meeting-notes/."""
 
 import re
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 from trnscrb.log import get_logger
 
@@ -57,9 +57,7 @@ def read_transcript(transcript_id: str) -> str | None:
     return path.read_text(encoding="utf-8")
 
 
-def format_transcript(
-    segments: list[dict], started_at: datetime, meeting_name: str
-) -> str:
+def format_transcript(segments: list[dict], started_at: datetime, meeting_name: str) -> str:
     if segments:
         duration = _fmt_time(segments[-1]["end"])
     else:

@@ -89,12 +89,12 @@ class WatcherStateMachineTest(unittest.TestCase):
             for mic, app in steps:
                 current_mic = mic
                 current_app = app
-                time.sleep(0.015)  # > POLL_SECS so at least one poll happens
+                time.sleep(0.02)  # > POLL_SECS so at least one poll happens
             # Let it settle
-            time.sleep(0.1)
+            time.sleep(0.15)
             state = self.watcher.state
             self.watcher.stop()
-            time.sleep(0.02)
+            time.sleep(0.03)
 
         return len(self.started), self.stopped, state
 
@@ -172,15 +172,16 @@ class WatcherStateMachineTest(unittest.TestCase):
         """If mic goes off and app was briefly not detected, but then app is
         detected again during cooling, should resume recording."""
         steps = (
-            # Recording
-            [(True, True)] * 10
-            # Mic off, app briefly not detected (enters cooling)
-            + [(False, False)] * 3
-            # App comes back during cooling (still muted)
-            + [(False, True)] * 10
+            # Recording — enough steps to be well past warmup
+            [(True, True)] * 15
+            # Mic off, app gone for 2 polls (just enough to enter cooling
+            # but GRACE_SECS=0.05 hasn't elapsed yet)
+            + [(False, False)] * 2
+            # App comes back during cooling (still muted) — resumes recording
+            + [(False, True)] * 15
             # Unmute and end normally
             + [(True, True)] * 5
-            + [(False, False)] * 20
+            + [(False, False)] * 30
         )
         started, stopped, state = self._simulate(steps)
         self.assertEqual(started, 1)

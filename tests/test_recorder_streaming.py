@@ -197,9 +197,7 @@ class RecorderFullCycleTest(unittest.TestCase):
             result = rec.stop()
 
         self.assertIsNone(result)
-        self.assertFalse(
-            tmp_path.exists(), "Temp file should be deleted on zero frames"
-        )
+        self.assertFalse(tmp_path.exists(), "Temp file should be deleted on zero frames")
 
     def test_stop_when_never_started_returns_none(self):
         rec = Recorder(device=None)

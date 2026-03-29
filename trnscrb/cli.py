@@ -12,9 +12,9 @@ trnscrb devices   — list audio input devices
 
 import importlib.util
 import json
-from datetime import datetime
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import click
@@ -25,11 +25,7 @@ _log = get_logger("trnscrb.cli")
 
 # Path to Claude Desktop's MCP config file
 _CLAUDE_CONFIG = (
-    Path.home()
-    / "Library"
-    / "Application Support"
-    / "Claude"
-    / "claude_desktop_config.json"
+    Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
 )
 _DEFAULT_PARAKEET_MODEL_ID = "mlx-community/parakeet-tdt-0.6b-v3"
 
@@ -46,9 +42,7 @@ def cli():
 
 
 @cli.command()
-@click.option(
-    "--force", is_flag=True, help="Re-install packages even if already present."
-)
+@click.option("--force", is_flag=True, help="Re-install packages even if already present.")
 def install(force: bool):
     """Smart installer — checks each dependency and skips what's already installed."""
     click.echo()
@@ -59,11 +53,7 @@ def install(force: bool):
     py_ok = sys.version_info >= (3, 11)
     _row("Python 3.11+", py_ok, sys.version.split()[0])
     if not py_ok:
-        click.echo(
-            click.style(
-                "  Python 3.11+ is required. Install from python.org.", fg="red"
-            )
-        )
+        click.echo(click.style("  Python 3.11+ is required. Install from python.org.", fg="red"))
         sys.exit(1)
     click.echo()
 
@@ -90,9 +80,7 @@ def install(force: bool):
 
     if to_install:
         click.echo()
-        if click.confirm(
-            f"  Install {len(to_install)} missing package(s)?", default=True
-        ):
+        if click.confirm(f"  Install {len(to_install)} missing package(s)?", default=True):
             _run([sys.executable, "-m", "pip", "install", "--quiet", *to_install])
     click.echo()
 
@@ -102,16 +90,13 @@ def install(force: bool):
     if not bh_ok:
         if click.confirm("  Install BlackHole via Homebrew?", default=True):
             _run(["brew", "install", "blackhole-2ch"])
-            click.echo(
-                "  After install: open System Settings → Sound → Output and select"
-            )
-            click.echo(
-                "  'Multi-Output Device' that includes BlackHole to capture system audio."
-            )
+            click.echo("  After install: open System Settings → Sound → Output and select")
+            click.echo("  'Multi-Output Device' that includes BlackHole to capture system audio.")
     click.echo()
 
     # ── 4. Transcription model ───────────────────────────────────────────────
-    from trnscrb.settings import load as load_settings, save as save_settings
+    from trnscrb.settings import load as load_settings
+    from trnscrb.settings import save as save_settings
 
     settings = load_settings()
     backend = _normalize_backend(settings.get("transcription_backend"))
@@ -178,9 +163,7 @@ def install(force: bool):
         if not mcp_ok:
             if click.confirm("  Register trnscrb with Claude Desktop?", default=True):
                 _write_mcp_config()
-                click.echo(
-                    click.style("  Done. Restart Claude Desktop to apply.", fg="green")
-                )
+                click.echo(click.style("  Done. Restart Claude Desktop to apply.", fg="green"))
         click.echo()
 
     # Launch at login
@@ -202,9 +185,7 @@ def install(force: bool):
     if settings.get("auto_record") is not True:
         settings["auto_record"] = True
         changed = True
-    configured_backend = (
-        str(settings.get("transcription_backend") or "").strip().lower()
-    )
+    configured_backend = str(settings.get("transcription_backend") or "").strip().lower()
     if configured_backend not in {"parakeet", "whisper"}:
         settings["transcription_backend"] = "parakeet"
         changed = True
@@ -253,9 +234,11 @@ def server():
 def watch():
     """Watch for mic activity and auto-record meetings (headless, no menu bar)."""
     import signal
-    from trnscrb.watcher import MicWatcher, WARMUP_SECS, GRACE_SECS
-    from trnscrb import recorder as rec_module, transcriber, diarizer, storage
+
+    from trnscrb import diarizer, storage, transcriber
+    from trnscrb import recorder as rec_module
     from trnscrb.recorder import cleanup_stale_temp_files
+    from trnscrb.watcher import GRACE_SECS, WARMUP_SECS, MicWatcher
 
     cleanup_stale_temp_files()
     from trnscrb.calendar_integration import get_current_or_upcoming_event
@@ -335,9 +318,7 @@ def watch():
                 enriched = result["enriched_transcript"]
                 updated = enriched + "\n\n" + "=" * 60 + "\n\n" + result["enrichment"]
                 storage.save_transcript(path, updated)
-                click.echo(
-                    f"  ✓ Enriched: summary + action items added ({result['provider']})"
-                )
+                click.echo(f"  ✓ Enriched: summary + action items added ({result['provider']})")
             except Exception as e:
                 _log.warning("Auto-enrich failed: %s", e)
                 click.echo(f"  ⚠  Enrichment skipped: {e}")
@@ -345,9 +326,7 @@ def watch():
     watcher = MicWatcher(on_start=on_start, on_stop=on_stop)
     watcher.start()
 
-    click.echo(
-        f"Watching for mic activity (warmup={WARMUP_SECS}s, grace={GRACE_SECS}s)."
-    )
+    click.echo(f"Watching for mic activity (warmup={WARMUP_SECS}s, grace={GRACE_SECS}s).")
     click.echo("Press Ctrl-C to stop.\n")
 
     def _shutdown(sig, frame):
@@ -388,13 +367,12 @@ def list_cmd():
 
 @cli.command()
 @click.argument("query")
-@click.option(
-    "-n", "--context", default=1, help="Number of context lines around each match."
-)
+@click.option("-n", "--context", default=1, help="Number of context lines around each match.")
 def search(query: str, context: int):
     """Search across all transcripts for a keyword or phrase."""
-    from trnscrb import storage
     import re
+
+    from trnscrb import storage
 
     files = sorted(storage.NOTES_DIR.glob("*.txt"), reverse=True)
     if not files:
@@ -466,12 +444,12 @@ def show(transcript_id: str):
 def enrich(transcript_id: str):
     """Run an LLM pass on a transcript: summary, action items, speaker names."""
     from trnscrb import storage
+    from trnscrb.calendar_integration import get_current_or_upcoming_event
     from trnscrb.enricher import (
         enrich_transcript,
         get_active_provider_config,
         provider_label,
     )
-    from trnscrb.calendar_integration import get_current_or_upcoming_event
 
     text = storage.read_transcript(transcript_id)
     if text is None:
@@ -490,13 +468,7 @@ def enrich(transcript_id: str):
 
     # Overwrite file with resolved speaker names + enrichment appended
     path = storage.NOTES_DIR / f"{transcript_id}.txt"
-    updated = (
-        result["enriched_transcript"]
-        + "\n\n"
-        + "=" * 60
-        + "\n\n"
-        + result["enrichment"]
-    )
+    updated = result["enriched_transcript"] + "\n\n" + "=" * 60 + "\n\n" + result["enrichment"]
     storage.save_transcript(path, updated)
 
     click.echo(result["enrichment"])
@@ -507,15 +479,13 @@ def enrich(transcript_id: str):
 
 
 @cli.command()
-@click.option(
-    "--week", default=None, help="ISO week (e.g. 2026-W13). Defaults to last week."
-)
+@click.option("--week", default=None, help="ISO week (e.g. 2026-W13). Defaults to last week.")
 @click.option(
     "--prompt",
     "prompt_file",
     default=None,
     type=click.Path(exists=True),
-    help="Custom prompt template file. Use {week_start}, {week_end}, {transcripts} as placeholders.",
+    help="Custom prompt template file. Use {week_start}, {week_end}, {transcripts}.",
 )
 @click.option("--save/--no-save", default=True, help="Save summary to ~/meeting-notes/")
 def weekly(week: str | None, prompt_file: str | None, save: bool):
@@ -527,6 +497,7 @@ def weekly(week: str | None, prompt_file: str | None, save: bool):
       3. Built-in default
     """
     from datetime import date, timedelta
+
     from trnscrb import storage
     from trnscrb.enricher import (
         generate_weekly_summary,
@@ -538,7 +509,7 @@ def weekly(week: str | None, prompt_file: str | None, save: bool):
         try:
             year, w = week.split("-W")
             monday = date.fromisocalendar(int(year), int(w), 1)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             click.echo(
                 f"Invalid week format: '{week}'. Use YYYY-WNN (e.g. 2026-W13).",
                 err=True,
@@ -579,9 +550,8 @@ def weekly(week: str | None, prompt_file: str | None, save: bool):
 
     provider, profile = get_active_provider_config()
     model_name = str(profile.get("model") or "default")
-    click.echo(
-        f"Found {len(transcripts)} transcript(s). Summarizing with {provider_label(provider)} ({model_name})…"
-    )
+    prov = provider_label(provider)
+    click.echo(f"Found {len(transcripts)} transcript(s). Summarizing with {prov} ({model_name})…")
 
     try:
         summary = generate_weekly_summary(
@@ -626,6 +596,7 @@ def annual(year: str | None, prompt_file: str | None, save: bool):
       3. Built-in default
     """
     from datetime import date
+
     from trnscrb import storage
     from trnscrb.enricher import (
         generate_annual_summary,
@@ -638,9 +609,7 @@ def annual(year: str | None, prompt_file: str | None, save: bool):
 
     files = sorted(storage.NOTES_DIR.glob(f"weekly-{target_year}-W*.txt"))
     if not files:
-        click.echo(
-            f"No weekly summaries found for {target_year}. Run `trnscrb weekly` first."
-        )
+        click.echo(f"No weekly summaries found for {target_year}. Run `trnscrb weekly` first.")
         return
 
     combined = ""
@@ -655,14 +624,11 @@ def annual(year: str | None, prompt_file: str | None, save: bool):
 
     provider, profile = get_active_provider_config()
     model_name = str(profile.get("model") or "default")
-    click.echo(
-        f"Found {len(files)} weekly summary(ies). Summarizing with {provider_label(provider)} ({model_name})…"
-    )
+    prov = provider_label(provider)
+    click.echo(f"Found {len(files)} weekly summary(ies). Summarizing with {prov} ({model_name})…")
 
     try:
-        summary = generate_annual_summary(
-            combined, target_year, prompt_override=prompt_override
-        )
+        summary = generate_annual_summary(combined, target_year, prompt_override=prompt_override)
     except Exception as e:
         click.echo(f"Annual summary failed: {e}", err=True)
         sys.exit(1)
@@ -691,14 +657,11 @@ def icons():
 def mic_status():
     """Check live mic activity and which meeting app is detected."""
     import time
-    from trnscrb.watcher import is_mic_in_use, detect_meeting, WARMUP_SECS, GRACE_SECS
+
+    from trnscrb.watcher import GRACE_SECS, WARMUP_SECS, detect_meeting, is_mic_in_use
 
     active = is_mic_in_use()
-    status = (
-        click.style("IN USE 🔴", fg="red")
-        if active
-        else click.style("idle  ⚪", fg="white")
-    )
+    status = click.style("IN USE 🔴", fg="red") if active else click.style("idle  ⚪", fg="white")
     click.echo(f"\n  Microphone: {status}")
 
     if active:
@@ -735,9 +698,7 @@ def devices():
 
 def _row(label: str, ok: bool, detail: str = "", indent: int = 2):
     mark = click.style("✓", fg="green") if ok else click.style("✗", fg="red")
-    status = (
-        click.style("ok", fg="green") if ok else click.style("missing", fg="yellow")
-    )
+    status = click.style("ok", fg="green") if ok else click.style("missing", fg="yellow")
     pad = " " * indent
     click.echo(f"{pad}{mark} {label:<30} {status}  {detail}")
 
@@ -751,9 +712,7 @@ def _blackhole_installed() -> bool:
         import sounddevice as sd
 
         return any(
-            "BlackHole" in d["name"]
-            for d in sd.query_devices()
-            if d["max_input_channels"] > 0
+            "BlackHole" in d["name"] for d in sd.query_devices() if d["max_input_channels"] > 0
         )
     except Exception:
         return False
@@ -848,8 +807,9 @@ def _run(cmd: list[str]):
 def _request_mic_permission() -> None:
     """Briefly open the audio input stream to trigger the macOS mic permission dialog."""
     try:
-        import sounddevice as sd
         import time
+
+        import sounddevice as sd
 
         stream = sd.InputStream(channels=1, samplerate=16000, dtype="float32")
         stream.start()
@@ -869,9 +829,7 @@ def _request_calendar_permission() -> None:
         from trnscrb.calendar_integration import get_current_or_upcoming_event
 
         get_current_or_upcoming_event()
-        click.echo(
-            click.style("    ✓ Calendar access granted (or skipped)", fg="green")
-        )
+        click.echo(click.style("    ✓ Calendar access granted (or skipped)", fg="green"))
     except Exception as e:
         click.echo(click.style(f"    ⚠  Calendar: {e}", fg="yellow"))
 

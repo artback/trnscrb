@@ -12,8 +12,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - run: uv run --with ruff ruff check .
-      - run: uv run --with ruff ruff format --check .
+      - run: uvx ruff check .
+      - run: uvx ruff format --check .
 
   test:
     runs-on: macos-latest

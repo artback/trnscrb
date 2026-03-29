@@ -83,9 +83,7 @@ _kSysObject = 1
 _kDefaultInputDevice = 0x64496E20  # 'dIn '
 _kScopeGlobal = 0x676C6F62  # 'glob'
 _kElementMain = 0
-_kIsRunningSomewhere = (
-    0x676F6E65  # 'gone' (kAudioDevicePropertyDeviceIsRunningSomewhere)
-)
+_kIsRunningSomewhere = 0x676F6E65  # 'gone' (kAudioDevicePropertyDeviceIsRunningSomewhere)
 
 
 class MicWatcher:
@@ -246,11 +244,7 @@ class MicWatcher:
                 # Only stop if still in cooling (app check may have moved us back)
                 # and the grace period has elapsed.
                 if self._state == "cooling" and elapsed >= GRACE_SECS:
-                    duration = (
-                        (now - self._rec_started).total_seconds()
-                        if self._rec_started
-                        else 0
-                    )
+                    duration = (now - self._rec_started).total_seconds() if self._rec_started else 0
                     _log.debug("state %s → %s", "cooling", "idle")
                     self._state = "idle"
                     self._since = None
@@ -450,9 +444,7 @@ def is_meeting_app_running() -> bool:
         )
         for frag in _ACTIVE_SESSION_PROCS:
             if frag in ps.stdout:
-                _log.debug(
-                    "is_meeting_app_running: ps check succeeded (process=%s)", frag
-                )
+                _log.debug("is_meeting_app_running: ps check succeeded (process=%s)", frag)
                 return True
     except Exception:
         pass
@@ -510,9 +502,7 @@ def detect_meeting() -> str:
     # 3. Fallback: check for session-only processes (CptHost for Zoom, etc.).
     #    Skip apps like FaceTime / Slack Helper that persist when idle.
     try:
-        ps = subprocess.run(
-            ["ps", "-ax", "-o", "comm="], capture_output=True, text=True, timeout=3
-        )
+        ps = subprocess.run(["ps", "-ax", "-o", "comm="], capture_output=True, text=True, timeout=3)
         _SESSION_FALLBACK = [
             ("CptHost", "Zoom"),
             ("Tuple", "Tuple"),
@@ -609,9 +599,7 @@ def _run_osascript(label: str, script: str) -> str | None:
         )
         name = r.stdout.strip()
         if name:
-            _log.debug(
-                "_browser_has_meeting_tab: found tab in %s (name=%s)", label, name
-            )
+            _log.debug("_browser_has_meeting_tab: found tab in %s (name=%s)", label, name)
             return name
     except subprocess.TimeoutExpired:
         _log.debug("_browser_has_meeting_tab: osascript timeout for %s", label)
@@ -630,10 +618,7 @@ def _browser_has_meeting_tab(return_name: bool = False):
 
     browsers = [("Chrome", _CHROME_TAB_SCRIPT), ("Safari", _SAFARI_TAB_SCRIPT)]
     with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = {
-            pool.submit(_run_osascript, label, script): label
-            for label, script in browsers
-        }
+        futures = {pool.submit(_run_osascript, label, script): label for label, script in browsers}
         for future in as_completed(futures, timeout=5):
             try:
                 name = future.result()

@@ -8,7 +8,6 @@ Saves a 44x44 template PNG to ~/.local/share/trnscrb/mic.png
 
 from pathlib import Path
 
-
 ICON_DIR = Path.home() / ".local" / "share" / "trnscrb"
 ICON_IDLE = ICON_DIR / "mic.png"
 ICON_RECORDING = ICON_DIR / "mic_active.png"
@@ -70,8 +69,6 @@ def generate_icons_cli() -> None:
         generate_icons()
         print(f"✓ Icons written to {ICON_DIR}")
     except ImportError:
-        print(
-            "Pillow not available — menu bar will use emoji fallback (🎙 / 🔴). That's fine."
-        )
+        print("Pillow not available — menu bar will use emoji fallback (🎙 / 🔴). That's fine.")
     except Exception as e:
         print(f"Icon generation failed: {e}")

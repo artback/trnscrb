@@ -116,9 +116,7 @@ def _transcribe_parakeet(audio_path: Path) -> list[dict]:
     result = model.transcribe(str(audio_path))
     sentences = getattr(result, "sentences", None)
     if sentences is None:
-        raise RuntimeError(
-            "Parakeet transcription did not return aligned sentences output."
-        )
+        raise RuntimeError("Parakeet transcription did not return aligned sentences output.")
 
     normalized = []
     for sentence in sentences:
@@ -127,7 +125,7 @@ def _transcribe_parakeet(audio_path: Path) -> list[dict]:
             continue
         try:
             start = float(getattr(sentence, "start", 0.0))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             _log.warning(
                 "Could not parse start timestamp %r, defaulting to 0.0",
                 getattr(sentence, "start", None),
@@ -135,7 +133,7 @@ def _transcribe_parakeet(audio_path: Path) -> list[dict]:
             start = 0.0
         try:
             end = float(getattr(sentence, "end", 0.0))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             _log.warning(
                 "Could not parse end timestamp %r, defaulting to 0.0",
                 getattr(sentence, "end", None),

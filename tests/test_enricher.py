@@ -1,5 +1,5 @@
-from types import SimpleNamespace
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from trnscrb import enricher
@@ -19,9 +19,7 @@ class _FakeAdapter:
     def enrich(self, prompt, config):
         self.last_prompt = prompt
         self.last_model = config["model"]
-        return (
-            "SUMMARY:\nA\n\nACTION ITEMS:\n- B\n\nSPEAKER MAPPING:\n- SPEAKER_00 → Alex"
-        )
+        return "SUMMARY:\nA\n\nACTION ITEMS:\n- B\n\nSPEAKER MAPPING:\n- SPEAKER_00 → Alex"
 
 
 class EnricherTests(unittest.TestCase):
@@ -80,12 +78,8 @@ class EnricherTests(unittest.TestCase):
                 )
             )
         )
-        with mock.patch(
-            "trnscrb.enricher._build_openai_client", return_value=fake_client
-        ):
-            models = adapter.list_models(
-                {"endpoint": "http://127.0.0.1:8080", "api_key": ""}
-            )
+        with mock.patch("trnscrb.enricher._build_openai_client", return_value=fake_client):
+            models = adapter.list_models({"endpoint": "http://127.0.0.1:8080", "api_key": ""})
 
         self.assertEqual(models, ["m1", "m2"])
 

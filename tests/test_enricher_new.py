@@ -9,7 +9,6 @@ from unittest import mock
 
 from trnscrb import enricher
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -59,13 +58,9 @@ class TestClaudeCodeAdapterTestConnection(unittest.TestCase):
 
     def test_cli_found(self):
         adapter = enricher.ClaudeCodeAdapter()
-        proc = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="1.2.3\n", stderr=""
-        )
+        proc = subprocess.CompletedProcess(args=[], returncode=0, stdout="1.2.3\n", stderr="")
         with (
-            mock.patch.object(
-                adapter, "_find_cli", return_value="/usr/local/bin/claude"
-            ),
+            mock.patch.object(adapter, "_find_cli", return_value="/usr/local/bin/claude"),
             mock.patch("subprocess.run", return_value=proc),
         ):
             ok, msg = adapter.test_connection({})
@@ -82,9 +77,7 @@ class TestClaudeCodeAdapterTestConnection(unittest.TestCase):
     def test_cli_subprocess_exception(self):
         adapter = enricher.ClaudeCodeAdapter()
         with (
-            mock.patch.object(
-                adapter, "_find_cli", return_value="/usr/local/bin/claude"
-            ),
+            mock.patch.object(adapter, "_find_cli", return_value="/usr/local/bin/claude"),
             mock.patch("subprocess.run", side_effect=OSError("boom")),
         ):
             ok, msg = adapter.test_connection({})
@@ -127,9 +120,7 @@ class TestClaudeCodeAdapterEnrich(unittest.TestCase):
 
     def test_non_zero_exit_raises(self):
         adapter = enricher.ClaudeCodeAdapter()
-        proc = subprocess.CompletedProcess(
-            args=[], returncode=1, stdout="", stderr="auth failed"
-        )
+        proc = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="auth failed")
         with (
             mock.patch.object(adapter, "_find_cli", return_value="/usr/bin/claude"),
             mock.patch("subprocess.run", return_value=proc),
@@ -163,9 +154,7 @@ class TestClaudeCodeAdapterEnrich(unittest.TestCase):
 
     def test_default_model_is_sonnet(self):
         adapter = enricher.ClaudeCodeAdapter()
-        proc = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="ok\n", stderr=""
-        )
+        proc = subprocess.CompletedProcess(args=[], returncode=0, stdout="ok\n", stderr="")
         with (
             mock.patch.object(adapter, "_find_cli", return_value="/usr/bin/claude"),
             mock.patch("subprocess.run", return_value=proc) as run_mock,
@@ -203,9 +192,7 @@ class TestLoadPrompt(unittest.TestCase):
 
 class TestGenerateWeeklySummary(unittest.TestCase):
     def _patch_settings(self):
-        return mock.patch(
-            "trnscrb.settings.load", return_value=_SETTINGS_WITH_CLAUDE_CODE
-        )
+        return mock.patch("trnscrb.settings.load", return_value=_SETTINGS_WITH_CLAUDE_CODE)
 
     def test_combines_transcripts_and_calls_adapter(self):
         fake = _FakeAdapter(response="Weekly summary output")
@@ -265,9 +252,7 @@ class TestGenerateWeeklySummary(unittest.TestCase):
         with (
             self._patch_settings(),
             mock.patch.dict(enricher._ADAPTERS, {"claude_code": fake}),
-            mock.patch(
-                "trnscrb.enricher._load_prompt", return_value=custom_template
-            ) as lp,
+            mock.patch("trnscrb.enricher._load_prompt", return_value=custom_template) as lp,
         ):
             enricher.generate_weekly_summary(
                 [{"name": "a.txt", "text": "x"}],
@@ -285,9 +270,7 @@ class TestGenerateWeeklySummary(unittest.TestCase):
 
 class TestGenerateAnnualSummary(unittest.TestCase):
     def _patch_settings(self):
-        return mock.patch(
-            "trnscrb.settings.load", return_value=_SETTINGS_WITH_CLAUDE_CODE
-        )
+        return mock.patch("trnscrb.settings.load", return_value=_SETTINGS_WITH_CLAUDE_CODE)
 
     def test_passes_summaries_and_year(self):
         fake = _FakeAdapter(response="Annual output")
@@ -317,9 +300,7 @@ class TestGenerateAnnualSummary(unittest.TestCase):
         with (
             self._patch_settings(),
             mock.patch.dict(enricher._ADAPTERS, {"claude_code": fake}),
-            mock.patch(
-                "trnscrb.enricher._load_prompt", return_value=custom_template
-            ) as lp,
+            mock.patch("trnscrb.enricher._load_prompt", return_value=custom_template) as lp,
         ):
             enricher.generate_annual_summary("data", "2026")
         lp.assert_called_once_with("annual", enricher._DEFAULT_ANNUAL_PROMPT)
@@ -454,9 +435,7 @@ class WeeklySummaryErrorTest(unittest.TestCase):
     """Test edge cases for generate_weekly_summary."""
 
     def _patch_settings(self):
-        return mock.patch(
-            "trnscrb.settings.load", return_value=_SETTINGS_WITH_CLAUDE_CODE
-        )
+        return mock.patch("trnscrb.settings.load", return_value=_SETTINGS_WITH_CLAUDE_CODE)
 
     def test_empty_transcripts_list(self):
         """Empty transcripts list should still call the adapter with an empty combined string."""

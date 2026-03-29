@@ -18,8 +18,8 @@ def _get_pipeline(hf_token: str):
     """Return the cached pyannote pipeline, loading it on first call."""
     global _pipeline
     if _pipeline is None:
-        from pyannote.audio import Pipeline
         import torch
+        from pyannote.audio import Pipeline
 
         log.info("Loading pyannote speaker-diarization pipeline …")
         _pipeline = Pipeline.from_pretrained(

@@ -15,15 +15,16 @@ Tools available to Claude:
   enrich_transcript      — post-call summary + action items via configured LLM
 """
 
-import os
 import json
+import os
 import threading
 from datetime import datetime
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from trnscrb import storage, recorder as rec_module, diarizer, transcriber
+from trnscrb import diarizer, storage, transcriber
+from trnscrb import recorder as rec_module
 from trnscrb.calendar_integration import get_current_or_upcoming_event
 from trnscrb.log import get_logger
 
@@ -211,7 +212,7 @@ def get_weekly_transcripts(week: str = "") -> str:
         try:
             year, w = week.split("-W")
             monday = date.fromisocalendar(int(year), int(w), 1)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return f"Invalid week format: '{week}'. Use YYYY-WNN (e.g. 2026-W13)."
     else:
         today = date.today()
@@ -235,7 +236,9 @@ def get_weekly_transcripts(week: str = "") -> str:
         week_label = monday.strftime("%G-W%V")
         return f"No transcripts found for {week_label} ({monday} to {friday})."
 
-    header = f"Week: {monday.strftime('%G-W%V')} ({monday} to {friday})\nTranscripts: {len(parts)}\n\n"
+    header = (
+        f"Week: {monday.strftime('%G-W%V')} ({monday} to {friday})\nTranscripts: {len(parts)}\n\n"
+    )
     return header + "\n\n".join(parts)
 
 
@@ -260,9 +263,7 @@ def get_weekly_summaries(year: str = "") -> str:
         text = f.read_text(encoding="utf-8").strip()
         parts.append(f"{'=' * 40}\n{f.stem}\n{'=' * 40}\n{text}")
 
-    return f"Year: {target_year}\nWeekly summaries: {len(files)}\n\n" + "\n\n".join(
-        parts
-    )
+    return f"Year: {target_year}\nWeekly summaries: {len(files)}\n\n" + "\n\n".join(parts)
 
 
 @mcp.tool()
@@ -317,6 +318,8 @@ def enrich_transcript(transcript_id: str) -> str:
 
     from trnscrb.enricher import (
         enrich_transcript as _enrich,
+    )
+    from trnscrb.enricher import (
         get_active_provider_config,
         provider_label,
     )
@@ -331,13 +334,7 @@ def enrich_transcript(transcript_id: str) -> str:
 
     path = storage.NOTES_DIR / f"{transcript_id}.txt"
     if path.exists():
-        updated = (
-            result["enriched_transcript"]
-            + "\n\n"
-            + "=" * 60
-            + "\n\n"
-            + result["enrichment"]
-        )
+        updated = result["enriched_transcript"] + "\n\n" + "=" * 60 + "\n\n" + result["enrichment"]
         storage.save_transcript(path, updated)
 
     return result["enrichment"]

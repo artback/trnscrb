@@ -1,5 +1,5 @@
-from pathlib import Path
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from click.testing import CliRunner
@@ -11,9 +11,7 @@ class CliEnrichTests(unittest.TestCase):
     def test_enrich_uses_selected_provider_and_updates_transcript(self):
         runner = CliRunner()
         with (
-            mock.patch(
-                "trnscrb.storage.read_transcript", return_value="[SPEAKER_00] hi"
-            ),
+            mock.patch("trnscrb.storage.read_transcript", return_value="[SPEAKER_00] hi"),
             mock.patch("trnscrb.storage.save_transcript") as save_mock,
             mock.patch("trnscrb.storage.NOTES_DIR", Path("/tmp")),
             mock.patch(

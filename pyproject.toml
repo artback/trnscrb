@@ -57,5 +57,12 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
 
+[tool.ruff.lint.per-file-ignores]
+# AppleScript literals and prompt templates exceed 100 chars — breaking them harms readability
+"trnscrb/watcher.py" = ["E501"]
+"trnscrb/calendar_integration.py" = ["E501"]
+"trnscrb/enricher.py" = ["E501"]
+"trnscrb/mcp_server.py" = ["E501"]
+
 [tool.ruff.format]
 quote-style = "double"

@@ -9,8 +9,8 @@ from unittest import mock
 
 from click.testing import CliRunner
 
-from trnscrb.cli import cli
 from trnscrb import storage
+from trnscrb.cli import cli
 
 
 class _TmpNotesMixin:
@@ -129,9 +129,7 @@ class TestCLIWeeklyCommand(_TmpNotesMixin, unittest.TestCase):
                     "trnscrb.enricher.get_active_provider_config",
                     return_value=("claude_code", {"model": "sonnet"}),
                 ),
-                mock.patch(
-                    "trnscrb.enricher.provider_label", return_value="Claude Code"
-                ),
+                mock.patch("trnscrb.enricher.provider_label", return_value="Claude Code"),
                 mock.patch("trnscrb.storage.save_transcript"),
             ):
                 result = CliRunner().invoke(
@@ -192,9 +190,7 @@ class TestGetTranscriptPath(unittest.TestCase):
 class TestFormatTranscript(unittest.TestCase):
     def test_duration_spacing(self):
         segments = [{"start": 0.0, "end": 65.0, "text": "Hello", "speaker": "Alice"}]
-        text = storage.format_transcript(
-            segments, datetime(2026, 3, 23, 14, 30, 0), "standup"
-        )
+        text = storage.format_transcript(segments, datetime(2026, 3, 23, 14, 30, 0), "standup")
         self.assertIn("Duration: 01:05", text)
 
     def test_empty_segments(self):
@@ -207,9 +203,7 @@ class TestFormatTranscript(unittest.TestCase):
             {"start": 5.0, "end": 10.0, "text": "World", "speaker": "Alice"},
             {"start": 10.0, "end": 15.0, "text": "Hi", "speaker": "Bob"},
         ]
-        text = storage.format_transcript(
-            segments, datetime(2026, 1, 1, 0, 0, 0), "test"
-        )
+        text = storage.format_transcript(segments, datetime(2026, 1, 1, 0, 0, 0), "test")
         self.assertEqual(text.count("[Alice]"), 1)
         self.assertEqual(text.count("[Bob]"), 1)
 
@@ -303,8 +297,8 @@ class PathTraversalTest(unittest.TestCase):
 
     def test_normal_id_works(self):
         """A normal transcript_id should work (if file exists)."""
-        import tempfile
         import shutil
+        import tempfile
 
         tmpdir = tempfile.mkdtemp()
         try:

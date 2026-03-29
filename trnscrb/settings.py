@@ -1,8 +1,8 @@
 """Persistent user settings stored in ~/.config/trnscrb/settings.json."""
 
-from copy import deepcopy
 import json
 import shutil
+from copy import deepcopy
 from pathlib import Path
 
 from trnscrb.log import get_logger
