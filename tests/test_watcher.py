@@ -186,6 +186,44 @@ class WatcherStateMachineTest(unittest.TestCase):
         self.assertEqual(started, 1)
         self.assertEqual(stopped, 1)
 
+    def test_single_app_check_failure_does_not_stop(self):
+        """A single failed app check while muted should not stop recording.
+
+        Simulates: user is muted (mic off), meeting app is running but one
+        app check returns False (e.g. osascript timeout).  Recording should
+        continue because APP_GONE_POLLS consecutive failures are required.
+        """
+        steps = (
+            # Normal recording
+            [(True, True)] * 10
+            # Muted, app briefly not detected (1 poll — below threshold)
+            + [(False, False)] * 1
+            # App detected again
+            + [(False, True)] * 10
+            # End call
+            + [(False, False)] * 20
+        )
+        started, stopped, state = self._simulate(steps)
+        self.assertEqual(started, 1)
+        self.assertEqual(stopped, 1, "Single app-check failure should not split")
+
+    def test_mute_with_tab_switching(self):
+        """User mutes and switches to another tab/app — meeting tab still
+        exists in Safari so app check should keep returning True."""
+        steps = (
+            # Recording
+            [(True, True)] * 10
+            # Muted + switched away (mic off, but Meet tab still open → app True)
+            + [(False, True)] * 40
+            # Switch back, unmute
+            + [(True, True)] * 5
+            # End call
+            + [(False, False)] * 20
+        )
+        started, stopped, state = self._simulate(steps)
+        self.assertEqual(started, 1)
+        self.assertEqual(stopped, 1, "Tab switching while muted should not split")
+
 
 if __name__ == "__main__":
     unittest.main()
