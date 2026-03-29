@@ -3,8 +3,10 @@
 Supports mic-only or BlackHole 2ch (system audio) as input.
 Records at 16 kHz mono — suitable for local ASR backends used by trnscrb.
 """
-import threading
+import os
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +18,21 @@ from trnscrb.log import get_logger
 _log = get_logger("trnscrb.recorder")
 
 SAMPLE_RATE = 16_000  # fixed capture rate for local transcription backends
+
+_STALE_AGE_SECS = 3600  # 1 hour
+
+
+def cleanup_stale_temp_files() -> None:
+    """Remove orphaned trnscrb WAV files from previous crashes."""
+    tmp_dir = Path(tempfile.gettempdir())
+    now = time.time()
+    for p in tmp_dir.glob("tmp*.wav"):
+        try:
+            if now - p.stat().st_mtime > _STALE_AGE_SECS:
+                p.unlink()
+                _log.debug("Deleted stale temp file: %s", p)
+        except Exception:
+            pass
 
 
 class Recorder:
