@@ -212,7 +212,7 @@ def get_weekly_transcripts(week: str = "") -> str:
         try:
             year, w = week.split("-W")
             monday = date.fromisocalendar(int(year), int(w), 1)
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             return f"Invalid week format: '{week}'. Use YYYY-WNN (e.g. 2026-W13)."
     else:
         today = date.today()
