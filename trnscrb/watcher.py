@@ -173,16 +173,19 @@ class MicWatcher:
                     if _app_running:
                         # Mic off but meeting app still open — user is muted.
                         # Stay in recording to avoid splitting the call.
-                        pass
-                    else:
-                        # Mic off AND meeting app not detected → start grace period
+                        self._no_app_polls = 0
+                    elif self._no_app_polls >= APP_GONE_POLLS:
+                        # Mic off AND meeting app gone for multiple consecutive
+                        # checks — start grace period.  Requiring multiple checks
+                        # prevents a single slow/failed osascript from stopping
+                        # the recording while the user is just muted.
                         self._state        = "cooling"
                         self._since        = now
                         self._no_app_polls = 0
-                        _app_counter       = APP_POLL_EVERY  # check app immediately in cooling
                 else:
                     # Mic still active — if meeting app has been gone for multiple
-                    # consecutive checks, Chrome is keeping mic "warm" after leaving.
+                    # consecutive checks, Chrome/Safari is keeping mic "warm"
+                    # after leaving the meeting.
                     if self._no_app_polls >= APP_GONE_POLLS:
                         self._state        = "cooling"
                         self._since        = now
@@ -420,8 +423,9 @@ tell application "Google Chrome"
         repeat with t in tabs of w
             set u to URL of t
             if u contains "meet.google.com" then
-                -- "Meeting ended" page: title contains "ended" — don't count it
-                if not (title of t contains "ended") then return "Google Meet"
+                set ttl to title of t
+                -- Filter out post-meeting pages ("Meeting ended", "You left the meeting")
+                if ttl does not contain "ended" and ttl does not contain "left" then return "Google Meet"
             end if
             if u contains "teams.microsoft.com" then return "Microsoft Teams"
             if u contains "app.huddle.team" then return "Huddle"
@@ -442,7 +446,9 @@ tell application "Safari"
             try
                 set u to URL of t
                 if u contains "meet.google.com" then
-                    if not (name of t contains "ended") then return "Google Meet"
+                    set ttl to name of t
+                    -- Filter out post-meeting pages ("Meeting ended", "You left the meeting")
+                    if ttl does not contain "ended" and ttl does not contain "left" then return "Google Meet"
                 end if
                 if u contains "teams.microsoft.com" then return "Microsoft Teams"
                 if u contains "app.huddle.team" then return "Huddle"
