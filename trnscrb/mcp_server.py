@@ -80,9 +80,10 @@ def stop_recording(meeting_name: str = "") -> str:
         evt = get_current_or_upcoming_event()
         meeting_name = evt["title"] if evt else f"meeting-{started_at.strftime('%H%M')}"
 
-    _processing = True
-    _last_result = None
-    _last_error = None
+    with _state_lock:
+        _processing = True
+        _last_result = None
+        _last_error = None
 
     thread = threading.Thread(
         target=_process_audio,
@@ -111,13 +112,18 @@ def recording_status() -> str:
         m, s = divmod(elapsed, 60)
         return f"Recording in progress — {m}m {s}s elapsed."
 
-    if _processing:
+    with _state_lock:
+        processing = _processing
+        last_error = _last_error
+        last_result = _last_result
+
+    if processing:
         return "Transcription in progress — processing audio, please wait."
 
-    if _last_error:
-        return f"Last transcription failed: {_last_error}"
+    if last_error:
+        return f"Last transcription failed: {last_error}"
 
-    if _last_result:
+    if last_result:
         return f"Transcription complete. Use get_last_transcript to read it."
 
     return "Idle — no active recording or pending transcription."
@@ -126,12 +132,16 @@ def recording_status() -> str:
 @mcp.tool()
 def get_last_transcript() -> str:
     """Return the transcript from the most recently completed recording."""
-    if _processing:
+    with _state_lock:
+        processing = _processing
+        last_error = _last_error
+        last_result = _last_result
+    if processing:
         return "Still transcribing — check back in a moment."
-    if _last_error:
-        return f"Transcription failed: {_last_error}"
-    if _last_result:
-        return _last_result
+    if last_error:
+        return f"Transcription failed: {last_error}"
+    if last_result:
+        return last_result
     return "No transcript available yet. Start and stop a recording first."
 
 
@@ -217,6 +227,9 @@ def enrich_transcript(transcript_id: str) -> str:
 def _process_audio(audio_path: Path, started_at: datetime, meeting_name: str) -> None:
     global _processing, _last_result, _last_error
     try:
+        if not audio_path.exists() or audio_path.stat().st_size == 0:
+            raise RuntimeError(f"Audio file missing or empty: {audio_path}")
+
         segments = transcriber.transcribe(audio_path)
 
         hf_token = _read_hf_token()
@@ -225,7 +238,8 @@ def _process_audio(audio_path: Path, started_at: datetime, meeting_name: str) ->
                 diar = diarizer.diarize(audio_path, hf_token)
                 segments = diarizer.merge(segments, diar)
             except Exception:
-                pass  # fall back to unlabeled segments
+                # Diarization failed; fall back to unlabeled segments
+                pass
 
         audio_path.unlink(missing_ok=True)
 
@@ -234,12 +248,15 @@ def _process_audio(audio_path: Path, started_at: datetime, meeting_name: str) ->
         storage.save_transcript(path, transcript_text)
 
         preview = transcript_text[:800] + ("…" if len(transcript_text) > 800 else "")
-        _last_result = f"Saved: {path.name}\n\n{preview}"
+        with _state_lock:
+            _last_result = f"Saved: {path.name}\n\n{preview}"
     except Exception as e:
         audio_path.unlink(missing_ok=True)
-        _last_error = str(e)
+        with _state_lock:
+            _last_error = str(e)
     finally:
-        _processing = False
+        with _state_lock:
+            _processing = False
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

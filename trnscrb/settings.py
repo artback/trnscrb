@@ -1,6 +1,7 @@
 """Persistent user settings stored in ~/.config/trnscrb/settings.json."""
 from copy import deepcopy
 import json
+import shutil
 from pathlib import Path
 
 _SETTINGS_FILE = Path.home() / ".config" / "trnscrb" / "settings.json"
@@ -58,6 +59,9 @@ def load() -> dict:
             raw = json.loads(_SETTINGS_FILE.read_text())
             if isinstance(raw, dict):
                 loaded = raw
+        except json.JSONDecodeError:
+            bak = _SETTINGS_FILE.with_suffix(".json.bak")
+            shutil.copy2(_SETTINGS_FILE, bak)
         except Exception:
             pass
     return _deep_merge(_DEFAULTS, loaded)

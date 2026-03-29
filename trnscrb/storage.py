@@ -1,4 +1,5 @@
 """Transcript file storage — saves and reads .txt files from ~/meeting-notes/."""
+import re
 from pathlib import Path
 from datetime import datetime
 
@@ -13,11 +14,13 @@ def ensure_notes_dir() -> Path:
 def get_transcript_path(meeting_name: str, started_at: datetime) -> Path:
     ensure_notes_dir()
     date_str = started_at.strftime("%Y-%m-%d_%H-%M")
-    safe_name = meeting_name.replace(" ", "-").replace("/", "-")[:50]
+    safe_name = re.sub(r"[^A-Za-z0-9_-]", "-", meeting_name)[:50]
     return NOTES_DIR / f"{date_str}_{safe_name}.txt"
 
 
 def save_transcript(path: Path, content: str) -> None:
+    if not content or not content.strip():
+        return
     path.write_text(content, encoding="utf-8")
 
 
@@ -37,7 +40,9 @@ def list_transcripts() -> list[dict]:
 
 
 def read_transcript(transcript_id: str) -> str | None:
-    path = NOTES_DIR / f"{transcript_id}.txt"
+    path = (NOTES_DIR / f"{transcript_id}.txt").resolve()
+    if not path.is_relative_to(NOTES_DIR.resolve()):
+        return None
     return path.read_text(encoding="utf-8") if path.exists() else None
 
 

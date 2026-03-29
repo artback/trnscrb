@@ -377,8 +377,8 @@ class TrnscrbApp(rumps.App):
             try:
                 diar     = diarizer.diarize(audio_path, hf_token)
                 segments = diarizer.merge(segments, diar)
-            except Exception:
-                pass
+            except Exception as e:
+                _notify("Trnscrb", "Speaker labels skipped", str(e)[:180])
 
         audio_path.unlink(missing_ok=True)
 

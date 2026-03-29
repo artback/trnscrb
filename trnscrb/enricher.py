@@ -279,14 +279,18 @@ def _parse_speaker_map(enrichment: str) -> dict:
             in_section = True
             continue
         if in_section:
-            if "→" in line or "->" in line:
-                separator = "→" if "→" in line else "->"
+            separator = None
+            for sep in ("→", "->", ":"):
+                if sep in line:
+                    separator = sep
+                    break
+            if separator is not None:
                 raw, _, name = line.partition(separator)
                 raw = raw.strip().lstrip("- ").strip()
                 name = name.strip().strip('"')
                 if raw:
                     speaker_map[raw] = name
-            elif line.strip() and not line.startswith("-"):
+            elif line.strip() and not line.strip().startswith("-"):
                 break  # end of section
     return speaker_map
 
@@ -347,4 +351,7 @@ def _json_request(base_endpoint: str, path: str, method: str = "GET", payload: d
         close = getattr(response, "close", None)
         if callable(close):
             close()
-    return json.loads(raw.decode("utf-8"))
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Invalid JSON response from {url}: {exc}") from exc
