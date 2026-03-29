@@ -46,27 +46,15 @@ def install(force: bool):
     click.echo(click.style("Trnscrb Setup", bold=True))
     click.echo("=" * 42)
 
-    # 1. Python version
+    # ── 1. Python version ────────────────────────────────────────────────────
     py_ok = sys.version_info >= (3, 11)
     _row("Python 3.11+", py_ok, sys.version.split()[0])
     if not py_ok:
         click.echo(click.style("  Python 3.11+ is required. Install from python.org.", fg="red"))
         sys.exit(1)
-
     click.echo()
 
-    # 2. BlackHole audio driver
-    bh_ok = _blackhole_installed()
-    _row("BlackHole 2ch", bh_ok, "audio driver")
-    if not bh_ok:
-        if click.confirm("  Install BlackHole via Homebrew?", default=True):
-            _run(["brew", "install", "blackhole-2ch"])
-            click.echo("  After install: open System Settings → Sound → Output and select")
-            click.echo("  'Multi-Output Device' that includes BlackHole to capture system audio.")
-
-    click.echo()
-
-    # 3. Python packages
+    # ── 2. Python packages ───────────────────────────────────────────────────
     click.echo("  Python packages:")
     packages = {
         "rumps":           "rumps>=0.4.0",
@@ -91,39 +79,27 @@ def install(force: bool):
         click.echo()
         if click.confirm(f"  Install {len(to_install)} missing package(s)?", default=True):
             _run([sys.executable, "-m", "pip", "install", "--quiet", *to_install])
-
     click.echo()
 
-    # 4. HuggingFace token (for pyannote)
-    hf_ok = bool(_get_hf_token())
-    _row("HuggingFace token", hf_ok, "for pyannote speaker diarization")
-    if not hf_ok:
-        click.echo("  Get a free token at https://hf.co/settings/tokens")
-        click.echo("  Accept model terms at https://hf.co/pyannote/speaker-diarization-3.1")
-        token = click.prompt(
-            "  Paste token (or press Enter to skip)",
-            default="", show_default=False,
-        )
-        if token.strip():
-            _save_hf_token(token.strip())
-            click.echo(click.style("  Token saved to ~/.cache/huggingface/token", fg="green"))
-
+    # ── 3. Audio setup ───────────────────────────────────────────────────────
+    bh_ok = _blackhole_installed()
+    _row("BlackHole 2ch", bh_ok, "captures other participants' audio")
+    if not bh_ok:
+        if click.confirm("  Install BlackHole via Homebrew?", default=True):
+            _run(["brew", "install", "blackhole-2ch"])
+            click.echo("  After install: open System Settings → Sound → Output and select")
+            click.echo("  'Multi-Output Device' that includes BlackHole to capture system audio.")
     click.echo()
 
-    # 5. Default transcription model cache (active backend only)
+    # ── 4. Transcription model ───────────────────────────────────────────────
     from trnscrb.settings import load as load_settings, save as save_settings
     settings = load_settings()
     backend = _normalize_backend(settings.get("transcription_backend"))
     if backend == "whisper":
         model_size = str(settings.get("model_size") or "small")
         model_ok = _whisper_model_cached(model_size)
-        _row(
-            f"Whisper '{model_size}' model",
-            model_ok,
-            "~500 MB, runs on Apple Silicon Metal",
-        )
-        if not model_ok and click.confirm("  Download now?", default=True):
-            click.echo("  Downloading Whisper model… (first time only, ~500 MB)")
+        _row(f"Whisper '{model_size}' model", model_ok)
+        if not model_ok and click.confirm("  Download now? (~500 MB)", default=True):
             try:
                 from faster_whisper import WhisperModel  # noqa: PLC0415
                 WhisperModel(model_size, device="cpu")
@@ -133,62 +109,67 @@ def install(force: bool):
     else:
         model_id = str(settings.get("parakeet_model_id") or _DEFAULT_PARAKEET_MODEL_ID)
         model_ok = _parakeet_model_cached(model_id)
-        _row(
-            f"Parakeet model ({model_id})",
-            model_ok,
-            "downloads from HuggingFace on first run",
-        )
+        _row(f"Parakeet model", model_ok)
         if not model_ok and click.confirm("  Download now?", default=True):
-            click.echo("  Downloading Parakeet model… (first time only)")
             try:
                 from parakeet_mlx import from_pretrained  # noqa: PLC0415
                 from_pretrained(model_id)
                 click.echo(click.style("  Model ready.", fg="green"))
             except Exception as e:
                 click.echo(click.style(f"  Download failed: {e}", fg="yellow"))
-
     click.echo()
 
-    # 6. Claude Desktop MCP config
-    mcp_ok = _mcp_configured()
-    _row("Claude Desktop MCP config", mcp_ok, str(_CLAUDE_CONFIG))
-    if not mcp_ok:
-        if click.confirm("  Add trnscrb to Claude Desktop config?", default=True):
-            _write_mcp_config()
-            click.echo(
-                click.style("  Config updated. Restart Claude Desktop to apply.", fg="green")
-            )
+    # ── 5. Speaker diarization (optional) ────────────────────────────────────
+    hf_ok = bool(_get_hf_token())
+    _row("Speaker labels", hf_ok, "optional — requires free HuggingFace token")
+    if not hf_ok:
+        click.echo("  Get a token at https://hf.co/settings/tokens")
+        click.echo("  Accept terms at https://hf.co/pyannote/speaker-diarization-3.1")
+        token = click.prompt(
+            "  Paste token (or Enter to skip)",
+            default="", show_default=False,
+        )
+        if token.strip():
+            _save_hf_token(token.strip())
+            click.echo(click.style("  Token saved.", fg="green"))
+    click.echo()
 
-    # 7. Notes directory
+    # ── 6. Permissions ───────────────────────────────────────────────────────
+    click.echo("  Permissions (macOS will prompt if needed):")
+    _request_mic_permission()
+    _request_calendar_permission()
+    click.echo()
+
+    # ── 7. Notes directory ───────────────────────────────────────────────────
     from trnscrb.storage import ensure_notes_dir
     folder = ensure_notes_dir()
-    click.echo(f"\n  ✓ Notes folder: {folder}")
-
+    click.echo(f"  Transcripts saved to: {folder}")
     click.echo()
 
-    # 8. Permissions (mic + calendar) — only 2, only what's needed
-    click.echo("  Permissions (macOS will prompt if not yet granted):")
-    click.echo()
-    click.echo("  🎙  Microphone — required to record audio")
-    _request_mic_permission()
-    click.echo("  📅  Calendar   — optional, used to auto-name meetings from your events")
-    _request_calendar_permission()
+    # ── 8. Optional integrations ─────────────────────────────────────────────
+    # Claude Desktop MCP — only offer if Claude Desktop is installed
+    if _CLAUDE_CONFIG.parent.exists():
+        mcp_ok = _mcp_configured()
+        _row("Claude Desktop integration", mcp_ok)
+        if not mcp_ok:
+            if click.confirm("  Register trnscrb with Claude Desktop?", default=True):
+                _write_mcp_config()
+                click.echo(click.style("  Done. Restart Claude Desktop to apply.", fg="green"))
+        click.echo()
 
-    click.echo()
-
-    # 9. Login item — start trnscrb automatically on login
+    # Launch at login
     login_ok = _login_item_exists()
-    _row("Launch at login", login_ok, "auto-starts trnscrb when you log in")
+    _row("Launch at login", login_ok)
     if not login_ok:
-        if click.confirm("  Set up launch at login?", default=True):
+        if click.confirm("  Start trnscrb automatically on login?", default=False):
             import shutil
             binary = shutil.which("trnscrb") or sys.executable
             if _setup_login_item(binary):
-                click.echo(click.style("  Launch at login enabled.", fg="green"))
+                click.echo(click.style("  Enabled.", fg="green"))
             else:
                 click.echo(click.style("  Could not set up login item.", fg="yellow"))
 
-    # 10. Default settings
+    # ── Defaults ─────────────────────────────────────────────────────────────
     settings = load_settings()
     changed = False
     if settings.get("auto_record") is not True:
@@ -204,15 +185,13 @@ def install(force: bool):
     if changed:
         save_settings(settings)
 
-    click.echo("\n  ✓ Auto-record on by default")
-    click.echo(f"  ✓ Transcription backend: {_normalize_backend(settings.get('transcription_backend'))}")
-
     click.echo()
     click.echo("=" * 42)
     click.echo(click.style("Setup complete!", fg="green", bold=True))
     click.echo()
-    click.echo("  trnscrb start    → launch menu bar app")
-    click.echo("  trnscrb list     → list saved transcripts")
+    click.echo("  trnscrb start    launch menu bar app")
+    click.echo("  trnscrb watch    headless auto-record")
+    click.echo("  trnscrb list     list saved transcripts")
     click.echo()
 
 
@@ -242,6 +221,9 @@ def watch():
     import signal
     from trnscrb.watcher import MicWatcher, WARMUP_SECS, GRACE_SECS
     from trnscrb import recorder as rec_module, transcriber, diarizer, storage
+    from trnscrb.recorder import cleanup_stale_temp_files
+
+    cleanup_stale_temp_files()
     from trnscrb.calendar_integration import get_current_or_upcoming_event
 
     _recorder_ref: list = [None]
@@ -445,11 +427,9 @@ def _pkg_installed(import_name: str) -> bool:
 
 def _blackhole_installed() -> bool:
     try:
-        result = subprocess.run(
-            ["system_profiler", "SPAudioDataType"],
-            capture_output=True, text=True, timeout=10,
-        )
-        return "BlackHole" in result.stdout
+        import sounddevice as sd
+        return any("BlackHole" in d["name"] for d in sd.query_devices()
+                    if d["max_input_channels"] > 0)
     except Exception:
         return False
 
