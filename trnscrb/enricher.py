@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Optional
 from urllib import request
 
@@ -12,6 +13,75 @@ _log = get_logger("trnscrb.enricher")
 
 _CONNECT_TIMEOUT = 10   # seconds – quick check for test_connection / list_models
 _ENRICH_TIMEOUT = 120   # seconds – local LLMs need time for long transcripts
+
+_PROMPTS_DIR = Path.home() / ".config" / "trnscrb" / "prompts"
+
+_DEFAULT_WEEKLY_PROMPT = """You are summarizing a software engineer's week based on their meeting transcripts.
+
+The transcripts below are from meetings that took place during the week of {week_start} to {week_end}.
+Focus ONLY on work-related content. Skip personal conversations, small talk, and non-work topics.
+
+Transcripts:
+{transcripts}
+
+Produce a weekly summary suitable for inclusion in an annual performance review. Structure it as:
+
+WEEKLY SUMMARY ({week_start} — {week_end}):
+
+KEY ACCOMPLISHMENTS:
+- Concrete things completed, shipped, or decided this week
+
+ONGOING WORK:
+- Projects or tasks in progress, with current status
+
+COLLABORATION:
+- Who you worked with and on what (team members, stakeholders)
+
+DECISIONS MADE:
+- Important technical or product decisions from meetings
+
+ACTION ITEMS CARRIED FORWARD:
+- Open items that need follow-up next week
+
+Keep it factual and concise. Use bullet points. Attribute work to specific people where possible.
+"""
+
+_DEFAULT_ANNUAL_PROMPT = """You are compiling a software engineer's annual summary from their weekly summaries.
+
+Weekly summaries:
+{summaries}
+
+Produce a comprehensive annual review summary structured as:
+
+ANNUAL SUMMARY ({year}):
+
+IMPACT & KEY ACCOMPLISHMENTS:
+- Major projects shipped or milestones reached
+- Group related accomplishments into themes
+
+TECHNICAL CONTRIBUTIONS:
+- Architecture decisions, infrastructure improvements, tooling
+
+COLLABORATION & LEADERSHIP:
+- Cross-team work, mentoring, knowledge sharing
+
+GROWTH AREAS:
+- Skills developed, new technologies adopted
+
+THEMES:
+- Recurring focus areas throughout the year
+
+Be specific and quantitative where possible. This should read like a self-review document.
+"""
+
+
+def _load_prompt(name: str, default: str) -> str:
+    """Load a prompt template from ~/.config/trnscrb/prompts/<name>.md, or use default."""
+    path = _PROMPTS_DIR / f"{name}.md"
+    if path.exists():
+        _log.debug("Loading custom prompt from %s", path)
+        return path.read_text(encoding="utf-8")
+    return default
 
 _PROMPT_TEMPLATE = """You are analyzing a meeting transcript.{context}
 
@@ -367,6 +437,89 @@ def _apply_speaker_map(text: str, speaker_map: dict) -> str:
     for raw, name in speaker_map.items():
         text = text.replace(f"[{raw}]", f"[{name}]")
     return text
+
+
+def generate_weekly_summary(
+    transcripts: list[dict],
+    week_start: str,
+    week_end: str,
+    model: str | None = None,
+    provider: str | None = None,
+    prompt_override: str | None = None,
+) -> str:
+    """Generate a weekly summary from a list of transcript dicts [{name, text}]."""
+    active_provider, active_profile = get_active_provider_config()
+    if provider:
+        active_provider = normalize_provider(provider)
+        active_profile = _get_provider_profile(active_provider)
+
+    selected_model = _resolve_model(active_provider, active_profile, model)
+    config = _build_runtime_config(
+        active_provider,
+        endpoint=active_profile.get("endpoint"),
+        api_key=active_profile.get("api_key", ""),
+        model=selected_model,
+    )
+
+    combined = ""
+    for t in transcripts:
+        combined += f"\n--- {t['name']} ---\n{t['text']}\n"
+
+    template = prompt_override or _load_prompt("weekly", _DEFAULT_WEEKLY_PROMPT)
+    prompt = template.format(
+        week_start=week_start,
+        week_end=week_end,
+        transcripts=combined,
+    )
+
+    _log.info("Generating weekly summary with provider=%s model=%s (%d transcripts)",
+              active_provider, selected_model, len(transcripts))
+    adapter = _ADAPTERS[active_provider]
+    return adapter.enrich(prompt, config)
+
+
+def generate_annual_summary(
+    weekly_summaries: str,
+    year: str,
+    model: str | None = None,
+    provider: str | None = None,
+    prompt_override: str | None = None,
+) -> str:
+    """Generate an annual summary from concatenated weekly summaries."""
+    active_provider, active_profile = get_active_provider_config()
+    if provider:
+        active_provider = normalize_provider(provider)
+        active_profile = _get_provider_profile(active_provider)
+
+    selected_model = _resolve_model(active_provider, active_profile, model)
+    config = _build_runtime_config(
+        active_provider,
+        endpoint=active_profile.get("endpoint"),
+        api_key=active_profile.get("api_key", ""),
+        model=selected_model,
+    )
+
+    template = prompt_override or _load_prompt("annual", _DEFAULT_ANNUAL_PROMPT)
+    prompt = template.format(summaries=weekly_summaries, year=year)
+
+    _log.info("Generating annual summary with provider=%s model=%s",
+              active_provider, selected_model)
+    adapter = _ADAPTERS[active_provider]
+    return adapter.enrich(prompt, config)
+
+
+def _resolve_model(provider: str, profile: dict, model: str | None = None) -> str:
+    selected = str(model or profile.get("model") or "").strip()
+    if not selected:
+        loaded = profile.get("models") or []
+        if loaded:
+            selected = str(loaded[0]).strip()
+    if not selected:
+        raise RuntimeError(
+            f"No model selected for {provider_label(provider)}. "
+            "Use Settings → Test Endpoint & Load Models and choose a model."
+        )
+    return selected
 
 
 def _build_openai_client(base_url: str, api_key: str):

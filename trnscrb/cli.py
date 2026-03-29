@@ -437,6 +437,140 @@ def enrich(transcript_id: str):
     click.echo(f"\nTranscript updated at {path}")
 
 
+# ── weekly / annual ──────────────────────────────────────────────────────────
+
+@cli.command()
+@click.option("--week", default=None, help="ISO week (e.g. 2026-W13). Defaults to last week.")
+@click.option("--prompt", "prompt_file", default=None, type=click.Path(exists=True),
+              help="Custom prompt template file. Use {week_start}, {week_end}, {transcripts} as placeholders.")
+@click.option("--save/--no-save", default=True, help="Save summary to ~/meeting-notes/")
+def weekly(week: str | None, prompt_file: str | None, save: bool):
+    """Generate a weekly summary from all transcripts in a given week.
+
+    Prompt templates are loaded from (in order):
+      1. --prompt flag (explicit file)
+      2. ~/.config/trnscrb/prompts/weekly.md (custom default)
+      3. Built-in default
+    """
+    from datetime import date, timedelta
+    from trnscrb import storage
+    from trnscrb.enricher import generate_weekly_summary, get_active_provider_config, provider_label
+
+    if week:
+        try:
+            year, w = week.split("-W")
+            monday = date.fromisocalendar(int(year), int(w), 1)
+        except (ValueError, TypeError):
+            click.echo(f"Invalid week format: '{week}'. Use YYYY-WNN (e.g. 2026-W13).", err=True)
+            sys.exit(1)
+    else:
+        today = date.today()
+        monday = today - timedelta(days=today.weekday() + 7)  # last Monday
+
+    friday = monday + timedelta(days=4)
+    week_start = monday.strftime("%Y-%m-%d")
+    week_end = friday.strftime("%Y-%m-%d")
+    iso_week = monday.strftime("%G-W%V")
+
+    click.echo(f"Collecting transcripts for {iso_week} ({week_start} to {week_end})…")
+
+    files = sorted(storage.NOTES_DIR.glob("*.txt"))
+    transcripts = []
+    for f in files:
+        try:
+            file_date = date.fromisoformat(f.name[:10])
+        except ValueError:
+            continue
+        if monday <= file_date <= friday:
+            text = f.read_text(encoding="utf-8")
+            if text.strip():
+                transcripts.append({"name": f.name, "text": text})
+
+    if not transcripts:
+        click.echo(f"No transcripts found for {iso_week}.")
+        return
+
+    # Load custom prompt if provided via --prompt flag
+    prompt_override = None
+    if prompt_file:
+        prompt_override = Path(prompt_file).read_text(encoding="utf-8")
+        click.echo(f"Using prompt template: {prompt_file}")
+
+    provider, profile = get_active_provider_config()
+    model_name = str(profile.get("model") or "default")
+    click.echo(f"Found {len(transcripts)} transcript(s). Summarizing with {provider_label(provider)} ({model_name})…")
+
+    try:
+        summary = generate_weekly_summary(
+            transcripts, week_start, week_end, prompt_override=prompt_override,
+        )
+    except Exception as e:
+        click.echo(f"Summary generation failed: {e}", err=True)
+        sys.exit(1)
+
+    click.echo()
+    click.echo(summary)
+
+    if save:
+        path = storage.NOTES_DIR / f"weekly-{iso_week}.txt"
+        storage.save_transcript(path, summary)
+        click.echo(f"\nSaved to {path}")
+
+
+@cli.command()
+@click.option("--year", default=None, help="Year to summarize (e.g. 2026). Defaults to current year.")
+@click.option("--prompt", "prompt_file", default=None, type=click.Path(exists=True),
+              help="Custom prompt template file. Use {summaries} and {year} as placeholders.")
+@click.option("--save/--no-save", default=True, help="Save summary to ~/meeting-notes/")
+def annual(year: str | None, prompt_file: str | None, save: bool):
+    """Generate an annual summary from all weekly summaries.
+
+    Prompt templates are loaded from (in order):
+      1. --prompt flag (explicit file)
+      2. ~/.config/trnscrb/prompts/annual.md (custom default)
+      3. Built-in default
+    """
+    from datetime import date
+    from trnscrb import storage
+    from trnscrb.enricher import generate_annual_summary, get_active_provider_config, provider_label
+
+    target_year = year or str(date.today().year)
+    click.echo(f"Collecting weekly summaries for {target_year}…")
+
+    files = sorted(storage.NOTES_DIR.glob(f"weekly-{target_year}-W*.txt"))
+    if not files:
+        click.echo(f"No weekly summaries found for {target_year}. Run `trnscrb weekly` first.")
+        return
+
+    combined = ""
+    for f in files:
+        text = f.read_text(encoding="utf-8")
+        combined += f"\n{'=' * 40}\n{f.stem}\n{'=' * 40}\n{text}\n"
+
+    prompt_override = None
+    if prompt_file:
+        prompt_override = Path(prompt_file).read_text(encoding="utf-8")
+        click.echo(f"Using prompt template: {prompt_file}")
+
+    provider, profile = get_active_provider_config()
+    model_name = str(profile.get("model") or "default")
+    click.echo(f"Found {len(files)} weekly summary(ies). Summarizing with {provider_label(provider)} ({model_name})…")
+
+    try:
+        summary = generate_annual_summary(combined, target_year, prompt_override=prompt_override)
+    except Exception as e:
+        click.echo(f"Annual summary failed: {e}", err=True)
+        sys.exit(1)
+
+    click.echo()
+    click.echo(summary)
+
+    if save:
+        path = storage.NOTES_DIR / f"annual-{target_year}.txt"
+        storage.save_transcript(path, summary)
+        click.echo(f"\nSaved to {path}")
+
+
 # ── devices ───────────────────────────────────────────────────────────────────
 
 @cli.command()

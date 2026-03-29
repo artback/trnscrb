@@ -195,6 +195,71 @@ def get_calendar_context() -> str:
 
 
 @mcp.tool()
+def get_weekly_transcripts(week: str = "") -> str:
+    """
+    Get all transcripts for a given week, concatenated and ready for summarization.
+    Returns the meeting name and full text for each transcript in the week.
+
+    Args:
+        week: ISO week (e.g. '2026-W13'). Defaults to the current week.
+    """
+    from datetime import date, timedelta
+    if week:
+        try:
+            year, w = week.split("-W")
+            monday = date.fromisocalendar(int(year), int(w), 1)
+        except (ValueError, TypeError):
+            return f"Invalid week format: '{week}'. Use YYYY-WNN (e.g. 2026-W13)."
+    else:
+        today = date.today()
+        monday = today - timedelta(days=today.weekday())
+
+    friday = monday + timedelta(days=4)
+    files = sorted(storage.NOTES_DIR.glob("*.txt"))
+    parts = []
+    for f in files:
+        if f.name.startswith("weekly-") or f.name.startswith("annual-"):
+            continue
+        try:
+            file_date = date.fromisoformat(f.name[:10])
+        except ValueError:
+            continue
+        if monday <= file_date <= friday:
+            text = f.read_text(encoding="utf-8").strip()
+            parts.append(f"--- {f.name} ---\n{text}")
+
+    if not parts:
+        week_label = monday.strftime("%G-W%V")
+        return f"No transcripts found for {week_label} ({monday} to {friday})."
+
+    header = f"Week: {monday.strftime('%G-W%V')} ({monday} to {friday})\nTranscripts: {len(parts)}\n\n"
+    return header + "\n\n".join(parts)
+
+
+@mcp.tool()
+def get_weekly_summaries(year: str = "") -> str:
+    """
+    Get all saved weekly summaries for a given year.
+    Use this as input when generating an annual summary.
+
+    Args:
+        year: Year (e.g. '2026'). Defaults to current year.
+    """
+    from datetime import date
+    target_year = year or str(date.today().year)
+    files = sorted(storage.NOTES_DIR.glob(f"weekly-{target_year}-W*.txt"))
+    if not files:
+        return f"No weekly summaries found for {target_year}."
+
+    parts = []
+    for f in files:
+        text = f.read_text(encoding="utf-8").strip()
+        parts.append(f"{'=' * 40}\n{f.stem}\n{'=' * 40}\n{text}")
+
+    return f"Year: {target_year}\nWeekly summaries: {len(files)}\n\n" + "\n\n".join(parts)
+
+
+@mcp.tool()
 def search_transcripts(query: str) -> str:
     """
     Search across all saved transcripts for a keyword or phrase.
