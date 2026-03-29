@@ -358,14 +358,18 @@ class TrnscrbApp(rumps.App):
     # ── shared start / stop ───────────────────────────────────────────────────
 
     def _do_start(self, meeting_name: str = ""):
+        # Blocking calls outside the lock to avoid deadlock
+        if not meeting_name:
+            try:
+                evt = get_current_or_upcoming_event()
+                meeting_name = evt["title"] if evt else ""
+            except Exception:
+                meeting_name = ""
+        device = rec_module.Recorder.find_blackhole_device()
+
         with self._rec_lock:
             if self._recorder and self._recorder.is_recording:
                 return
-            if not meeting_name:
-                evt = get_current_or_upcoming_event()
-                meeting_name = evt["title"] if evt else ""
-
-            device = rec_module.Recorder.find_blackhole_device()
             self._recorder   = rec_module.Recorder(device=device)
             self._started_at = datetime.now()
             self._recorder.start()

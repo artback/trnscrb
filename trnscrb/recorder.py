@@ -99,28 +99,31 @@ class Recorder:
             finally:
                 self._stream = None
 
-        if not self._tmpfile:
-            _log.warning("Recording stopped with no temp file")
-            return None
-
+        # Hold the lock for all file operations so no late callback
+        # can write while we finalize the header.
         with self._lock:
+            if not self._tmpfile:
+                _log.warning("Recording stopped with no temp file")
+                return None
+
             frame_count = self._frame_count
 
-        if frame_count == 0:
-            _log.warning("Recording stopped with no frames captured")
+            if frame_count == 0:
+                _log.warning("Recording stopped with no frames captured")
+                self._tmpfile.close()
+                Path(self._tmpfile.name).unlink(missing_ok=True)
+                self._tmpfile = None
+                return None
+
+            # Finalize WAV header now that we know the data size.
+            data_size = frame_count * 2  # int16 = 2 bytes per sample
+            self._tmpfile.seek(0)
+            self._tmpfile.write(_wav_header(SAMPLE_RATE, 1, data_size))
             self._tmpfile.close()
-            Path(self._tmpfile.name).unlink(missing_ok=True)
+
+            out = Path(self._tmpfile.name)
             self._tmpfile = None
-            return None
 
-        # Finalize WAV header now that we know the data size.
-        data_size = frame_count * 2  # int16 = 2 bytes per sample
-        self._tmpfile.seek(0)
-        self._tmpfile.write(_wav_header(SAMPLE_RATE, 1, data_size))
-        self._tmpfile.close()
-
-        out = Path(self._tmpfile.name)
-        self._tmpfile = None
         _log.info("Recording stopped: %d samples, saved to %s", frame_count, out)
         return out
 
@@ -139,8 +142,11 @@ class Recorder:
                 with self._lock:
                     self._tmpfile.write(raw)
                     self._frame_count += len(audio_int16)
+        except OSError as e:
+            _log.error("Audio write failed (disk full?): %s", e)
+            self._recording = False
         except Exception:
-            pass
+            _log.debug("Callback error", exc_info=True)
 
     # ── class-level utilities ────────────────────────────────────────────────
 
