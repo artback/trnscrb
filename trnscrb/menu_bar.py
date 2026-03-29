@@ -18,12 +18,15 @@ from trnscrb import recorder as rec_module, transcriber, diarizer, storage, enri
 from trnscrb.calendar_integration import get_current_or_upcoming_event
 from trnscrb.icon import icon_path, generate_icons
 from trnscrb.watcher import MicWatcher
+from trnscrb.log import get_logger
 from trnscrb.settings import (
     get as get_setting,
     put as put_setting,
     load as load_settings,
     save as save_settings,
 )
+
+_log = get_logger("trnscrb.menu_bar")
 
 _EMOJI_IDLE      = "🎙"
 _EMOJI_RECORDING = "🔴"
@@ -328,10 +331,12 @@ class TrnscrbApp(rumps.App):
         self._set_state("recording")
 
         source = "BlackHole (system + mic)" if device is not None else "built-in mic"
+        _log.info("Recording started: meeting=%s device=%s", meeting_name or "(unnamed)", source)
         label  = f" — {meeting_name}" if meeting_name else ""
         _notify("Trnscrb", f"Transcription started{label}", f"via {source}")
 
     def _do_stop(self):
+        _log.info("Recording stopped, starting transcription")
         started_at     = self._started_at or datetime.now()
         recorder       = self._recorder
         self._recorder = None
