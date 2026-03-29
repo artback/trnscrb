@@ -269,5 +269,109 @@ class NpClipEdgeCaseTest(unittest.TestCase):
         self.assertEqual(result[1, 0], -32767)
 
 
+class CallbackExceptionTest(unittest.TestCase):
+    """Test that exceptions in _callback are handled correctly."""
+
+    def _make_recorder(self):
+        rec = Recorder(device=None)
+        rec._tmpfile = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        rec._tmpfile.write(b"\x00" * 44)
+        rec._frame_count = 0
+        rec._recording = True
+        return rec
+
+    def test_oserror_in_write_sets_recording_false(self):
+        """OSError in _tmpfile.write() should set _recording=False."""
+        rec = self._make_recorder()
+        tmp_path = rec._tmpfile.name
+
+        with patch.object(rec._tmpfile, "write", side_effect=OSError("disk full")):
+            indata = np.ones((100, 1), dtype=np.float32)
+            rec._callback(indata, 100, None, None)
+
+        self.assertFalse(rec._recording)
+        rec._tmpfile.close()
+        Path(tmp_path).unlink(missing_ok=True)
+
+    def test_other_exception_does_not_crash(self):
+        """Non-OSError exceptions should be caught and not crash the callback."""
+        rec = self._make_recorder()
+        tmp_path = rec._tmpfile.name
+
+        with patch.object(rec._tmpfile, "write", side_effect=ValueError("unexpected")):
+            indata = np.ones((50, 1), dtype=np.float32)
+            # Should not raise
+            rec._callback(indata, 50, None, None)
+
+        # _recording should still be True (only OSError sets it False)
+        self.assertTrue(rec._recording)
+        rec._tmpfile.close()
+        Path(tmp_path).unlink(missing_ok=True)
+
+    def test_oserror_preserves_frame_count(self):
+        """After OSError, frame_count should not be incremented."""
+        rec = self._make_recorder()
+        tmp_path = rec._tmpfile.name
+
+        # Write one good block
+        indata = np.zeros((100, 1), dtype=np.float32)
+        rec._callback(indata, 100, None, None)
+        self.assertEqual(rec._frame_count, 100)
+
+        # Now cause OSError — frame_count should stay at 100
+        rec._recording = True  # re-enable
+        with patch.object(rec._tmpfile, "write", side_effect=OSError("fail")):
+            rec._callback(indata, 100, None, None)
+
+        self.assertEqual(rec._frame_count, 100)
+        rec._tmpfile.close()
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+class FindBlackholeDeviceTest(unittest.TestCase):
+    """Test Recorder.find_blackhole_device() with mocked sd.query_devices()."""
+
+    def test_first_blackhole_device_selected(self):
+        """When multiple BlackHole devices exist, the first one should be returned."""
+        devices = [
+            {"name": "Built-in Microphone", "max_input_channels": 1},
+            {"name": "BlackHole 2ch", "max_input_channels": 2},
+            {"name": "BlackHole 16ch", "max_input_channels": 16},
+        ]
+        with patch("trnscrb.recorder.sd.query_devices", return_value=devices):
+            result = Recorder.find_blackhole_device()
+
+        self.assertEqual(result, 1)
+
+    def test_no_blackhole_returns_none(self):
+        """When no BlackHole device is present, should return None."""
+        devices = [
+            {"name": "Built-in Microphone", "max_input_channels": 1},
+            {"name": "External USB Mic", "max_input_channels": 2},
+        ]
+        with patch("trnscrb.recorder.sd.query_devices", return_value=devices):
+            result = Recorder.find_blackhole_device()
+
+        self.assertIsNone(result)
+
+    def test_blackhole_with_zero_input_channels_skipped(self):
+        """A BlackHole device with 0 input channels should be skipped."""
+        devices = [
+            {"name": "BlackHole 2ch", "max_input_channels": 0},
+            {"name": "Built-in Microphone", "max_input_channels": 1},
+        ]
+        with patch("trnscrb.recorder.sd.query_devices", return_value=devices):
+            result = Recorder.find_blackhole_device()
+
+        self.assertIsNone(result)
+
+    def test_empty_device_list(self):
+        """Empty device list should return None."""
+        with patch("trnscrb.recorder.sd.query_devices", return_value=[]):
+            result = Recorder.find_blackhole_device()
+
+        self.assertIsNone(result)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5,6 +5,7 @@ network access required.
 """
 import time
 import unittest
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 from trnscrb import watcher
@@ -219,6 +220,142 @@ class ActiveSessionProcsTest(unittest.TestCase):
     def test_cpthost_is_in_active_session_procs(self):
         """CptHost (Zoom meeting capture) should be in the narrow list."""
         self.assertIn("CptHost", watcher._ACTIVE_SESSION_PROCS)
+
+
+class WatcherStopDuringTransitionsTest(unittest.TestCase):
+    """Test that calling stop() during warming/recording/cooling states
+    causes the loop to exit cleanly."""
+
+    def _make_watcher(self):
+        return MicWatcher(on_start=MagicMock(), on_stop=MagicMock())
+
+    def test_stop_during_warming_exits_loop(self):
+        """Setting _running=False while in 'warming' state should exit the loop."""
+        w = self._make_watcher()
+        w._running = True
+        w._state = "idle"
+        call_count = [0]
+
+        def fake_mic_in_use():
+            call_count[0] += 1
+            # Always return True so we enter warming and stay there
+            if call_count[0] >= 3:
+                w._running = False  # simulate stop() after a few iterations
+            return True
+
+        with patch("trnscrb.watcher.is_mic_in_use", side_effect=fake_mic_in_use), \
+             patch("trnscrb.watcher.time.sleep"):
+            w._loop_inner()
+
+        # Loop exited cleanly — state should be warming (never reached recording
+        # because WARMUP_SECS hasn't elapsed with mocked datetime)
+        self.assertFalse(w._running)
+
+    def test_stop_during_recording_exits_loop(self):
+        """Setting _running=False while in 'recording' should exit."""
+        w = self._make_watcher()
+        w._running = True
+        w._state = "recording"
+        w._since = datetime.now()
+        w._rec_started = datetime.now()
+        call_count = [0]
+
+        def fake_mic_in_use():
+            call_count[0] += 1
+            if call_count[0] >= 2:
+                w._running = False
+            return True
+
+        with patch("trnscrb.watcher.is_mic_in_use", side_effect=fake_mic_in_use), \
+             patch("trnscrb.watcher.time.sleep"), \
+             patch("trnscrb.watcher.is_meeting_app_running", return_value=True):
+            w._loop_inner()
+
+        self.assertFalse(w._running)
+        # on_stop should NOT have been called — we stopped mid-recording
+        w.on_stop.assert_not_called()
+
+    def test_stop_during_cooling_exits_loop(self):
+        """Setting _running=False while in 'cooling' should exit."""
+        w = self._make_watcher()
+        w._running = True
+        w._state = "cooling"
+        w._since = datetime.now()
+        w._rec_started = datetime.now()
+        call_count = [0]
+
+        def fake_mic_in_use():
+            call_count[0] += 1
+            if call_count[0] >= 2:
+                w._running = False
+            return False
+
+        with patch("trnscrb.watcher.is_mic_in_use", side_effect=fake_mic_in_use), \
+             patch("trnscrb.watcher.time.sleep"), \
+             patch("trnscrb.watcher.is_meeting_app_running", return_value=False):
+            w._loop_inner()
+
+        self.assertFalse(w._running)
+
+
+class MinSaveSecsTest(unittest.TestCase):
+    """Test that recordings shorter than MIN_SAVE_SECS (30s) don't fire on_stop."""
+
+    def test_short_recording_does_not_fire_on_stop(self):
+        """A recording lasting < 30s should be discarded (on_stop not called)."""
+        w = MicWatcher(on_start=MagicMock(), on_stop=MagicMock())
+        w._running = True
+        w._state = "cooling"
+        # Recording started 10 seconds ago — shorter than MIN_SAVE_SECS
+        now = datetime(2026, 3, 29, 12, 0, 30)
+        w._rec_started = datetime(2026, 3, 29, 12, 0, 20)  # 10s duration
+        w._since = datetime(2026, 3, 29, 12, 0, 20)  # cooling started 10s ago (> GRACE_SECS)
+
+        call_count = [0]
+
+        def fake_mic_in_use():
+            call_count[0] += 1
+            if call_count[0] >= 2:
+                w._running = False
+            return False
+
+        with patch("trnscrb.watcher.is_mic_in_use", side_effect=fake_mic_in_use), \
+             patch("trnscrb.watcher.time.sleep"), \
+             patch("trnscrb.watcher.is_meeting_app_running", return_value=False), \
+             patch("trnscrb.watcher.datetime") as mock_dt:
+            mock_dt.now.return_value = now
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            w._loop_inner()
+
+        # on_stop should NOT have been called because duration < MIN_SAVE_SECS
+        w.on_stop.assert_not_called()
+
+    def test_long_recording_fires_on_stop(self):
+        """A recording lasting >= 30s should fire on_stop."""
+        w = MicWatcher(on_start=MagicMock(), on_stop=MagicMock())
+        w._running = True
+        w._state = "cooling"
+        now = datetime(2026, 3, 29, 12, 5, 0)
+        w._rec_started = datetime(2026, 3, 29, 12, 0, 0)  # 5 minutes = 300s
+        w._since = datetime(2026, 3, 29, 12, 4, 50)  # cooling started 10s ago (> GRACE_SECS)
+
+        call_count = [0]
+
+        def fake_mic_in_use():
+            call_count[0] += 1
+            if call_count[0] >= 2:
+                w._running = False
+            return False
+
+        with patch("trnscrb.watcher.is_mic_in_use", side_effect=fake_mic_in_use), \
+             patch("trnscrb.watcher.time.sleep"), \
+             patch("trnscrb.watcher.is_meeting_app_running", return_value=False), \
+             patch("trnscrb.watcher.datetime") as mock_dt:
+            mock_dt.now.return_value = now
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            w._loop_inner()
+
+        w.on_stop.assert_called_once()
 
 
 if __name__ == "__main__":

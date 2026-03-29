@@ -186,5 +186,168 @@ class TestFormatTranscript(unittest.TestCase):
         self.assertEqual(text.count("[Bob]"), 1)
 
 
+class SearchSpecialCharsTest(_TmpNotesMixin, unittest.TestCase):
+    """Test search with regex special characters (re.escape should handle them)."""
+
+    def test_search_cplusplus(self):
+        """Searching for 'C++' should not crash (+ is a regex metachar)."""
+        self._write("test.txt", "We discussed C++ performance improvements")
+        result = CliRunner().invoke(cli, ["search", "C++"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("C++", result.output)
+        self.assertIn("1 match(es)", result.output)
+
+    def test_search_file_dot_txt(self):
+        """Searching for 'file.txt' should treat the dot literally."""
+        self._write("notes.txt", "Please update file.txt before the release")
+        result = CliRunner().invoke(cli, ["search", "file.txt"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("file.txt", result.output)
+        self.assertIn("1 match(es)", result.output)
+
+    def test_search_parentheses(self):
+        """Parentheses in search should be escaped."""
+        self._write("notes.txt", "Called func(arg) in the handler")
+        result = CliRunner().invoke(cli, ["search", "func(arg)"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("func(arg)", result.output)
+
+    def test_search_brackets(self):
+        """Square brackets should be escaped."""
+        self._write("notes.txt", "Array access arr[0] was discussed")
+        result = CliRunner().invoke(cli, ["search", "arr[0]"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("arr[0]", result.output)
+
+
+class AnnualCommandTest(_TmpNotesMixin, unittest.TestCase):
+    """Test the `trnscrb annual` command."""
+
+    def test_no_weekly_files_shows_message(self):
+        """If no weekly summaries exist, should show an informative message."""
+        result = CliRunner().invoke(cli, ["annual", "--year", "2026"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("No weekly summaries found", result.output)
+
+    def test_annual_with_files_calls_generate(self):
+        """If weekly files exist, generate_annual_summary should be called."""
+        self._write("weekly-2026-W10.txt", "Week 10 summary content")
+        self._write("weekly-2026-W11.txt", "Week 11 summary content")
+
+        with mock.patch("trnscrb.enricher.generate_annual_summary", return_value="ANNUAL SUMMARY") as gen_mock, \
+             mock.patch("trnscrb.enricher.get_active_provider_config",
+                        return_value=("claude_code", {"model": "sonnet"})), \
+             mock.patch("trnscrb.enricher.provider_label", return_value="Claude Code"), \
+             mock.patch("trnscrb.storage.save_transcript"):
+            result = CliRunner().invoke(cli, ["annual", "--year", "2026"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("ANNUAL SUMMARY", result.output)
+        gen_mock.assert_called_once()
+        # Check both weekly files were included in the combined text
+        call_args = gen_mock.call_args[0]
+        self.assertIn("Week 10 summary content", call_args[0])
+        self.assertIn("Week 11 summary content", call_args[0])
+        self.assertEqual(call_args[1], "2026")
+
+
+class PathTraversalTest(unittest.TestCase):
+    """Test that storage.read_transcript blocks path traversal."""
+
+    def test_dotdot_in_transcript_id_returns_none(self):
+        """A transcript_id containing '../' should return None."""
+        with mock.patch("trnscrb.storage.NOTES_DIR", Path("/tmp/test-notes")):
+            result = storage.read_transcript("../../etc/passwd")
+        self.assertIsNone(result)
+
+    def test_dotdot_relative_traversal_blocked(self):
+        """Even a subtle traversal like 'foo/../../../etc/passwd' should be blocked."""
+        with mock.patch("trnscrb.storage.NOTES_DIR", Path("/tmp/test-notes")):
+            result = storage.read_transcript("foo/../../../etc/passwd")
+        self.assertIsNone(result)
+
+    def test_normal_id_works(self):
+        """A normal transcript_id should work (if file exists)."""
+        import tempfile, shutil
+        tmpdir = tempfile.mkdtemp()
+        try:
+            p = Path(tmpdir) / "2026-03-23_standup.txt"
+            p.write_text("content", encoding="utf-8")
+            with mock.patch("trnscrb.storage.NOTES_DIR", Path(tmpdir)):
+                result = storage.read_transcript("2026-03-23_standup")
+            self.assertEqual(result, "content")
+        finally:
+            shutil.rmtree(tmpdir)
+
+
+class DevicesCommandTest(unittest.TestCase):
+    """Test `trnscrb devices` command.
+
+    The `devices` CLI command does::
+
+        from trnscrb.recorder import Recorder
+        devs = Recorder.list_input_devices()
+
+    Because ``sounddevice`` (a C-extension dependency of ``trnscrb.recorder``)
+    may not be installed in the test environment, we insert a stub into
+    ``sys.modules`` *before* the module is first imported.  Once the module is
+    loaded the ``Recorder`` class can be patched normally.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        """Ensure trnscrb.recorder can be imported even without sounddevice."""
+        import sys
+        if "sounddevice" not in sys.modules:
+            sys.modules["sounddevice"] = mock.MagicMock()
+            cls._sd_injected = True
+        else:
+            cls._sd_injected = False
+        # Now import so the module is in sys.modules for patching
+        import trnscrb.recorder  # noqa: F401
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._sd_injected:
+            import sys
+            sys.modules.pop("sounddevice", None)
+
+    def _run_devices(self, device_list):
+        mock_rec = mock.MagicMock()
+        mock_rec.list_input_devices.return_value = device_list
+        with mock.patch("trnscrb.recorder.Recorder", mock_rec):
+            return CliRunner().invoke(cli, ["devices"])
+
+    def test_no_devices(self):
+        """When no input devices are found, should show a message."""
+        result = self._run_devices([])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("No input devices found", result.output)
+
+    def test_with_devices(self):
+        """When devices are found, should list them."""
+        devices = [
+            {"index": 0, "name": "Built-in Microphone", "channels": 1},
+            {"index": 1, "name": "BlackHole 2ch", "channels": 2},
+        ]
+        result = self._run_devices(devices)
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Built-in Microphone", result.output)
+        self.assertIn("BlackHole 2ch", result.output)
+        self.assertIn("(BlackHole)", result.output)
+        self.assertIn("[0]", result.output)
+        self.assertIn("[1]", result.output)
+
+    def test_no_blackhole_tag_for_regular_device(self):
+        """Regular devices should not have the (BlackHole) tag."""
+        devices = [
+            {"index": 0, "name": "USB Microphone", "channels": 1},
+        ]
+        result = self._run_devices(devices)
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("USB Microphone", result.output)
+        self.assertNotIn("(BlackHole)", result.output)
+
+
 if __name__ == "__main__":
     unittest.main()
