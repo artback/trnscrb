@@ -118,8 +118,10 @@ class TrnscrbApp(rumps.App):
                 from trnscrb.transcriber import _get_whisper_model
 
                 _get_whisper_model()
-            else:
-                return  # voxtral is API-based, no local model to preload
+            elif backend == "voxtral":
+                from trnscrb.transcriber import _get_voxtral_pipeline
+
+                _get_voxtral_pipeline()
             _log.info("Transcription model preloaded (%s)", backend)
         except Exception as e:
             _log.debug("Model preload skipped: %s", e)

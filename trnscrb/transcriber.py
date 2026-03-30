@@ -150,54 +150,78 @@ def _transcribe_parakeet(audio_path: Path) -> list[dict]:
     return normalized
 
 
+_voxtral_pipeline = None
+_voxtral_pipeline_lock = threading.Lock()
+_voxtral_model_id = None
+
+
+def _get_voxtral_pipeline():
+    global _voxtral_pipeline, _voxtral_model_id
+
+    model_id = str(settings.get("voxtral_model_id") or "mistralai/Voxtral-Mini-3B-2507").strip()
+
+    with _voxtral_pipeline_lock:
+        if _voxtral_pipeline is None or _voxtral_model_id != model_id:
+            try:
+                import torch
+                from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+            except ModuleNotFoundError as e:
+                raise RuntimeError(
+                    "Voxtral backend selected but transformers is not installed. "
+                    "Install it with `uv add transformers torch`."
+                ) from e
+
+            device = "mps" if torch.backends.mps.is_available() else "cpu"
+            dtype = torch.float16 if device == "mps" else torch.float32
+            _log.info("Loading Voxtral model %s on %s", model_id, device)
+
+            try:
+                processor = AutoProcessor.from_pretrained(model_id)
+                model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                    model_id,
+                    torch_dtype=dtype,
+                    device_map=device,
+                )
+                _voxtral_pipeline = pipeline(
+                    "automatic-speech-recognition",
+                    model=model,
+                    tokenizer=processor.tokenizer,
+                    feature_extractor=processor.feature_extractor,
+                    torch_dtype=dtype,
+                    device=device,
+                    return_timestamps=True,
+                )
+                _voxtral_model_id = model_id
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to load Voxtral model '{model_id}'. "
+                    "Check network/cache access for first-time model download."
+                ) from e
+        return _voxtral_pipeline
+
+
 def _transcribe_voxtral(audio_path: Path) -> list[dict]:
-    import os
-
-    api_key = (
-        os.environ.get("MISTRAL_API_KEY") or str(settings.get("mistral_api_key") or "").strip()
-    )
-    if not api_key:
-        raise RuntimeError(
-            "Voxtral backend selected but no API key found. "
-            "Set MISTRAL_API_KEY env var or mistral_api_key in settings."
-        )
-
-    try:
-        from mistralai import Mistral
-    except ModuleNotFoundError as e:
-        raise RuntimeError(
-            "Voxtral backend selected but mistralai is not installed. "
-            "Install it with `uv add mistralai`."
-        ) from e
-
-    model = str(settings.get("voxtral_model") or "mistral-small-latest").strip()
-    client = Mistral(api_key=api_key)
-
-    _log.info("Transcribing with Voxtral (model=%s)", model)
-    with open(audio_path, "rb") as f:
-        result = client.audio.transcriptions.create(
-            model=model,
-            file=f,
-            response_format="verbose_json",
-            timestamp_granularity=["segment"],
-        )
+    pipe = _get_voxtral_pipeline()
+    _log.info("Transcribing with Voxtral (model=%s)", _voxtral_model_id)
+    result = pipe(str(audio_path), return_timestamps=True)
 
     segments = []
-    for seg in getattr(result, "segments", []) or []:
-        text = str(getattr(seg, "text", "")).strip()
+    for chunk in result.get("chunks", []):
+        text = str(chunk.get("text", "")).strip()
         if not text:
             continue
+        ts = chunk.get("timestamp", (0.0, 0.0)) or (0.0, 0.0)
         segments.append(
             {
-                "start": float(getattr(seg, "start", 0.0)),
-                "end": float(getattr(seg, "end", 0.0)),
+                "start": float(ts[0] or 0.0),
+                "end": float(ts[1] or 0.0),
                 "text": text,
                 "speaker": None,
             }
         )
 
-    if not segments and hasattr(result, "text") and result.text:
-        segments.append({"start": 0.0, "end": 0.0, "text": result.text.strip(), "speaker": None})
+    if not segments and result.get("text"):
+        segments.append({"start": 0.0, "end": 0.0, "text": result["text"].strip(), "speaker": None})
 
     return segments
 
