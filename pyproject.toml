@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trnscrb"
-version = "0.5.0"
+version = "0.6.0"
 description = "Offline meeting transcription for macOS — auto-detects meetings, transcribes locally with Parakeet or Whisper, saves to Claude Desktop via MCP"
 readme = "README.md"
 license = "MIT"
@@ -39,9 +39,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ajayrmk/trnscrb"
-Repository = "https://github.com/ajayrmk/trnscrb"
-"Bug Tracker" = "https://github.com/ajayrmk/trnscrb/issues"
+Homepage = "https://github.com/artback/trnscrb"
+Repository = "https://github.com/artback/trnscrb"
+"Bug Tracker" = "https://github.com/artback/trnscrb/issues"
 
 [project.scripts]
 trnscrb = "trnscrb.cli:cli"

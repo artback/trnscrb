@@ -2,32 +2,25 @@
 
 > Offline meeting transcription for macOS — no cloud, no subscription.
 
-trnscrb lives in your menu bar, listens for meetings, transcribes them locally with Parakeet (default) or Whisper (optional), and makes every transcript searchable from Claude Desktop via MCP.
+trnscrb lives in your menu bar, auto-detects meetings (Google Meet, Zoom, Teams, Slack, FaceTime), records and transcribes them locally, cleans up filler words, and makes every transcript searchable from Claude Desktop.
 
 ---
 
 ## Install
 
 ```bash
-brew tap ajayrmk/tap
+brew tap artback/trnscrb
 brew install trnscrb
 trnscrb install
 ```
 
-Or with `pip` / `uv`:
+Or with `uv`:
 
 ```bash
-pip install trnscrb && trnscrb install
 uv tool install trnscrb && trnscrb install
 ```
 
-`trnscrb install` is a guided setup that handles:
-
-- BlackHole 2ch audio driver (captures system audio alongside mic)
-- HuggingFace token for speaker diarization (pyannote)
-- Default Parakeet model download (one-time, cached locally)
-- Claude Desktop MCP config
-- Launch-at-login agent
+`trnscrb install` handles BlackHole audio driver, model downloads, Claude Desktop MCP config, and launch-at-login.
 
 ---
 
@@ -37,106 +30,132 @@ uv tool install trnscrb && trnscrb install
 trnscrb start       # launch the menu bar app
 ```
 
-With **Auto-transcribe** on (the default), trnscrb detects when a meeting starts — Google Meet, Zoom, Slack Huddle, Teams, FaceTime — and begins recording automatically. When the meeting ends, it stops, transcribes, and saves.
+With **Auto-transcribe** on (the default), trnscrb detects when a meeting starts and begins recording automatically. When the meeting ends, it transcribes and saves to `~/meeting-notes/`.
 
-You can also trigger manually from the menu bar: **Start Transcribing / Stop Transcribing**.
+---
 
-Backend selection is stored in `~/.config/trnscrb/settings.json`:
+## Transcription backends
+
+| Backend | Language | Speed | Model size | Best for |
+|---------|----------|-------|------------|----------|
+| **auto** (default) | All | Fast | ~1.1 GB | Best of both worlds |
+| Parakeet | English only | Fastest | ~600 MB | English-only teams |
+| Whisper | 99 languages | Fast | ~500 MB | Multilingual teams |
+| Voxtral | Multilingual | Slower | ~6 GB | Experimental |
+
+**Auto mode** detects the spoken language and routes English to Parakeet (best accuracy) and everything else to Whisper.
 
 ```json
 {
-  "transcription_backend": "parakeet",
-  "parakeet_model_id": "mlx-community/parakeet-tdt-0.6b-v3",
-  "model_size": "small"
+  "transcription_backend": "auto"
 }
 ```
 
 ---
 
-## How it works
+## Meeting detection
 
-| Step | What happens |
-|---|---|
-| Meeting detected | Mic active for 5 s + meeting app found |
-| Recording | Audio captured via mic or BlackHole (system + mic) |
-| Transcription | Parakeet (`parakeet-mlx`) by default, optional Whisper backend |
-| Diarization | Speaker labels via pyannote (needs HuggingFace token) |
-| Saved | Plain `.txt` in `~/meeting-notes/` |
+trnscrb detects active meetings through multiple signals:
+
+- **Browser tabs** — Google Meet, Teams, Zoom in Chrome/Safari
+- **Native apps** — Zoom (CptHost/caphost), FaceTime, Tuple via CoreAudio mic check
+- **Teams desktop** — window count detection (2 windows = active call)
+- **Calendar** — macOS Calendar integration for meeting names
+
+Detection runs in parallel for minimal latency. Muting doesn't stop the recording — only leaving the meeting does.
 
 ---
 
-## Claude Desktop integration
+## Enrichment
 
-After `trnscrb install`, Claude Desktop has these tools available:
+After transcription, enrich with an LLM to get summaries, action items, and speaker name inference.
 
-| Tool | Description |
-|---|---|
-| `start_recording` | Start capturing audio |
-| `stop_recording` | Stop and transcribe in the background |
-| `recording_status` | Check if recording or transcribing |
-| `get_last_transcript` | Fetch the most recent transcript |
-| `list_transcripts` | List all saved meetings |
-| `get_transcript` | Read a specific transcript |
-| `get_calendar_context` | Current or upcoming calendar event |
-| `enrich_transcript` | Add summary + action items via configured local/cloud LLM |
+**Providers** (configured in menu bar Settings):
+
+| Provider | Setup |
+|----------|-------|
+| **Claude Code** | No config needed — uses local `claude` CLI |
+| Ollama | `http://127.0.0.1:11434` |
+| llama.cpp | `http://127.0.0.1:8080` |
+| LM Studio | `http://127.0.0.1:1234` |
+| Anthropic | API key required |
+| OpenAI | API key required |
+
+---
+
+## Weekly & annual summaries
+
+Generate summaries from your meeting transcripts — useful for performance reviews.
+
+```bash
+trnscrb weekly                      # summarize last week's meetings
+trnscrb weekly --week 2026-W13      # specific week
+trnscrb weekly --prompt template.md # custom prompt
+trnscrb annual                      # compile weekly summaries into annual review
+```
+
+Custom prompt templates can also be placed in `~/.config/trnscrb/prompts/weekly.md`.
+
+---
+
+## Search
+
+```bash
+trnscrb search "auth migration"     # search all transcripts
+trnscrb search "Miguel" -n 3        # with context lines
+```
+
+Also available as an MCP tool (`search_transcripts`) in Claude Desktop.
 
 ---
 
 ## CLI
 
 ```bash
-trnscrb start               # launch menu bar app
-trnscrb install             # guided setup / re-check dependencies
-trnscrb list                # list saved transcripts
-trnscrb show <id>           # print a transcript
-trnscrb enrich <id>         # summarise + action items (uses selected LLM provider/model)
-trnscrb mic-status          # live mic activity monitor — useful for debugging
-trnscrb devices             # list audio input devices
-trnscrb watch               # headless auto-transcribe, no menu bar
+trnscrb start            # launch menu bar app
+trnscrb install          # guided setup
+trnscrb watch            # headless auto-transcribe (no menu bar)
+trnscrb list             # list saved transcripts
+trnscrb show <id>        # print a transcript
+trnscrb search <query>   # full-text search across all transcripts
+trnscrb enrich <id>      # add summary + action items
+trnscrb weekly           # weekly summary from transcripts
+trnscrb annual           # annual summary from weekly summaries
+trnscrb mic-status       # live mic activity monitor
+trnscrb devices          # list audio input devices
 ```
 
 ---
 
-## Enrich Providers
+## Claude Desktop / MCP tools
 
-`enrich` now uses a configurable provider from the menu bar:
+After `trnscrb install`, Claude Desktop has these tools:
 
-- `llama.cpp` (default)
-- `Ollama API`
-- `LM Studio`
-- `Anthropic`
-- `OpenAI`
-
-Open **menu bar → Settings** to configure:
-
-1. **Provider** (active enrich backend)
-2. **Endpoint…** (base URL per provider)
-3. **API Key…** (stored in `~/.config/trnscrb/settings.json`)
-4. **Test Endpoint & Load Models** (connectivity check + model discovery)
-5. **Model** (pick a loaded model for enrich)
-
-Default endpoints:
-
-- `ollama`: `http://127.0.0.1:11434`
-- `llama.cpp`: `http://127.0.0.1:8080`
-- `lmstudio`: `http://127.0.0.1:1234`
-- `anthropic`: `https://api.anthropic.com`
-- `openai`: `https://api.openai.com/v1`
-
-For OpenAI-compatible providers (`llama.cpp`, `lmstudio`, `openai`), `trnscrb` normalizes endpoints to `/v1`.
+| Tool | Description |
+|------|-------------|
+| `start_recording` | Start capturing audio |
+| `stop_recording` | Stop and transcribe in background |
+| `recording_status` | Check recording/transcription status |
+| `get_last_transcript` | Most recent transcript |
+| `list_transcripts` | All saved meetings |
+| `get_transcript` | Read a specific transcript |
+| `search_transcripts` | Full-text search across transcripts |
+| `get_weekly_transcripts` | All transcripts for a given week |
+| `get_weekly_summaries` | All weekly summaries for a year |
+| `get_calendar_context` | Current/upcoming calendar event |
+| `enrich_transcript` | Summary + action items via LLM |
 
 ---
 
-## System audio with BlackHole
+## System audio setup
 
-To capture both your mic and the other participants' audio:
+To capture both your mic and other participants' audio:
 
 1. Install BlackHole via `trnscrb install` (or `brew install blackhole-2ch`)
-2. Open **Audio MIDI Setup** → **+** → **Create Multi-Output Device**
-3. Check **BlackHole 2ch** and **MacBook Pro Speakers**
-4. **System Settings → Sound → Output** → select the Multi-Output Device
+2. Open **Audio MIDI Setup** → create a **Multi-Output Device** with BlackHole + speakers
+3. Set the Multi-Output Device as your system output
 
-trnscrb auto-detects BlackHole and uses it when available. Without it, only your mic is recorded.
+trnscrb auto-detects BlackHole or an Aggregate Device. Without either, only your mic is recorded.
 
 ---
 
@@ -144,33 +163,33 @@ trnscrb auto-detects BlackHole and uses it when available. Without it, only your
 
 ```
 Meeting: Weekly Standup
-Date:    2025-02-18 10:00
-Duration:23:14
+Date:    2026-03-23 10:00
+Duration: 23:14
 
 ============================================================
 
-[SPEAKER_00]
+[Alice]
   00:12  Good morning, let's get started.
 
-[SPEAKER_01]
+[Bob]
   00:18  Morning! I finished the auth PR yesterday.
 ```
 
-Running `trnscrb enrich <id>` replaces `SPEAKER_00` / `SPEAKER_01` with inferred names and appends a summary and action items block.
+Filler words (um, uh, like, basically, etc.) are automatically removed in 5 languages.
 
 ---
 
 ## Requirements
 
-- macOS 13 or later
-- Python 3.11+
-- Apple Silicon (M1/M2/M3/M4) recommended for fastest local transcription
+- macOS 13+
+- Python 3.12+
+- Apple Silicon recommended for fastest local transcription
 
 ---
 
 ## Privacy
 
-Everything runs on your machine for recording/transcription. `enrich` sends transcript text to whichever provider endpoint you configure (local or cloud).
+Everything runs locally. Enrichment sends transcript text to whichever LLM provider you configure (local by default with Claude Code or Ollama).
 
 ---
 
