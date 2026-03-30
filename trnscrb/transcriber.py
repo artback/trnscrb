@@ -1,4 +1,4 @@
-"""Local transcription with configurable backend (Parakeet or Whisper)."""
+"""Transcription with configurable backend (Parakeet, Whisper, or Voxtral)."""
 
 import threading
 from pathlib import Path
@@ -8,7 +8,7 @@ from trnscrb.log import get_logger
 
 _log = get_logger("trnscrb.transcriber")
 
-_SUPPORTED_BACKENDS = {"parakeet", "whisper"}
+_SUPPORTED_BACKENDS = {"parakeet", "whisper", "voxtral"}
 
 _whisper_model = None
 _whisper_model_lock = threading.Lock()
@@ -150,6 +150,58 @@ def _transcribe_parakeet(audio_path: Path) -> list[dict]:
     return normalized
 
 
+def _transcribe_voxtral(audio_path: Path) -> list[dict]:
+    import os
+
+    api_key = (
+        os.environ.get("MISTRAL_API_KEY") or str(settings.get("mistral_api_key") or "").strip()
+    )
+    if not api_key:
+        raise RuntimeError(
+            "Voxtral backend selected but no API key found. "
+            "Set MISTRAL_API_KEY env var or mistral_api_key in settings."
+        )
+
+    try:
+        from mistralai import Mistral
+    except ModuleNotFoundError as e:
+        raise RuntimeError(
+            "Voxtral backend selected but mistralai is not installed. "
+            "Install it with `uv add mistralai`."
+        ) from e
+
+    model = str(settings.get("voxtral_model") or "mistral-small-latest").strip()
+    client = Mistral(api_key=api_key)
+
+    _log.info("Transcribing with Voxtral (model=%s)", model)
+    with open(audio_path, "rb") as f:
+        result = client.audio.transcriptions.create(
+            model=model,
+            file=f,
+            response_format="verbose_json",
+            timestamp_granularity=["segment"],
+        )
+
+    segments = []
+    for seg in getattr(result, "segments", []) or []:
+        text = str(getattr(seg, "text", "")).strip()
+        if not text:
+            continue
+        segments.append(
+            {
+                "start": float(getattr(seg, "start", 0.0)),
+                "end": float(getattr(seg, "end", 0.0)),
+                "text": text,
+                "speaker": None,
+            }
+        )
+
+    if not segments and hasattr(result, "text") and result.text:
+        segments.append({"start": 0.0, "end": 0.0, "text": result.text.strip(), "speaker": None})
+
+    return segments
+
+
 def transcribe(audio_path: Path) -> list[dict]:
     """Return segments: [{start, end, text, speaker}] — speaker filled later by diarizer."""
     audio_path = Path(audio_path)
@@ -163,6 +215,8 @@ def transcribe(audio_path: Path) -> list[dict]:
     _log.debug("Using backend: %s", backend)
     if backend == "parakeet":
         segments = _transcribe_parakeet(audio_path)
+    elif backend == "voxtral":
+        segments = _transcribe_voxtral(audio_path)
     else:
         segments = _transcribe_whisper(audio_path)
     _log.info("Transcription complete: %d segments", len(segments))
