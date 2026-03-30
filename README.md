@@ -32,6 +32,12 @@ trnscrb start       # launch the menu bar app
 
 With **Auto-transcribe** on (the default), trnscrb detects when a meeting starts and begins recording automatically. When the meeting ends, it transcribes and saves to `~/meeting-notes/`.
 
+**During a call**, click **Open Latest** in the menu bar to read the live transcript — it updates every 60 seconds. Or stream it to your terminal:
+
+```bash
+trnscrb live        # tail the live transcript as it updates
+```
+
 ---
 
 ## Transcription backends
@@ -50,6 +56,18 @@ With **Auto-transcribe** on (the default), trnscrb detects when a meeting starts
   "transcription_backend": "auto"
 }
 ```
+
+---
+
+## Live transcription
+
+During recording, trnscrb transcribes what it has so far every 60 seconds and writes it to the transcript file. You can read along during the call:
+
+- **Menu bar** — click "Open Latest" to open the transcript in your default editor
+- **Terminal** — `trnscrb live` streams new content as it appears
+- **Claude Desktop** — use `get_transcript` on the latest ID
+
+When the call ends, the final full transcription (with diarization and enrichment) replaces the live version.
 
 ---
 
@@ -115,6 +133,7 @@ Also available as an MCP tool (`search_transcripts`) in Claude Desktop.
 trnscrb start            # launch menu bar app
 trnscrb install          # guided setup
 trnscrb watch            # headless auto-transcribe (no menu bar)
+trnscrb live             # stream live transcript to terminal
 trnscrb list             # list saved transcripts
 trnscrb show <id>        # print a transcript
 trnscrb search <query>   # full-text search across all transcripts
