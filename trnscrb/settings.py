@@ -97,6 +97,19 @@ def put(key: str, value) -> None:
     save(s)
 
 
+def read_hf_token() -> str | None:
+    """Read HuggingFace token from env or ~/.cache/huggingface/token."""
+    import os
+
+    token = os.environ.get("HF_TOKEN")
+    if token:
+        return token
+    token_file = Path.home() / ".cache" / "huggingface" / "token"
+    if token_file.exists():
+        return token_file.read_text().strip() or None
+    return None
+
+
 def _deep_merge(defaults: dict, overrides: dict) -> dict:
     merged = deepcopy(defaults)
     for key, value in overrides.items():

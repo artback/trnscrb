@@ -7,11 +7,9 @@ States:
   transcribing— red icon, Start disabled, Stop shows "Transcribing…" (disabled)
 """
 
-import os
 import subprocess
 import threading
 from datetime import datetime
-from pathlib import Path
 
 import rumps
 
@@ -22,18 +20,11 @@ from trnscrb.enricher import enrich_transcript
 from trnscrb.icon import generate_icons, icon_path
 from trnscrb.log import get_logger
 from trnscrb.recorder import cleanup_stale_temp_files
-from trnscrb.settings import (
-    get as get_setting,
-)
-from trnscrb.settings import (
-    load as load_settings,
-)
-from trnscrb.settings import (
-    put as put_setting,
-)
-from trnscrb.settings import (
-    save as save_settings,
-)
+from trnscrb.settings import get as get_setting
+from trnscrb.settings import load as load_settings
+from trnscrb.settings import put as put_setting
+from trnscrb.settings import read_hf_token
+from trnscrb.settings import save as save_settings
 from trnscrb.watcher import MicWatcher
 
 _log = get_logger("trnscrb.menu_bar")
@@ -469,7 +460,7 @@ class TrnscrbApp(rumps.App):
                 _notify("Trnscrb", "Transcription failed", str(e))
                 return
 
-            hf_token = _read_hf_token()
+            hf_token = read_hf_token()
             if hf_token and segments:
                 try:
                     diar = diarizer.diarize(audio_path, hf_token)
@@ -546,16 +537,6 @@ class TrnscrbApp(rumps.App):
             self.icon, self.title = (rec_icon, None) if rec_icon else (None, _EMOJI_RECORDING)
         else:
             self.icon, self.title = (idle_icon, None) if idle_icon else (None, _EMOJI_IDLE)
-
-
-def _read_hf_token() -> str | None:
-    token = os.environ.get("HF_TOKEN")
-    if token:
-        return token
-    token_file = Path.home() / ".cache" / "huggingface" / "token"
-    if token_file.exists():
-        return token_file.read_text().strip() or None
-    return None
 
 
 def main():

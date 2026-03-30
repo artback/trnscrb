@@ -287,12 +287,9 @@ def watch():
             click.echo(f"  ✗ Transcription failed ({_backend}, {audio_path.name}): {e}")
             return
 
-        import os
+        from trnscrb.settings import read_hf_token
 
-        hf_token = os.environ.get("HF_TOKEN")
-        if not hf_token:
-            tf = Path.home() / ".cache" / "huggingface" / "token"
-            hf_token = tf.read_text().strip() if tf.exists() else None
+        hf_token = read_hf_token()
         if hf_token and segments:
             try:
                 diar = diarizer.diarize(audio_path, hf_token)
@@ -719,15 +716,9 @@ def _blackhole_installed() -> bool:
 
 
 def _get_hf_token() -> str | None:
-    import os
+    from trnscrb.settings import read_hf_token
 
-    token = os.environ.get("HF_TOKEN")
-    if token:
-        return token
-    token_file = Path.home() / ".cache" / "huggingface" / "token"
-    if token_file.exists():
-        return token_file.read_text().strip() or None
-    return None
+    return read_hf_token()
 
 
 def _save_hf_token(token: str):

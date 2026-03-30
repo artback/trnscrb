@@ -383,29 +383,7 @@ def enrich_transcript(
     provider: str | None = None,
 ) -> dict:
     """Return {enrichment, speaker_map, enriched_transcript, provider, model}."""
-    active_provider, active_profile = get_active_provider_config()
-    if provider:
-        active_provider = normalize_provider(provider)
-        active_profile = _get_provider_profile(active_provider)
-
-    selected_model = str(model or active_profile.get("model") or "").strip()
-    if not selected_model:
-        loaded_models = active_profile.get("models") or []
-        if loaded_models:
-            selected_model = str(loaded_models[0]).strip()
-    if not selected_model:
-        raise RuntimeError(
-            f"No model selected for {provider_label(active_provider)}. "
-            "Use Settings → Test Endpoint & Load Models and choose a model."
-        )
-
-    config = _build_runtime_config(
-        active_provider,
-        endpoint=active_profile.get("endpoint"),
-        api_key=active_profile.get("api_key", ""),
-        model=selected_model,
-    )
-    adapter = _ADAPTERS[active_provider]
+    active_provider, config, adapter = _prepare_adapter(provider, model)
 
     context = ""
     if calendar_event:
@@ -414,19 +392,11 @@ def enrich_transcript(
             context += f"\nKnown attendees: {', '.join(calendar_event['attendees'])}"
 
     prompt = _PROMPT_TEMPLATE.format(context=context, transcript=transcript_text)
-    _log.info(
-        "Enriching transcript with provider=%s model=%s",
-        active_provider,
-        selected_model,
-    )
+    _log.info("Enriching transcript with provider=%s model=%s", active_provider, config["model"])
     try:
         enrichment = adapter.enrich(prompt, config)
     except Exception:
-        _log.error(
-            "Enrichment failed for provider=%s model=%s",
-            active_provider,
-            selected_model,
-        )
+        _log.error("Enrichment failed for provider=%s model=%s", active_provider, config["model"])
         raise
     _log.info("Enrichment succeeded for provider=%s", active_provider)
 
@@ -438,7 +408,7 @@ def enrich_transcript(
         "speaker_map": speaker_map,
         "enriched_transcript": enriched,
         "provider": active_provider,
-        "model": selected_model,
+        "model": config["model"],
     }
 
 
@@ -482,18 +452,7 @@ def generate_weekly_summary(
     prompt_override: str | None = None,
 ) -> str:
     """Generate a weekly summary from a list of transcript dicts [{name, text}]."""
-    active_provider, active_profile = get_active_provider_config()
-    if provider:
-        active_provider = normalize_provider(provider)
-        active_profile = _get_provider_profile(active_provider)
-
-    selected_model = _resolve_model(active_provider, active_profile, model)
-    config = _build_runtime_config(
-        active_provider,
-        endpoint=active_profile.get("endpoint"),
-        api_key=active_profile.get("api_key", ""),
-        model=selected_model,
-    )
+    active_provider, config, adapter = _prepare_adapter(provider, model)
 
     combined = ""
     for t in transcripts:
@@ -531,13 +490,11 @@ def generate_weekly_summary(
         )
 
     _log.info(
-        "Generating weekly summary with provider=%s model=%s (%d transcripts, ~%dk tokens)",
+        "Generating weekly summary with provider=%s (%d transcripts, ~%dk tokens)",
         active_provider,
-        selected_model,
         len(transcripts),
         len(prompt) // 4000,
     )
-    adapter = _ADAPTERS[active_provider]
     return adapter.enrich(prompt, config)
 
 
@@ -549,11 +506,24 @@ def generate_annual_summary(
     prompt_override: str | None = None,
 ) -> str:
     """Generate an annual summary from concatenated weekly summaries."""
+    active_provider, config, adapter = _prepare_adapter(provider, model)
+
+    template = prompt_override or _load_prompt("annual", _DEFAULT_ANNUAL_PROMPT)
+    prompt = template.format(summaries=weekly_summaries, year=year)
+
+    _log.info("Generating annual summary with provider=%s", active_provider)
+    return adapter.enrich(prompt, config)
+
+
+def _prepare_adapter(
+    provider: str | None = None,
+    model: str | None = None,
+) -> tuple[str, dict, object]:
+    """Resolve provider, build config, return (provider_name, config, adapter)."""
     active_provider, active_profile = get_active_provider_config()
     if provider:
         active_provider = normalize_provider(provider)
         active_profile = _get_provider_profile(active_provider)
-
     selected_model = _resolve_model(active_provider, active_profile, model)
     config = _build_runtime_config(
         active_provider,
@@ -561,17 +531,7 @@ def generate_annual_summary(
         api_key=active_profile.get("api_key", ""),
         model=selected_model,
     )
-
-    template = prompt_override or _load_prompt("annual", _DEFAULT_ANNUAL_PROMPT)
-    prompt = template.format(summaries=weekly_summaries, year=year)
-
-    _log.info(
-        "Generating annual summary with provider=%s model=%s",
-        active_provider,
-        selected_model,
-    )
-    adapter = _ADAPTERS[active_provider]
-    return adapter.enrich(prompt, config)
+    return active_provider, config, _ADAPTERS[active_provider]
 
 
 def _resolve_model(provider: str, profile: dict, model: str | None = None) -> str:

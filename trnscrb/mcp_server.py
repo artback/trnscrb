@@ -16,7 +16,6 @@ Tools available to Claude:
 """
 
 import json
-import os
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -346,14 +345,19 @@ def enrich_transcript(transcript_id: str) -> str:
 def _process_audio(audio_path: Path, started_at: datetime, meeting_name: str) -> None:
     global _processing, _last_result, _last_error
     try:
-        if not audio_path.exists() or audio_path.stat().st_size == 0:
-            _log.error("Audio file missing or empty: %s", audio_path)
-            raise RuntimeError(f"Audio file missing or empty: {audio_path}")
+        try:
+            size = audio_path.stat().st_size
+        except FileNotFoundError:
+            raise RuntimeError(f"Audio file missing: {audio_path}")
+        if size == 0:
+            raise RuntimeError(f"Audio file is empty: {audio_path}")
 
         _log.info("Transcription starting: %s", meeting_name)
         segments = transcriber.transcribe(audio_path)
 
-        hf_token = _read_hf_token()
+        from trnscrb.settings import read_hf_token
+
+        hf_token = read_hf_token()
         if hf_token and segments:
             try:
                 diar = diarizer.diarize(audio_path, hf_token)
@@ -383,16 +387,6 @@ def _process_audio(audio_path: Path, started_at: datetime, meeting_name: str) ->
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-
-def _read_hf_token() -> str | None:
-    token = os.environ.get("HF_TOKEN")
-    if token:
-        return token
-    token_file = Path.home() / ".cache" / "huggingface" / "token"
-    if token_file.exists():
-        return token_file.read_text().strip() or None
-    return None
 
 
 def main() -> None:
