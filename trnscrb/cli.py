@@ -433,6 +433,49 @@ def show(transcript_id: str):
     click.echo(text)
 
 
+# ── live ──────────────────────────────────────────────────────────────────────
+
+
+@cli.command()
+def live():
+    """Tail the live transcript of the current recording."""
+    import time
+
+    from trnscrb import storage
+
+    click.echo("Watching for live transcript in ~/meeting-notes/…")
+    click.echo("Press Ctrl-C to stop.\n")
+
+    last_content = ""
+    last_file = None
+    try:
+        while True:
+            # Find the newest .txt file
+            files = sorted(storage.NOTES_DIR.glob("*.txt"), reverse=True)
+            if not files:
+                time.sleep(2)
+                continue
+
+            newest = files[0]
+            content = newest.read_text(encoding="utf-8")
+
+            # New file or content changed — print the diff
+            if newest != last_file:
+                last_file = newest
+                last_content = ""
+                click.echo(click.style(f"\n── {newest.name} ──", fg="cyan", bold=True))
+
+            if content != last_content:
+                new_part = content[len(last_content) :]
+                if new_part.strip():
+                    click.echo(new_part, nl=False)
+                last_content = content
+
+            time.sleep(3)
+    except KeyboardInterrupt:
+        click.echo("\n")
+
+
 # ── enrich ────────────────────────────────────────────────────────────────────
 
 

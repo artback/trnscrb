@@ -10,6 +10,7 @@ States:
 import subprocess
 import threading
 from datetime import datetime
+from pathlib import Path
 
 import rumps
 
@@ -79,11 +80,14 @@ class TrnscrbApp(rumps.App):
         self._settings_item.add(self._test_endpoint_item)
         self._settings_item.add(self._model_item)
 
+        self._open_latest_item = rumps.MenuItem("Open Latest", callback=self.open_latest)
+
         self.menu = [
             self._start_item,
             self._stop_item,
             None,
             self._auto_item,
+            self._open_latest_item,
             self._settings_item,
             None,
             rumps.MenuItem("Open Notes Folder", callback=self.open_folder),
@@ -96,6 +100,9 @@ class TrnscrbApp(rumps.App):
         self._watcher: MicWatcher | None = None
         self._process_thread: threading.Thread | None = None
         self._rec_lock = threading.Lock()  # guards _do_start / _do_stop
+        self._live_path: Path | None = None  # transcript written during recording
+        self._live_thread: threading.Thread | None = None
+        self._meeting_name: str = ""
 
         self._set_state("idle")
 
@@ -350,6 +357,17 @@ class TrnscrbApp(rumps.App):
         if getattr(menu_item, "_menu", None) is not None:
             menu_item.clear()
 
+    def open_latest(self, _):
+        # During recording, open the live transcript; otherwise open the newest file
+        target = self._live_path
+        if not target or not target.exists():
+            files = sorted(storage.NOTES_DIR.glob("*.txt"), reverse=True)
+            target = files[0] if files else None
+        if target and target.exists():
+            subprocess.run(["open", str(target)])
+        else:
+            subprocess.run(["open", str(storage.ensure_notes_dir())])
+
     def open_folder(self, _):
         subprocess.run(["open", str(storage.ensure_notes_dir())])
 
@@ -403,6 +421,20 @@ class TrnscrbApp(rumps.App):
             self._recorder.start()
             self._set_state("recording")
 
+        self._meeting_name = meeting_name or f"meeting-{self._started_at.strftime('%H%M')}"
+        self._live_path = storage.get_transcript_path(self._meeting_name, self._started_at)
+        # Write a placeholder so the file exists immediately
+        storage.save_transcript(
+            self._live_path,
+            storage.format_transcript([], self._started_at, self._meeting_name)
+            + "\n\n[Recording in progress — live updates every 60s]\n",
+        )
+        self._open_latest_item.title = f"Open Latest ({self._meeting_name})"
+
+        # Start live transcription thread
+        self._live_thread = threading.Thread(target=self._live_transcribe, daemon=True)
+        self._live_thread.start()
+
         source = "BlackHole (system + mic)" if device is not None else "built-in mic"
         _log.info(
             "Recording started: meeting=%s device=%s",
@@ -411,6 +443,32 @@ class TrnscrbApp(rumps.App):
         )
         label = f" — {meeting_name}" if meeting_name else ""
         _notify("Trnscrb", f"Transcription started{label}", f"via {source}")
+
+    _LIVE_INTERVAL = 60  # seconds between live transcription updates
+
+    def _live_transcribe(self):
+        """Periodically snapshot audio and transcribe during recording."""
+        import time
+
+        time.sleep(self._LIVE_INTERVAL)  # wait before first snapshot
+        while self._recorder and self._recorder.is_recording:
+            try:
+                snap = self._recorder.snapshot()
+                if snap:
+                    try:
+                        segments = transcriber.transcribe(snap)
+                        text = storage.format_transcript(
+                            segments, self._started_at, self._meeting_name
+                        )
+                        text += "\n\n[Live — recording in progress…]\n"
+                        if self._live_path:
+                            storage.save_transcript(self._live_path, text)
+                        _log.debug("Live transcription updated (%d segments)", len(segments))
+                    finally:
+                        snap.unlink(missing_ok=True)
+            except Exception:
+                _log.debug("Live transcription update failed", exc_info=True)
+            time.sleep(self._LIVE_INTERVAL)
 
     def _do_stop(self):
         with self._rec_lock:
@@ -422,8 +480,12 @@ class TrnscrbApp(rumps.App):
             self._recorder = None
             self._set_state("transcribing")
 
+        self._open_latest_item.title = "Open Latest"
+
         self._process_thread = threading.Thread(
-            target=self._process, args=(recorder, started_at), daemon=True
+            target=self._process,
+            args=(recorder, started_at, self._meeting_name, self._live_path),
+            daemon=True,
         )
         self._process_thread.start()
 
@@ -440,7 +502,13 @@ class TrnscrbApp(rumps.App):
 
     # ── background transcription ──────────────────────────────────────────────
 
-    def _process(self, recorder: rec_module.Recorder, started_at: datetime):
+    def _process(
+        self,
+        recorder: rec_module.Recorder,
+        started_at: datetime,
+        meeting_name: str = "",
+        live_path: Path | None = None,
+    ):
         audio_path = None
         try:
             audio_path = recorder.stop()
@@ -448,13 +516,14 @@ class TrnscrbApp(rumps.App):
                 _notify("Trnscrb", "Error", "No audio captured.")
                 return
 
-            try:
-                evt = get_current_or_upcoming_event()
-                meeting_name = evt["title"] if evt else ""
-            except Exception:
-                meeting_name = ""
             if not meeting_name:
-                meeting_name = f"meeting-{started_at.strftime('%H%M')}"
+                try:
+                    evt = get_current_or_upcoming_event()
+                    meeting_name = evt["title"] if evt else ""
+                except Exception:
+                    meeting_name = ""
+                if not meeting_name:
+                    meeting_name = f"meeting-{started_at.strftime('%H%M')}"
 
             _log.info("Transcription starting: %s", meeting_name)
             try:
@@ -474,7 +543,7 @@ class TrnscrbApp(rumps.App):
                     _notify("Trnscrb", "Speaker labels skipped", str(e)[:180])
 
             text = storage.format_transcript(segments, started_at, meeting_name)
-            path = storage.get_transcript_path(meeting_name, started_at)
+            path = live_path or storage.get_transcript_path(meeting_name, started_at)
             storage.save_transcript(path, text)
             _log.info("Transcription complete: %s -> %s", meeting_name, path.name)
             _notify("Trnscrb", f"Saved: {meeting_name}", f"~/meeting-notes/{path.name}")

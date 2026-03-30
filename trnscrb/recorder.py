@@ -127,6 +127,26 @@ class Recorder:
         _log.info("Recording stopped: %d samples, saved to %s", frame_count, out)
         return out
 
+    def snapshot(self) -> Path | None:
+        """Create a valid WAV copy of audio captured so far (non-destructive)."""
+        import shutil
+
+        with self._lock:
+            if not self._tmpfile or self._frame_count == 0:
+                return None
+            # Flush pending writes
+            self._tmpfile.flush()
+            src = self._tmpfile.name
+            frame_count = self._frame_count
+
+        # Copy the raw file, then overwrite its header with correct size
+        snap = Path(src).with_suffix(".snap.wav")
+        shutil.copy2(src, snap)
+        data_size = frame_count * 2
+        with open(snap, "r+b") as f:
+            f.write(_wav_header(SAMPLE_RATE, 1, data_size))
+        return snap
+
     @property
     def is_recording(self) -> bool:
         return self._recording
