@@ -851,7 +851,7 @@ def _setup_login_item(binary_path: str) -> bool:
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <false/>
+    <true/>
     <key>EnvironmentVariables</key>
     <dict>
         <key>DYLD_LIBRARY_PATH</key>
