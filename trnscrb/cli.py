@@ -746,9 +746,9 @@ def _parakeet_model_cached(model_id: str) -> bool:
 
 def _normalize_backend(value) -> str:
     backend = str(value or "parakeet").strip().lower()
-    if backend in {"parakeet", "whisper", "voxtral"}:
+    if backend in {"auto", "parakeet", "whisper", "voxtral"}:
         return backend
-    return "parakeet"
+    return "auto"
 
 
 def _mcp_configured() -> bool:

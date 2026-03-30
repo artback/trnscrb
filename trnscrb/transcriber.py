@@ -8,7 +8,7 @@ from trnscrb.log import get_logger
 
 _log = get_logger("trnscrb.transcriber")
 
-_SUPPORTED_BACKENDS = {"parakeet", "whisper", "voxtral"}
+_SUPPORTED_BACKENDS = {"auto", "parakeet", "whisper", "voxtral"}
 
 _whisper_model = None
 _whisper_model_lock = threading.Lock()
@@ -226,6 +226,32 @@ def _transcribe_voxtral(audio_path: Path) -> list[dict]:
     return segments
 
 
+def _detect_language(audio_path: Path) -> str:
+    """Detect language from the first 30s of audio using Whisper.
+
+    Returns an ISO 639-1 code (e.g. 'en', 'sv', 'es').
+    """
+    model = _get_whisper_model()
+    # Whisper's detect_language only needs the first 30s
+    _log.debug("Detecting language from %s", audio_path)
+    _segments, info = model.transcribe(
+        str(audio_path),
+        beam_size=1,
+        vad_filter=False,
+        # Only read enough to detect language — transcribe returns
+        # info.language after processing the first segment.
+    )
+    # Force the generator to yield at least one segment so info is populated
+    try:
+        next(iter(_segments))
+    except StopIteration:
+        pass
+    lang = getattr(info, "language", "en") or "en"
+    prob = getattr(info, "language_probability", 0)
+    _log.info("Detected language: %s (probability: %.2f)", lang, prob)
+    return lang
+
+
 def transcribe(audio_path: Path) -> list[dict]:
     """Return segments: [{start, end, text, speaker}] — speaker filled later by diarizer."""
     audio_path = Path(audio_path)
@@ -235,8 +261,20 @@ def transcribe(audio_path: Path) -> list[dict]:
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
     if file_size == 0:
         raise FileNotFoundError(f"Audio file is empty: {audio_path}")
+
     backend = _backend()
-    _log.debug("Using backend: %s", backend)
+
+    if backend == "auto":
+        lang = _detect_language(audio_path)
+        if lang == "en":
+            backend = "parakeet"
+            _log.info("Auto-routing to Parakeet (English detected)")
+        else:
+            backend = "whisper"
+            _log.info("Auto-routing to Whisper (%s detected)", lang)
+    else:
+        _log.debug("Using backend: %s", backend)
+
     if backend == "parakeet":
         segments = _transcribe_parakeet(audio_path)
     elif backend == "voxtral":

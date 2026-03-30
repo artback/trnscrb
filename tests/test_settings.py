@@ -16,7 +16,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(profiles["lmstudio"]["endpoint"], "http://127.0.0.1:1234")
         self.assertEqual(profiles["anthropic"]["endpoint"], "https://api.anthropic.com")
         self.assertEqual(profiles["openai"]["endpoint"], "https://api.openai.com/v1")
-        self.assertEqual(settings._DEFAULTS["transcription_backend"], "parakeet")
+        self.assertEqual(settings._DEFAULTS["transcription_backend"], "auto")
         self.assertEqual(
             settings._DEFAULTS["parakeet_model_id"],
             "mlx-community/parakeet-tdt-0.6b-v3",
@@ -60,7 +60,7 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("ollama", loaded["enrich"]["profiles"])
         self.assertIn("llama_cpp", loaded["enrich"]["profiles"])
         self.assertIn("last_test_status", loaded["enrich"])
-        self.assertEqual(loaded["transcription_backend"], "parakeet")
+        self.assertEqual(loaded["transcription_backend"], "auto")
         self.assertEqual(loaded["parakeet_model_id"], "mlx-community/parakeet-tdt-0.6b-v3")
         self.assertEqual(loaded["model_size"], "small")
 
@@ -77,7 +77,7 @@ class SettingsTests(unittest.TestCase):
 
         self.assertEqual(loaded["auto_record"], False)
         self.assertEqual(loaded["model_size"], "small")
-        self.assertEqual(loaded["transcription_backend"], "parakeet")
+        self.assertEqual(loaded["transcription_backend"], "auto")
         self.assertEqual(loaded["parakeet_model_id"], "mlx-community/parakeet-tdt-0.6b-v3")
         self.assertIn("enrich", loaded)
         self.assertEqual(loaded["enrich"]["provider"], "llama_cpp")

@@ -109,16 +109,16 @@ class TrnscrbApp(rumps.App):
 
     def _preload_model(self):
         try:
-            backend = get_setting("transcription_backend") or "parakeet"
-            if backend == "parakeet":
+            backend = get_setting("transcription_backend") or "auto"
+            if backend in ("auto", "parakeet"):
                 from trnscrb.transcriber import _get_parakeet_model
 
                 _get_parakeet_model()
-            elif backend == "whisper":
+            if backend in ("auto", "whisper"):
                 from trnscrb.transcriber import _get_whisper_model
 
                 _get_whisper_model()
-            elif backend == "voxtral":
+            if backend == "voxtral":
                 from trnscrb.transcriber import _get_voxtral_pipeline
 
                 _get_voxtral_pipeline()
