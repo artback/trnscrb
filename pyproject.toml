@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trnscrb"
-version = "0.7.0"
+version = "0.7.1"
 description = "Offline meeting transcription for macOS — auto-detects meetings, transcribes locally with Parakeet or Whisper, saves to Claude Desktop via MCP"
 readme = "README.md"
 license = "MIT"

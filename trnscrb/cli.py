@@ -436,6 +436,29 @@ def show(transcript_id: str):
 # ── live ──────────────────────────────────────────────────────────────────────
 
 
+_LIVE_MARKERS = (
+    "[Recording in progress",
+    "[Live — recording in progress",
+)
+
+
+def _is_live_file(path: Path) -> bool:
+    """Return True if the file contains a live-recording marker."""
+    try:
+        text = path.read_text(encoding="utf-8")
+        return any(marker in text for marker in _LIVE_MARKERS)
+    except Exception:
+        return False
+
+
+def _find_live_file(notes_dir: Path) -> Path | None:
+    """Return the active live-recording file, or None."""
+    for f in sorted(notes_dir.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if _is_live_file(f):
+            return f
+    return None
+
+
 @cli.command()
 def live():
     """Tail the live transcript of the current recording."""
@@ -448,22 +471,29 @@ def live():
 
     last_content = ""
     last_file = None
+    was_active = False
     try:
         while True:
-            # Find the newest .txt file
-            files = sorted(storage.NOTES_DIR.glob("*.txt"), reverse=True)
-            if not files:
-                time.sleep(2)
+            active = _find_live_file(storage.NOTES_DIR)
+
+            if active is None:
+                if was_active:
+                    click.echo(click.style("\nRecording ended.", dim=True))
+                    was_active = False
+                    last_file = None
+                    last_content = ""
+                elif not was_active and last_file is None:
+                    click.echo(click.style("No active recording.", dim=True))
+                time.sleep(3)
                 continue
 
-            newest = files[0]
-            content = newest.read_text(encoding="utf-8")
+            was_active = True
+            content = active.read_text(encoding="utf-8")
 
-            # New file or content changed — print the diff
-            if newest != last_file:
-                last_file = newest
+            if active != last_file:
+                last_file = active
                 last_content = ""
-                click.echo(click.style(f"\n── {newest.name} ──", fg="cyan", bold=True))
+                click.echo(click.style(f"\n── {active.name} ──", fg="cyan", bold=True))
 
             if content != last_content:
                 new_part = content[len(last_content) :]

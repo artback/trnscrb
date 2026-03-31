@@ -167,13 +167,26 @@ class MicWatcher:
                     self._state = "idle"
                     self._since = None
                 elif elapsed >= WARMUP_SECS:
+                    # Mic has been active long enough — but only start recording
+                    # if a meeting app/tab is actually detected.  Without this
+                    # gate, system audio (YouTube, music) routed through BlackHole
+                    # would trigger hours-long ghost recordings.
+                    if not is_meeting_app_running():
+                        _log.debug(
+                            "mic active %.1fs but no meeting app detected — staying idle",
+                            elapsed,
+                        )
+                        self._state = "idle"
+                        self._since = None
+                        continue
+
                     _log.debug("state %s → %s", "warming", "recording")
                     self._rec_started = now
                     self._state = "recording"
                     self._since = now
                     self._no_app_polls = 0
                     _app_counter = APP_POLL_EVERY  # check app on first recording poll
-                    _app_running = True  # assume running at recording start
+                    _app_running = True
                     meeting_name = detect_meeting()
                     _log.info("on_start firing — meeting_name=%s", meeting_name)
                     self.on_start(meeting_name)
