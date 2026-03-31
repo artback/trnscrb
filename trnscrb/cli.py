@@ -472,6 +472,7 @@ def live():
     last_content = ""
     last_file = None
     was_active = False
+    printed_idle = False
     try:
         while True:
             active = _find_live_file(storage.NOTES_DIR)
@@ -480,12 +481,16 @@ def live():
                 if was_active:
                     click.echo(click.style("\nRecording ended.", dim=True))
                     was_active = False
+                    printed_idle = False
                     last_file = None
                     last_content = ""
-                elif not was_active and last_file is None:
+                elif not printed_idle:
                     click.echo(click.style("No active recording.", dim=True))
+                    printed_idle = True
                 time.sleep(3)
                 continue
+
+            printed_idle = False
 
             was_active = True
             content = active.read_text(encoding="utf-8")
