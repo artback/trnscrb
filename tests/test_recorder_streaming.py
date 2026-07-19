@@ -162,7 +162,7 @@ class RecorderFullCycleTest(unittest.TestCase):
 
     def test_start_stop_produces_valid_wav(self):
         with self._patch_stream():
-            rec = Recorder(device=None)
+            rec = Recorder(device=None, system_audio=False)
             rec.start()
 
             # Simulate audio data arriving via the callback
@@ -189,7 +189,7 @@ class RecorderFullCycleTest(unittest.TestCase):
 
     def test_stop_with_no_frames_returns_none_and_cleans_up(self):
         with self._patch_stream():
-            rec = Recorder(device=None)
+            rec = Recorder(device=None, system_audio=False)
             rec.start()
             tmp_path = Path(rec._tmpfile.name)
 
@@ -206,7 +206,7 @@ class RecorderFullCycleTest(unittest.TestCase):
 
     def test_stop_clears_stream_reference(self):
         with self._patch_stream():
-            rec = Recorder(device=None)
+            rec = Recorder(device=None, system_audio=False)
             rec.start()
             self.assertIsNotNone(rec._stream)
 
@@ -225,7 +225,7 @@ class RecorderFullCycleTest(unittest.TestCase):
         mock_stream = MagicMock()
         mock_stream.close.side_effect = RuntimeError("device error")
         with patch("trnscrb.recorder.sd.InputStream", return_value=mock_stream):
-            rec = Recorder(device=None)
+            rec = Recorder(device=None, system_audio=False)
             rec.start()
 
             block = np.ones((50, 1), dtype=np.float32)
@@ -329,49 +329,188 @@ class CallbackExceptionTest(unittest.TestCase):
         Path(tmp_path).unlink(missing_ok=True)
 
 
-class FindBlackholeDeviceTest(unittest.TestCase):
-    """Test Recorder.find_blackhole_device() with mocked sd.query_devices()."""
+class SystemAudioMixTest(unittest.TestCase):
+    """Test mixing of ScreenCaptureKit system-audio chunks into the mic stream."""
 
-    def test_first_blackhole_device_selected(self):
-        """When multiple BlackHole devices exist, the first one should be returned."""
-        devices = [
-            {"name": "Built-in Microphone", "max_input_channels": 1},
-            {"name": "BlackHole 2ch", "max_input_channels": 2},
-            {"name": "BlackHole 16ch", "max_input_channels": 16},
-        ]
-        with patch("trnscrb.recorder.sd.query_devices", return_value=devices):
-            result = Recorder.find_blackhole_device()
+    def _make_recorder(self):
+        rec = Recorder(device=None)
+        rec._tmpfile = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        rec._tmpfile.write(b"\x00" * 44)
+        rec._frame_count = 0
+        rec._recording = True
+        rec._system_audio_active = True
+        return rec
 
-        self.assertEqual(result, 1)
+    def tearDown(self):
+        if hasattr(self, "_paths"):
+            for p in self._paths:
+                Path(p).unlink(missing_ok=True)
 
-    def test_no_blackhole_returns_none(self):
-        """When no BlackHole device is present, should return None."""
-        devices = [
-            {"name": "Built-in Microphone", "max_input_channels": 1},
-            {"name": "External USB Mic", "max_input_channels": 2},
-        ]
-        with patch("trnscrb.recorder.sd.query_devices", return_value=devices):
-            result = Recorder.find_blackhole_device()
+    def test_pull_returns_none_when_inactive(self):
+        rec = Recorder(device=None)
+        rec._on_system_chunk(np.ones(100, dtype=np.float32))
+        self.assertIsNone(rec._pull_system_frames(100))
 
-        self.assertIsNone(result)
+    def test_pull_returns_none_when_buffer_empty(self):
+        rec = self._make_recorder()
+        self._paths = [rec._tmpfile.name]
+        self.assertIsNone(rec._pull_system_frames(100))
+        rec._tmpfile.close()
 
-    def test_blackhole_with_zero_input_channels_skipped(self):
-        """A BlackHole device with 0 input channels should be skipped."""
-        devices = [
-            {"name": "BlackHole 2ch", "max_input_channels": 0},
-            {"name": "Built-in Microphone", "max_input_channels": 1},
-        ]
-        with patch("trnscrb.recorder.sd.query_devices", return_value=devices):
-            result = Recorder.find_blackhole_device()
+    def test_pull_pads_with_zeros_when_short(self):
+        rec = self._make_recorder()
+        self._paths = [rec._tmpfile.name]
+        rec._on_system_chunk(np.full(30, 0.25, dtype=np.float32))
 
-        self.assertIsNone(result)
+        out = rec._pull_system_frames(100)
+        self.assertEqual(len(out), 100)
+        np.testing.assert_array_equal(out[:30], np.full(30, 0.25, dtype=np.float32))
+        np.testing.assert_array_equal(out[30:], np.zeros(70, dtype=np.float32))
+        rec._tmpfile.close()
 
-    def test_empty_device_list(self):
-        """Empty device list should return None."""
-        with patch("trnscrb.recorder.sd.query_devices", return_value=[]):
-            result = Recorder.find_blackhole_device()
+    def test_pull_spans_chunks_and_keeps_remainder(self):
+        rec = self._make_recorder()
+        self._paths = [rec._tmpfile.name]
+        rec._on_system_chunk(np.full(60, 0.1, dtype=np.float32))
+        rec._on_system_chunk(np.full(60, 0.2, dtype=np.float32))
 
-        self.assertIsNone(result)
+        out = rec._pull_system_frames(100)
+        np.testing.assert_array_equal(out[:60], np.full(60, 0.1, dtype=np.float32))
+        np.testing.assert_allclose(out[60:], np.full(40, 0.2, dtype=np.float32))
+        self.assertEqual(rec._sys_frames, 20)
+
+        rest = rec._pull_system_frames(100)
+        np.testing.assert_allclose(rest[:20], np.full(20, 0.2, dtype=np.float32))
+        self.assertEqual(rec._sys_frames, 0)
+        rec._tmpfile.close()
+
+    def test_buffer_cap_drops_oldest_chunks(self):
+        from trnscrb.recorder import _SYS_BUFFER_MAX_FRAMES
+
+        rec = self._make_recorder()
+        self._paths = [rec._tmpfile.name]
+        chunk = np.zeros(SAMPLE_RATE, dtype=np.float32)  # 1 second per chunk
+        for _ in range(40):
+            rec._on_system_chunk(chunk)
+
+        self.assertLessEqual(rec._sys_frames, _SYS_BUFFER_MAX_FRAMES)
+        rec._tmpfile.close()
+
+    def test_callback_mixes_system_audio_into_mic(self):
+        rec = self._make_recorder()
+        self._paths = [rec._tmpfile.name]
+        rec._on_system_chunk(np.full(10, 0.25, dtype=np.float32))
+
+        indata = np.full((10, 1), 0.25, dtype=np.float32)
+        rec._callback(indata, 10, None, None)
+
+        rec._tmpfile.seek(44)
+        raw = rec._tmpfile.read()
+        rec._tmpfile.close()
+        samples = np.frombuffer(raw, dtype=np.int16)
+        expected = np.int16(0.5 * 32767)
+        np.testing.assert_array_equal(samples, np.full(10, expected, dtype=np.int16))
+
+    def test_mic_gain_boosts_quiet_mic(self):
+        """Quiet mic vs loud system audio → mic boosted toward system level."""
+        rec = Recorder(device=None)
+        mic = np.full(1024, 0.05, dtype=np.float32)
+        system = np.full(1024, 0.5, dtype=np.float32)
+        for _ in range(100):  # let the loudness EMAs converge
+            gain = rec._mic_gain(mic, system)
+        self.assertGreater(gain, 1.0)
+
+    def test_mic_gain_clamped_at_max(self):
+        from trnscrb.recorder import _MIC_GAIN_MAX
+
+        rec = Recorder(device=None)
+        mic = np.full(1024, 0.01, dtype=np.float32)  # 50x quieter than system
+        system = np.full(1024, 0.5, dtype=np.float32)
+        for _ in range(100):
+            gain = rec._mic_gain(mic, system)
+        self.assertLessEqual(gain, _MIC_GAIN_MAX)
+
+    def test_mic_gain_never_attenuates(self):
+        """Loud mic vs quiet system audio → gain stays 1.0, never < 1."""
+        rec = Recorder(device=None)
+        mic = np.full(1024, 0.5, dtype=np.float32)
+        system = np.full(1024, 0.05, dtype=np.float32)
+        for _ in range(100):
+            gain = rec._mic_gain(mic, system)
+        self.assertEqual(gain, 1.0)
+
+    def test_mic_gain_unity_on_silence(self):
+        rec = Recorder(device=None)
+        silence = np.zeros(1024, dtype=np.float32)
+        self.assertEqual(rec._mic_gain(silence, silence), 1.0)
+
+    def test_callback_clips_mixed_signal(self):
+        rec = self._make_recorder()
+        self._paths = [rec._tmpfile.name]
+        rec._on_system_chunk(np.full(5, 0.8, dtype=np.float32))
+
+        indata = np.full((5, 1), 0.8, dtype=np.float32)  # 1.6 combined → clipped
+        rec._callback(indata, 5, None, None)
+
+        rec._tmpfile.seek(44)
+        raw = rec._tmpfile.read()
+        rec._tmpfile.close()
+        samples = np.frombuffer(raw, dtype=np.int16)
+        np.testing.assert_array_equal(samples, np.full(5, 32767, dtype=np.int16))
+
+
+class MicStreamRestartTest(unittest.TestCase):
+    """Test mic-stream recovery after a device change (stalled callback)."""
+
+    def test_restart_replaces_stream(self):
+        old_stream = MagicMock()
+        new_stream = MagicMock()
+        with patch("trnscrb.recorder.sd.InputStream", return_value=new_stream):
+            rec = Recorder(device=None)
+            rec._recording = True
+            rec._stream = old_stream
+            rec._restart_mic_stream()
+
+        old_stream.stop.assert_called_once()
+        old_stream.close.assert_called_once()
+        new_stream.start.assert_called_once()
+        self.assertIs(rec._stream, new_stream)
+
+    def test_restart_survives_old_stream_close_error(self):
+        old_stream = MagicMock()
+        old_stream.close.side_effect = RuntimeError("device gone")
+        new_stream = MagicMock()
+        with patch("trnscrb.recorder.sd.InputStream", return_value=new_stream):
+            rec = Recorder(device=None)
+            rec._recording = True
+            rec._stream = old_stream
+            rec._restart_mic_stream()
+
+        self.assertIs(rec._stream, new_stream)
+
+    def test_restart_after_stop_closes_new_stream(self):
+        """If stop() raced the restart, the fresh stream must not leak."""
+        new_stream = MagicMock()
+        with patch("trnscrb.recorder.sd.InputStream", return_value=new_stream):
+            rec = Recorder(device=None)
+            rec._recording = False  # stop() already ran
+            rec._stream = MagicMock()
+            rec._restart_mic_stream()
+
+        new_stream.stop.assert_called_once()
+        new_stream.close.assert_called_once()
+        self.assertIsNone(rec._stream)
+
+    def test_restart_failure_leaves_no_stream_and_backs_off(self):
+        with patch("trnscrb.recorder.sd.InputStream", side_effect=RuntimeError("no device")):
+            rec = Recorder(device=None)
+            rec._recording = True
+            rec._stream = MagicMock()
+            before = rec._last_mic_frame
+            rec._restart_mic_stream()
+
+        self.assertIsNone(rec._stream)
+        self.assertGreater(rec._last_mic_frame, before)
 
 
 if __name__ == "__main__":

@@ -42,6 +42,58 @@ def _notify(title: str, subtitle: str, message: str) -> None:
         pass
 
 
+def _find_claude_cli() -> str | None:
+    """Locate the claude CLI — launchd runs with a bare PATH, so check common spots."""
+    import os
+    import shutil
+
+    found = shutil.which("claude")
+    if found:
+        return found
+    for candidate in (
+        Path.home() / ".local" / "bin" / "claude",
+        Path.home() / ".claude" / "local" / "claude",
+        Path("/opt/homebrew/bin/claude"),
+        Path("/usr/local/bin/claude"),
+    ):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
+def _integrate_notes(transcript_path: Path) -> None:
+    """Fire-and-forget: ask Claude Code to fold the transcript into the user's notes.
+
+    Prompt and tool allowlist come from the `integrate_prompt` and
+    `integrate_allowed_tools` settings.
+    """
+    claude = _find_claude_cli()
+    if not claude:
+        _log.warning("Auto-integrate skipped: claude CLI not found on PATH or common locations")
+        _notify("Trnscrb", "Note integration skipped", "Claude CLI not found")
+        return
+    template = str(get_setting("integrate_prompt") or "")
+    allowed = str(get_setting("integrate_allowed_tools") or "")
+    try:
+        prompt = template.format(transcript_path=transcript_path)
+    except (KeyError, IndexError) as e:
+        _log.error("Invalid integrate_prompt template (%s); skipping note integration", e)
+        return
+    cmd = [claude, "-p", prompt]
+    if allowed:
+        cmd += ["--allowedTools", allowed]
+    _log.info("Note integration via Claude Code started for %s", transcript_path.name)
+    try:
+        subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=str(Path.home()),
+        )
+    except Exception as e:
+        _log.error("Could not launch claude CLI for note integration: %s", e)
+
+
 class TrnscrbApp(rumps.App):
     def __init__(self):
         cleanup_stale_temp_files()
@@ -64,6 +116,9 @@ class TrnscrbApp(rumps.App):
         self._start_item = rumps.MenuItem("Start Transcribing", callback=self.start_recording)
         self._stop_item = rumps.MenuItem("Stop Transcribing", callback=None)
         self._auto_item = rumps.MenuItem("Auto-transcribe: Off", callback=self.toggle_auto_record)
+        self._integrate_item = rumps.MenuItem(
+            "Auto-integrate notes: Off", callback=self.toggle_auto_integrate
+        )
         self._settings_item = rumps.MenuItem("Settings")
         self._provider_item = rumps.MenuItem("Provider")
         self._endpoint_item = rumps.MenuItem("Endpoint…", callback=self.edit_enrich_endpoint)
@@ -87,6 +142,7 @@ class TrnscrbApp(rumps.App):
             self._stop_item,
             None,
             self._auto_item,
+            self._integrate_item,
             self._open_latest_item,
             self._settings_item,
             None,
@@ -109,6 +165,8 @@ class TrnscrbApp(rumps.App):
         if get_setting("auto_record"):
             self._start_watcher()
             self._auto_item.title = "Auto-transcribe: On ✓"
+        if get_setting("auto_integrate"):
+            self._integrate_item.title = "Auto-integrate notes: On ✓"
         self._refresh_enrich_settings_menu()
 
         # Preload transcription model in background so first recording is fast
@@ -171,6 +229,20 @@ class TrnscrbApp(rumps.App):
                 "Auto-transcribe on",
                 "Will start when mic is active for 5+ seconds",
             )
+
+    def toggle_auto_integrate(self, sender):
+        if get_setting("auto_integrate"):
+            put_setting("auto_integrate", False)
+            sender.title = "Auto-integrate notes: Off"
+            _notify("Trnscrb", "Auto-integrate off", "")
+        else:
+            put_setting("auto_integrate", True)
+            sender.title = "Auto-integrate notes: On ✓"
+            if _find_claude_cli():
+                msg = "Transcripts will be added to your notes via Claude Code"
+            else:
+                msg = "Claude CLI not found — install it for integration to work"
+            _notify("Trnscrb", "Auto-integrate on", msg)
 
     # ── enrichment settings ───────────────────────────────────────────────────
 
@@ -411,12 +483,10 @@ class TrnscrbApp(rumps.App):
                 meeting_name = evt["title"] if evt else ""
             except Exception:
                 meeting_name = ""
-        device = rec_module.Recorder.find_blackhole_device()
-
         with self._rec_lock:
             if self._recorder and self._recorder.is_recording:
                 return
-            self._recorder = rec_module.Recorder(device=device)
+            self._recorder = rec_module.Recorder()
             self._started_at = datetime.now()
             self._recorder.start()
             self._set_state("recording")
@@ -435,7 +505,7 @@ class TrnscrbApp(rumps.App):
         self._live_thread = threading.Thread(target=self._live_transcribe, daemon=True)
         self._live_thread.start()
 
-        source = "BlackHole (system + mic)" if device is not None else "built-in mic"
+        source = "system audio + mic" if self._recorder.system_audio_active else "built-in mic"
         _log.info(
             "Recording started: meeting=%s device=%s",
             meeting_name or "(unnamed)",
@@ -516,6 +586,7 @@ class TrnscrbApp(rumps.App):
                 _notify("Trnscrb", "Error", "No audio captured.")
                 return
 
+            evt = None
             if not meeting_name:
                 try:
                     evt = get_current_or_upcoming_event()
@@ -570,6 +641,11 @@ class TrnscrbApp(rumps.App):
                 except Exception as e:
                     _log.warning("Auto-enrich failed for %s: %s", meeting_name, e)
                     _notify("Trnscrb", "Enrichment skipped", str(e)[:180])
+
+            # Auto-integrate into notes via Claude Code (after enrich, so the
+            # CLI sees the final transcript content)
+            if get_setting("auto_integrate"):
+                _integrate_notes(path)
         except Exception as e:
             _log.error("Unexpected error in _process: %s", e, exc_info=True)
             _notify("Trnscrb", "Error", str(e)[:180])
@@ -614,6 +690,18 @@ class TrnscrbApp(rumps.App):
 
 def main():
     import AppKit
+
+    from trnscrb.single_instance import SingleInstance
+
+    # Hold for the whole app lifetime; a second copy (manual start while the
+    # launchd one runs, or vice versa) exits cleanly instead of double-recording.
+    lock = SingleInstance()
+    if not lock.acquire():
+        pid = lock.holder_pid()
+        msg = f"trnscrb is already running (pid {pid})." if pid else "trnscrb is already running."
+        _log.warning("%s Exiting.", msg)
+        print(msg)
+        return
 
     app = TrnscrbApp()
     AppKit.NSApplication.sharedApplication().setActivationPolicy_(

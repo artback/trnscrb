@@ -187,6 +187,25 @@ class BrowserMeetingTabFilterTest(unittest.TestCase):
         self.assertIn('does not contain "ended"', watcher._CHROME_TAB_SCRIPT)
         self.assertIn('does not contain "left"', watcher._CHROME_TAB_SCRIPT)
 
+    def test_firefox_script_matches_meeting_window_titles(self):
+        """Firefox is checked via window titles (no AppleScript tab API)."""
+        self.assertIn('"Meet -"', watcher._FIREFOX_WINDOW_SCRIPT)
+        self.assertIn("Microsoft Teams", watcher._FIREFOX_WINDOW_SCRIPT)
+        self.assertIn("Zoom Meeting", watcher._FIREFOX_WINDOW_SCRIPT)
+        self.assertIn('does not contain "ended"', watcher._FIREFOX_WINDOW_SCRIPT)
+
+    def test_browser_check_includes_firefox(self):
+        """All three browser scripts must be queried by _browser_has_meeting_tab."""
+        queried = []
+
+        def fake_run(label, script):
+            queried.append(label)
+            return None
+
+        with patch.object(watcher, "_run_osascript", side_effect=fake_run):
+            watcher._browser_has_meeting_tab()
+        self.assertEqual(sorted(queried), ["Chrome", "Firefox", "Safari"])
+
     def test_browser_has_meeting_tab_returns_name_or_bool(self):
         """_browser_has_meeting_tab returns str when return_name=True, bool otherwise."""
         with patch("subprocess.run") as mock_run:

@@ -20,7 +20,7 @@ Or with `uv`:
 uv tool install trnscrb && trnscrb install
 ```
 
-`trnscrb install` handles BlackHole audio driver, model downloads, Claude Desktop MCP config, and launch-at-login.
+`trnscrb install` handles the system-audio (Screen Recording) permission, model downloads, Claude Desktop MCP config, and launch-at-login.
 
 ---
 
@@ -168,13 +168,9 @@ After `trnscrb install`, Claude Desktop has these tools:
 
 ## System audio setup
 
-To capture both your mic and other participants' audio:
+trnscrb captures both your mic and other participants' audio natively via **ScreenCaptureKit** — no virtual audio driver or Multi-Output Device needed.
 
-1. Install BlackHole via `trnscrb install` (or `brew install blackhole-2ch`)
-2. Open **Audio MIDI Setup** → create a **Multi-Output Device** with BlackHole + speakers
-3. Set the Multi-Output Device as your system output
-
-trnscrb auto-detects BlackHole or an Aggregate Device. Without either, only your mic is recorded.
+The only requirement is the **Screen Recording** permission (macOS 15+ shows it as "Screen & System Audio Recording"). `trnscrb install` requests it, or grant it manually under **System Settings → Privacy & Security**. Without it, only your mic is recorded.
 
 ---
 

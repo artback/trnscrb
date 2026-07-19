@@ -252,8 +252,16 @@ def _detect_language(audio_path: Path) -> str:
     return lang
 
 
+# Serializes inference across threads: the live-transcription loop and the
+# final post-meeting transcription may otherwise run on MPS concurrently.
+_transcribe_lock = threading.Lock()
+
+
 def transcribe(audio_path: Path) -> list[dict]:
-    """Return segments: [{start, end, text, speaker}] — speaker filled later by diarizer."""
+    """Return segments: [{start, end, text, speaker}] — speaker filled later by diarizer.
+
+    Serialized with a lock so concurrent calls don't overlap on the GPU.
+    """
     audio_path = Path(audio_path)
     file_size = audio_path.stat().st_size if audio_path.exists() else 0
     _log.info("Transcribing %s (%d bytes)", audio_path, file_size)
@@ -264,22 +272,23 @@ def transcribe(audio_path: Path) -> list[dict]:
 
     backend = _backend()
 
-    if backend == "auto":
-        lang = _detect_language(audio_path)
-        if lang == "en":
-            backend = "parakeet"
-            _log.info("Auto-routing to Parakeet (English detected)")
+    with _transcribe_lock:
+        if backend == "auto":
+            lang = _detect_language(audio_path)
+            if lang == "en":
+                backend = "parakeet"
+                _log.info("Auto-routing to Parakeet (English detected)")
+            else:
+                backend = "whisper"
+                _log.info("Auto-routing to Whisper (%s detected)", lang)
         else:
-            backend = "whisper"
-            _log.info("Auto-routing to Whisper (%s detected)", lang)
-    else:
-        _log.debug("Using backend: %s", backend)
+            _log.debug("Using backend: %s", backend)
 
-    if backend == "parakeet":
-        segments = _transcribe_parakeet(audio_path)
-    elif backend == "voxtral":
-        segments = _transcribe_voxtral(audio_path)
-    else:
-        segments = _transcribe_whisper(audio_path)
+        if backend == "parakeet":
+            segments = _transcribe_parakeet(audio_path)
+        elif backend == "voxtral":
+            segments = _transcribe_voxtral(audio_path)
+        else:
+            segments = _transcribe_whisper(audio_path)
     _log.info("Transcription complete: %d segments", len(segments))
     return segments
