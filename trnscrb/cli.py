@@ -63,6 +63,7 @@ def install(force: bool):
         "rumps": "rumps>=0.4.0",
         "sounddevice": "sounddevice>=0.4.6",
         "parakeet_mlx": "parakeet-mlx>=0.5.1",
+        "mlx_qwen3_asr": "mlx-qwen3-asr>=0.3.5",
         "faster_whisper": "faster-whisper>=1.0.0",
         "pyannote.audio": "pyannote.audio>=3.1",
         "mcp": "mcp>=1.0.0",
@@ -142,7 +143,7 @@ def install(force: bool):
     _row("Speaker labels", hf_ok, "optional — requires free HuggingFace token")
     if not hf_ok:
         click.echo("  Get a token at https://hf.co/settings/tokens")
-        click.echo("  Accept terms at https://hf.co/pyannote/speaker-diarization-3.1")
+        click.echo("  Accept terms at https://hf.co/pyannote/speaker-diarization-community-1")
         token = click.prompt(
             "  Paste token (or Enter to skip)",
             default="",

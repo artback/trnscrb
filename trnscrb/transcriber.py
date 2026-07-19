@@ -8,7 +8,7 @@ from trnscrb.log import get_logger
 
 _log = get_logger("trnscrb.transcriber")
 
-_SUPPORTED_BACKENDS = {"auto", "parakeet", "whisper", "voxtral"}
+_SUPPORTED_BACKENDS = {"auto", "parakeet", "whisper", "voxtral", "qwen3"}
 
 _whisper_model = None
 _whisper_model_lock = threading.Lock()
@@ -150,6 +150,89 @@ def _transcribe_parakeet(audio_path: Path) -> list[dict]:
     return normalized
 
 
+_qwen3_model = None
+_qwen3_aligner = None
+_qwen3_model_id = None
+_qwen3_lock = threading.Lock()
+
+
+def _get_qwen3():
+    """Return (model, forced_aligner), loading and caching them on first call."""
+    global _qwen3_model, _qwen3_aligner, _qwen3_model_id
+    model_id = str(settings.get("qwen3_model_id") or "Qwen/Qwen3-ASR-0.6B").strip()
+    with _qwen3_lock:
+        if _qwen3_model is None or _qwen3_model_id != model_id:
+            try:
+                from mlx_qwen3_asr import ForcedAligner, load_model
+            except ModuleNotFoundError as e:
+                raise RuntimeError(
+                    "Qwen3 backend selected but mlx-qwen3-asr is not installed. "
+                    "Install it with `uv add mlx-qwen3-asr`."
+                ) from e
+            try:
+                _log.info("Loading Qwen3-ASR model %s", model_id)
+                model, _config = load_model(model_id)
+                aligner = ForcedAligner()
+                _qwen3_model = model
+                _qwen3_aligner = aligner
+                _qwen3_model_id = model_id
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to load Qwen3-ASR model '{model_id}'. "
+                    "Verify network/cache access for first-time model download."
+                ) from e
+        return _qwen3_model, _qwen3_aligner
+
+
+def _words_to_segments(text: str, words: list[dict]) -> list[dict]:
+    """Combine Qwen3's punctuated text with word-level timings into sentences.
+
+    The word list carries timings but no punctuation; the full text carries
+    punctuation but no timings. Sentences are split from the text and mapped
+    onto the word list by word count — small tokenization drift only shifts a
+    segment boundary slightly, which the diarizer merge tolerates.
+    """
+    import re
+
+    words = [w for w in words if str(w.get("text", "")).strip()]
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?。！？])\s+", text.strip()) if s.strip()]
+    if not sentences:
+        return []
+    if not words:
+        return [{"start": 0.0, "end": 0.0, "text": " ".join(sentences), "speaker": None}]
+
+    segments = []
+    word_idx = 0
+    last_end = float(words[-1].get("end", 0.0) or 0.0)
+    for sentence in sentences:
+        chunk = words[word_idx : word_idx + len(sentence.split())]
+        word_idx += len(sentence.split())
+        if chunk:
+            start = float(chunk[0].get("start", 0.0) or 0.0)
+            end = float(chunk[-1].get("end", start) or start)
+        else:
+            start = end = last_end  # word list ran short — pin to the tail
+        segments.append({"start": start, "end": end, "text": sentence, "speaker": None})
+    return segments
+
+
+def _transcribe_qwen3(audio_path: Path) -> list[dict]:
+    model, aligner = _get_qwen3()
+    from mlx_qwen3_asr import transcribe as qwen3_transcribe
+
+    result = qwen3_transcribe(
+        str(audio_path),
+        model=model,
+        forced_aligner=aligner,
+        return_timestamps=True,
+    )
+    text = str(getattr(result, "text", "") or "").strip()
+    if not text:
+        return []
+    words = list(getattr(result, "segments", None) or [])
+    return _words_to_segments(text, words)
+
+
 _voxtral_pipeline = None
 _voxtral_pipeline_lock = threading.Lock()
 _voxtral_model_id = None
@@ -271,16 +354,18 @@ def transcribe(audio_path: Path) -> list[dict]:
         raise FileNotFoundError(f"Audio file is empty: {audio_path}")
 
     backend = _backend()
+    auto_routed = False
 
     with _transcribe_lock:
         if backend == "auto":
+            auto_routed = True
             lang = _detect_language(audio_path)
             if lang == "en":
                 backend = "parakeet"
                 _log.info("Auto-routing to Parakeet (English detected)")
             else:
-                backend = "whisper"
-                _log.info("Auto-routing to Whisper (%s detected)", lang)
+                backend = "qwen3"
+                _log.info("Auto-routing to Qwen3-ASR (%s detected)", lang)
         else:
             _log.debug("Using backend: %s", backend)
 
@@ -288,6 +373,17 @@ def transcribe(audio_path: Path) -> list[dict]:
             segments = _transcribe_parakeet(audio_path)
         elif backend == "voxtral":
             segments = _transcribe_voxtral(audio_path)
+        elif backend == "qwen3":
+            if auto_routed:
+                # Auto mode must always produce a transcript — fall back to
+                # Whisper if Qwen3 is unavailable (e.g. model never downloaded).
+                try:
+                    segments = _transcribe_qwen3(audio_path)
+                except Exception as e:
+                    _log.warning("Qwen3 backend failed (%s); falling back to Whisper", e)
+                    segments = _transcribe_whisper(audio_path)
+            else:
+                segments = _transcribe_qwen3(audio_path)
         else:
             segments = _transcribe_whisper(audio_path)
     _log.info("Transcription complete: %d segments", len(segments))
@@ -302,6 +398,7 @@ def unload_models() -> None:
     """
     global _whisper_model, _parakeet_model, _parakeet_model_id
     global _voxtral_pipeline, _voxtral_model_id
+    global _qwen3_model, _qwen3_aligner, _qwen3_model_id
     import gc
 
     with _transcribe_lock:
@@ -313,5 +410,9 @@ def unload_models() -> None:
         with _voxtral_pipeline_lock:
             _voxtral_pipeline = None
             _voxtral_model_id = None
+        with _qwen3_lock:
+            _qwen3_model = None
+            _qwen3_aligner = None
+            _qwen3_model_id = None
     gc.collect()
     _log.info("Transcription models unloaded")

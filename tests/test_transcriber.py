@@ -10,9 +10,23 @@ def _settings_getter(backend: str, parakeet_model_id: str = "mlx-community/parak
     mapping = {
         "transcription_backend": backend,
         "parakeet_model_id": parakeet_model_id,
+        "qwen3_model_id": "Qwen/Qwen3-ASR-0.6B",
         "model_size": "small",
     }
     return lambda key: mapping.get(key)
+
+
+def _fake_qwen3_module(text, words):
+    """A stand-in mlx_qwen3_asr module returning a fixed transcription."""
+
+    def transcribe(_audio, **_kwargs):
+        return types.SimpleNamespace(text=text, segments=words)
+
+    return types.SimpleNamespace(
+        load_model=lambda _model_id: (object(), object()),
+        ForcedAligner=lambda: object(),
+        transcribe=transcribe,
+    )
 
 
 def _fake_stat():
@@ -121,6 +135,104 @@ class TranscriberTests(unittest.TestCase):
                 ):
                     with self.assertRaisesRegex(RuntimeError, "uv add parakeet-mlx"):
                         transcriber.transcribe(Path("audio.wav"))
+
+    def test_uses_qwen3_backend_when_configured(self):
+        words = [
+            {"text": "Hello", "start": 0.5, "end": 0.9},
+            {"text": "there", "start": 0.9, "end": 1.2},
+            {"text": "Goodbye", "start": 2.0, "end": 2.5},
+            {"text": "now", "start": 2.5, "end": 2.8},
+        ]
+        fake = _fake_qwen3_module("Hello there. Goodbye now.", words)
+
+        with mock.patch.dict(sys.modules, {"mlx_qwen3_asr": fake}, clear=False):
+            with mock.patch("trnscrb.settings.get", side_effect=_settings_getter("qwen3")):
+                transcriber = self._reload_transcriber()
+                with (
+                    mock.patch.object(Path, "exists", return_value=True),
+                    mock.patch.object(Path, "stat", return_value=_fake_stat()),
+                ):
+                    segments = transcriber.transcribe(Path("audio.wav"))
+
+        self.assertEqual(
+            segments,
+            [
+                {"start": 0.5, "end": 1.2, "text": "Hello there.", "speaker": None},
+                {"start": 2.0, "end": 2.8, "text": "Goodbye now.", "speaker": None},
+            ],
+        )
+
+    def test_auto_routes_non_english_to_qwen3(self):
+        with mock.patch("trnscrb.settings.get", side_effect=_settings_getter("auto")):
+            transcriber = self._reload_transcriber()
+            with (
+                mock.patch.object(Path, "exists", return_value=True),
+                mock.patch.object(Path, "stat", return_value=_fake_stat()),
+                mock.patch.object(transcriber, "_detect_language", return_value="sv"),
+                mock.patch.object(
+                    transcriber, "_transcribe_qwen3", return_value=[{"text": "hej"}]
+                ) as qwen3,
+                mock.patch.object(transcriber, "_transcribe_whisper") as whisper,
+            ):
+                segments = transcriber.transcribe(Path("audio.wav"))
+
+        qwen3.assert_called_once()
+        whisper.assert_not_called()
+        self.assertEqual(segments, [{"text": "hej"}])
+
+    def test_auto_falls_back_to_whisper_when_qwen3_fails(self):
+        with mock.patch("trnscrb.settings.get", side_effect=_settings_getter("auto")):
+            transcriber = self._reload_transcriber()
+            with (
+                mock.patch.object(Path, "exists", return_value=True),
+                mock.patch.object(Path, "stat", return_value=_fake_stat()),
+                mock.patch.object(transcriber, "_detect_language", return_value="de"),
+                mock.patch.object(
+                    transcriber, "_transcribe_qwen3", side_effect=RuntimeError("no model")
+                ),
+                mock.patch.object(
+                    transcriber, "_transcribe_whisper", return_value=[{"text": "hallo"}]
+                ) as whisper,
+            ):
+                segments = transcriber.transcribe(Path("audio.wav"))
+
+        whisper.assert_called_once()
+        self.assertEqual(segments, [{"text": "hallo"}])
+
+
+class WordsToSegmentsTests(unittest.TestCase):
+    def _fn(self):
+        import trnscrb.transcriber as transcriber
+
+        return transcriber._words_to_segments
+
+    def test_splits_sentences_with_word_timings(self):
+        words = [
+            {"text": "One", "start": 0.0, "end": 0.4},
+            {"text": "two", "start": 0.4, "end": 0.8},
+            {"text": "Three", "start": 1.5, "end": 2.0},
+        ]
+        segments = self._fn()("One two. Three!", words)
+        self.assertEqual(len(segments), 2)
+        self.assertEqual(segments[0]["text"], "One two.")
+        self.assertEqual(segments[0]["start"], 0.0)
+        self.assertEqual(segments[0]["end"], 0.8)
+        self.assertEqual(segments[1]["text"], "Three!")
+        self.assertEqual(segments[1]["start"], 1.5)
+
+    def test_no_words_yields_single_untimed_segment(self):
+        segments = self._fn()("Just text.", [])
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(segments[0]["text"], "Just text.")
+
+    def test_word_list_shorter_than_text_pins_to_tail(self):
+        words = [{"text": "One", "start": 0.0, "end": 0.4}]
+        segments = self._fn()("One. Two three.", words)
+        self.assertEqual(len(segments), 2)
+        self.assertEqual(segments[1]["start"], 0.4)
+
+    def test_empty_text_returns_no_segments(self):
+        self.assertEqual(self._fn()("", []), [])
 
 
 if __name__ == "__main__":
