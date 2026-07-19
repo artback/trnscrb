@@ -178,6 +178,22 @@ def install(force: bool):
                 click.echo(click.style("  Done. Restart Claude Desktop to apply.", fg="green"))
         click.echo()
 
+    # App bundle wrapper — makes macOS permission prompts say "Trnscrb"
+    # instead of the terminal (or a bare python binary under launchd).
+    import shutil as _shutil
+
+    from trnscrb.app_bundle import bundle_path, ensure_bundle, is_current
+
+    _binary = _shutil.which("trnscrb") or sys.executable
+    bundle_ok = is_current(_binary)
+    _row("Trnscrb.app wrapper", bundle_ok, "permission prompts show 'Trnscrb'")
+    if not bundle_ok:
+        if ensure_bundle(_binary):
+            click.echo(f"  Created {bundle_path()}")
+        else:
+            click.echo(click.style("  Could not build app bundle (see logs).", fg="yellow"))
+    click.echo()
+
     # Launch at login
     login_ok = _login_item_exists()
     _row("Launch at login", login_ok)
@@ -186,7 +202,7 @@ def install(force: bool):
 
         binary = shutil.which("trnscrb") or sys.executable
         if _setup_login_item(binary):
-            click.echo("  Launch agent refreshed (single-instance restart policy).")
+            click.echo("  Launch agent refreshed (app bundle + restart policy).")
     if not login_ok:
         if click.confirm("  Start trnscrb automatically on login?", default=False):
             import shutil
@@ -229,6 +245,23 @@ def install(force: bool):
 @cli.command()
 def start():
     """Launch the menu bar app."""
+    import os
+
+    from trnscrb.app_bundle import bundle_path
+
+    # Relaunch through the app bundle when available: macOS then attributes
+    # permission prompts (Screen Recording, mic, Automation) to "Trnscrb"
+    # instead of the invoking terminal. TRNSCRB_IN_BUNDLE is set by the
+    # bundle's launcher; TRNSCRB_NO_BUNDLE=1 forces a direct launch.
+    if (
+        not os.environ.get("TRNSCRB_IN_BUNDLE")
+        and not os.environ.get("TRNSCRB_NO_BUNDLE")
+        and bundle_path().exists()
+    ):
+        subprocess.run(["open", "-g", str(bundle_path())], check=False)
+        click.echo(f"Launched via {bundle_path()}")
+        return
+
     from trnscrb.menu_bar import main
 
     main()
@@ -938,14 +971,25 @@ def _login_item_exists() -> bool:
 
 
 def _login_item_needs_update() -> bool:
-    """True if the installed plist predates the single-instance restart policy."""
+    """True if the plist predates the restart policy or the app-bundle launcher."""
     try:
-        return "SuccessfulExit" not in _PLIST_PATH.read_text()
+        content = _PLIST_PATH.read_text()
     except OSError:
         return False
+    return "SuccessfulExit" not in content or "Trnscrb.app" not in content
 
 
 def _setup_login_item(binary_path: str) -> bool:
+    # Launch through the app bundle when possible so TCC permission prompts
+    # are attributed to "Trnscrb" (the bundle launcher runs `trnscrb start`).
+    from trnscrb.app_bundle import ensure_bundle
+
+    bundle_exec = ensure_bundle(binary_path)
+    if bundle_exec:
+        program_args = f"<string>{bundle_exec}</string>"
+    else:
+        program_args = f"<string>{binary_path}</string>\n        <string>start</string>"
+
     plist = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -955,8 +999,7 @@ def _setup_login_item(binary_path: str) -> bool:
     <string>{_LAUNCH_AGENT_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{binary_path}</string>
-        <string>start</string>
+        {program_args}
     </array>
     <key>RunAtLoad</key>
     <true/>
