@@ -1,20 +1,34 @@
 """Speaker diarization via pyannote.audio.
 
-Requires a HuggingFace token with access to:
-  pyannote/speaker-diarization-3.1
-(accept the model's conditions at hf.co once, then it works offline).
+Prefers pyannote/speaker-diarization-community-1 (better speaker assignment
+and counting, the native pipeline of pyannote.audio 4.x) and falls back to the
+legacy speaker-diarization-3.1. Both are gated on HuggingFace — accept the
+model's conditions at hf.co once, then it works offline. The pipeline can be
+overridden with the `diarization_pipeline` setting.
 """
 
 import threading
 from pathlib import Path
 
+from trnscrb import settings
 from trnscrb.log import get_logger
 
 log = get_logger(__name__)
 
+_FALLBACK_PIPELINE = "pyannote/speaker-diarization-3.1"
+
 _pipeline = None
 # Serializes MPS/GPU inference when transcription jobs overlap.
 _diarize_lock = threading.Lock()
+
+
+def _load_pipeline(model_id: str, hf_token: str):
+    from pyannote.audio import Pipeline
+
+    try:
+        return Pipeline.from_pretrained(model_id, token=hf_token)  # pyannote.audio >= 4
+    except TypeError:
+        return Pipeline.from_pretrained(model_id, use_auth_token=hf_token)  # 3.x
 
 
 def _get_pipeline(hf_token: str):
@@ -22,19 +36,28 @@ def _get_pipeline(hf_token: str):
     global _pipeline
     if _pipeline is None:
         import torch
-        from pyannote.audio import Pipeline
 
-        log.info("Loading pyannote speaker-diarization pipeline …")
-        try:
-            _pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-                token=hf_token,  # pyannote.audio >= 4
-            )
-        except TypeError:
-            _pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-                use_auth_token=hf_token,  # pyannote.audio 3.x
-            )
+        preferred = str(
+            settings.get("diarization_pipeline") or "pyannote/speaker-diarization-community-1"
+        )
+        candidates = [preferred]
+        if preferred != _FALLBACK_PIPELINE:
+            candidates.append(_FALLBACK_PIPELINE)
+
+        last_error: Exception | None = None
+        for model_id in candidates:
+            log.info("Loading diarization pipeline %s …", model_id)
+            try:
+                _pipeline = _load_pipeline(model_id, hf_token)
+                break
+            except Exception as e:
+                last_error = e
+                log.warning("Could not load %s: %s", model_id, e)
+        if _pipeline is None:
+            raise RuntimeError(
+                f"No diarization pipeline could be loaded (tried {', '.join(candidates)}). "
+                "Accept the model conditions on hf.co and check your HuggingFace token."
+            ) from last_error
 
         # Prefer Apple Silicon Metal, fallback to CPU
         if torch.backends.mps.is_available():

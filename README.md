@@ -44,10 +44,13 @@ trnscrb live        # tail the live transcript as it updates
 
 | Backend | Language | Speed | Model size | Best for |
 |---------|----------|-------|------------|----------|
-| **auto** (default) | All | Fast | ~1.1 GB | Best of both worlds |
-| Parakeet | English only | Fastest | ~600 MB | English-only teams |
-| Whisper | 99 languages | Fast | ~500 MB | Multilingual teams |
+| **auto** (default) | All | Fast | ~1.8 GB | Parakeet for English, Qwen3 otherwise |
+| Parakeet | English + 24 EU languages | Fastest | ~600 MB | English-only teams |
+| Qwen3 | 52 languages | Fast | ~1.2 GB | Multilingual teams |
+| Whisper | 99 languages | Fast | ~500 MB | Legacy / fallback |
 | Voxtral | Multilingual | Slower | ~6 GB | Experimental |
+
+Speaker labels use pyannote **community-1** (falls back to 3.1) — accept its terms once at [hf.co/pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1).
 
 **Auto mode** detects the spoken language and routes English to Parakeet (best accuracy) and everything else to Whisper.
 
