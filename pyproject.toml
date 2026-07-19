@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trnscrb"
-version = "0.9.0"
+version = "0.9.1"
 description = "Offline meeting transcription for macOS — auto-detects meetings, transcribes locally with Parakeet or Whisper, saves to Claude Desktop via MCP"
 readme = "README.md"
 license = "MIT"
@@ -36,6 +36,10 @@ dependencies = [
     "scipy>=1.11",
     "parakeet-mlx>=0.5.1",
     "mlx-qwen3-asr>=0.3.5",
+    # Transitive (librosa→numba) resolution guard: without a floor, resolvers
+    # keep the newest numpy and backtrack numba to ancient sdists that cannot
+    # build on Python 3.12+ (numba<=0.53 has no numpy cap in its metadata).
+    "numba>=0.61",
     "openai>=2.24.0",
     "pyobjc-framework-ScreenCaptureKit>=10.3",
     "pyobjc-framework-CoreMedia>=10.3",

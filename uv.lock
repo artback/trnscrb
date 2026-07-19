@@ -3706,7 +3706,7 @@ wheels = [
 
 [[package]]
 name = "trnscrb"
-version = "0.9.0"
+version = "0.9.1"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
@@ -3714,6 +3714,7 @@ dependencies = [
     { name = "faster-whisper" },
     { name = "mcp" },
     { name = "mlx-qwen3-asr" },
+    { name = "numba" },
     { name = "numpy" },
     { name = "openai" },
     { name = "parakeet-mlx" },
@@ -3734,6 +3735,7 @@ requires-dist = [
     { name = "faster-whisper", specifier = ">=1.0.0" },
     { name = "mcp", specifier = ">=1.0.0" },
     { name = "mlx-qwen3-asr", specifier = ">=0.3.5" },
+    { name = "numba", specifier = ">=0.61" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "openai", specifier = ">=2.24.0" },
     { name = "parakeet-mlx", specifier = ">=0.5.1" },
