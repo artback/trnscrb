@@ -459,6 +459,76 @@ class SystemAudioMixTest(unittest.TestCase):
         np.testing.assert_array_equal(samples, np.full(5, 32767, dtype=np.int16))
 
 
+class SnapshotSinceTest(unittest.TestCase):
+    """Test incremental snapshots used by the live-transcription loop."""
+
+    def _make_recorder(self):
+        rec = Recorder(device=None)
+        rec._tmpfile = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        rec._tmpfile.write(b"\x00" * 44)
+        rec._frame_count = 0
+        rec._recording = True
+        self._paths = [rec._tmpfile.name]
+        return rec
+
+    def tearDown(self):
+        for p in getattr(self, "_paths", []):
+            Path(p).unlink(missing_ok=True)
+
+    def _feed(self, rec, value, n):
+        rec._callback(np.full((n, 1), value, dtype=np.float32), n, None, None)
+
+    def test_returns_none_without_new_audio(self):
+        rec = self._make_recorder()
+        self.assertIsNone(rec.snapshot_since(0))
+        self._feed(rec, 0.1, 100)
+        self.assertIsNone(rec.snapshot_since(100))
+        rec._tmpfile.close()
+
+    def test_snapshot_since_returns_only_new_frames(self):
+        rec = self._make_recorder()
+        self._feed(rec, 0.1, 100)
+        self._feed(rec, 0.5, 50)
+
+        result = rec.snapshot_since(100)
+        self.assertIsNotNone(result)
+        snap, end_frame = result
+        self._paths.append(str(snap))
+        self.assertEqual(end_frame, 150)
+
+        with wave.open(str(snap), "rb") as wf:
+            self.assertEqual(wf.getnframes(), 50)
+            self.assertEqual(wf.getframerate(), SAMPLE_RATE)
+            data = np.frombuffer(wf.readframes(50), dtype=np.int16)
+        np.testing.assert_array_equal(data, np.full(50, np.int16(0.5 * 32767)))
+        rec._tmpfile.close()
+
+    def test_sequential_passes_cover_audio_exactly_once(self):
+        rec = self._make_recorder()
+        cursor = 0
+        total = 0
+        for value, n in ((0.1, 300), (0.2, 500), (0.3, 200)):
+            self._feed(rec, value, n)
+            snap, cursor2 = rec.snapshot_since(cursor)
+            self._paths.append(str(snap))
+            with wave.open(str(snap), "rb") as wf:
+                total += wf.getnframes()
+            cursor = cursor2
+        self.assertEqual(total, 1000)
+        self.assertEqual(cursor, 1000)
+        rec._tmpfile.close()
+
+    def test_snapshot_delegates_to_snapshot_since(self):
+        rec = self._make_recorder()
+        self._feed(rec, 0.25, 80)
+        snap = rec.snapshot()
+        self.assertIsNotNone(snap)
+        self._paths.append(str(snap))
+        with wave.open(str(snap), "rb") as wf:
+            self.assertEqual(wf.getnframes(), 80)
+        rec._tmpfile.close()
+
+
 class MicStreamRestartTest(unittest.TestCase):
     """Test mic-stream recovery after a device change (stalled callback)."""
 

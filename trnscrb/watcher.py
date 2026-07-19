@@ -44,6 +44,7 @@ MIN_SAVE_SECS = 30  # recordings shorter than this are discarded
 POLL_SECS = 1.0  # how often we check mic (fast CoreAudio call)
 APP_POLL_EVERY = 4  # run the slow meeting-app check every N mic polls (~4s)
 APP_GONE_POLLS = 3  # N consecutive app-gone checks → start cooling (~12s)
+IDLE_FALLBACK_SECS = 30.0  # safety re-poll while idle in event-driven mode
 
 # ── Meeting app detection ─────────────────────────────────────────────────────
 # Used by detect_meeting() at recording START — can be broad because the mic
@@ -108,6 +109,9 @@ class MicWatcher:
         self._since: datetime | None = None
         self._rec_started: datetime | None = None
         self._no_app_polls = 0  # consecutive polls without a meeting app
+        self._wake = threading.Event()
+        self._listener: _MicActivityListener | None = None
+        self._event_driven = False
 
     def start(self) -> None:
         if self._running:
@@ -116,11 +120,21 @@ class MicWatcher:
         self._state = "idle"
         self._since = None
         self._no_app_polls = 0
+        # Event-driven idle: CoreAudio wakes us on mic/device changes so the
+        # idle loop doesn't have to poll every second. Falls back to polling.
+        self._listener = _MicActivityListener(self._wake)
+        self._event_driven = self._listener.start()
+        _log.info("watcher started (event_driven=%s)", self._event_driven)
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         self._running = False
+        self._wake.set()  # unblock an idle wait promptly
+        if self._listener:
+            self._listener.stop()
+            self._listener = None
+        self._event_driven = False
 
     @property
     def is_watching(self) -> bool:
@@ -268,7 +282,15 @@ class MicWatcher:
                         _log.info("on_stop firing — recording duration=%.1fs", duration)
                         self.on_stop()
 
-            time.sleep(POLL_SECS)
+            if self._state == "idle" and self._event_driven:
+                # Nothing to time — sleep until CoreAudio signals mic activity
+                # (or the safety fallback elapses).
+                self._wake.wait(IDLE_FALLBACK_SECS)
+                self._wake.clear()
+                if self._listener:
+                    self._listener.refresh()
+            else:
+                time.sleep(POLL_SECS)
 
 
 # ── CoreAudio mic detection ────────────────────────────────────────────────────
@@ -282,10 +304,21 @@ class _PropAddr(ctypes.Structure):
     ]
 
 
-def is_mic_in_use() -> bool:
-    """True if ANY process is currently using the default audio input device."""
+_ca_handle = None
+
+
+def _coreaudio():
+    """Cached CoreAudio library handle."""
+    global _ca_handle
+    if _ca_handle is None:
+        _ca_handle = ctypes.CDLL("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")
+    return _ca_handle
+
+
+def _default_input_device() -> int:
+    """AudioObjectID of the default input device, or 0."""
     try:
-        ca = ctypes.CDLL("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")
+        ca = _coreaudio()
         addr = _PropAddr(_kDefaultInputDevice, _kScopeGlobal, _kElementMain)
         dev = ctypes.c_uint32(0)
         sz = ctypes.c_uint32(ctypes.sizeof(dev))
@@ -297,23 +330,112 @@ def is_mic_in_use() -> bool:
             ctypes.byref(sz),
             ctypes.byref(dev),
         )
-        if dev.value == 0:
-            return False
+        return dev.value
+    except Exception:
+        return 0
 
-        addr2 = _PropAddr(_kIsRunningSomewhere, _kScopeGlobal, _kElementMain)
+
+def is_mic_in_use() -> bool:
+    """True if ANY process is currently using the default audio input device."""
+    try:
+        dev = _default_input_device()
+        if dev == 0:
+            return False
+        ca = _coreaudio()
+        addr = _PropAddr(_kIsRunningSomewhere, _kScopeGlobal, _kElementMain)
         running = ctypes.c_uint32(0)
-        sz2 = ctypes.c_uint32(ctypes.sizeof(running))
+        sz = ctypes.c_uint32(ctypes.sizeof(running))
         status = ca.AudioObjectGetPropertyData(
-            dev.value,
-            ctypes.byref(addr2),
+            dev,
+            ctypes.byref(addr),
             0,
             None,
-            ctypes.byref(sz2),
+            ctypes.byref(sz),
             ctypes.byref(running),
         )
         return status == 0 and bool(running.value)
     except Exception:
         return False
+
+
+# OSStatus (*)(AudioObjectID, UInt32 nAddresses, const AudioObjectPropertyAddress*, void*)
+_ListenerProc = ctypes.CFUNCTYPE(
+    ctypes.c_int32,
+    ctypes.c_uint32,
+    ctypes.c_uint32,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+)
+
+
+class _MicActivityListener:
+    """Wakes the watcher via CoreAudio property listeners instead of polling.
+
+    Registers for changes to the default-input-device selection and to that
+    device's is-running-somewhere state (the orange-dot signal). Callbacks
+    arrive on a CoreAudio thread and just set the wake event — all real work
+    stays in the watcher thread. If registration fails, the watcher falls
+    back to 1 Hz polling.
+    """
+
+    def __init__(self, wake: threading.Event):
+        self._wake = wake
+        self._proc = _ListenerProc(self._on_change)  # keep ref: C callback target
+        self._device = 0
+        self._started = False
+
+    def _on_change(self, obj_id, n_addresses, addresses, client_data) -> int:
+        self._wake.set()
+        return 0
+
+    def start(self) -> bool:
+        try:
+            ca = _coreaudio()
+            addr = _PropAddr(_kDefaultInputDevice, _kScopeGlobal, _kElementMain)
+            if ca.AudioObjectAddPropertyListener(_kSysObject, ctypes.byref(addr), self._proc, None):
+                return False
+            self._started = True
+            self.refresh()
+            return True
+        except Exception:
+            return False
+
+    def refresh(self) -> None:
+        """Re-attach the running-state listener if the default device changed."""
+        if not self._started:
+            return
+        try:
+            dev = _default_input_device()
+            if dev == self._device:
+                return
+            ca = _coreaudio()
+            addr = _PropAddr(_kIsRunningSomewhere, _kScopeGlobal, _kElementMain)
+            if self._device:
+                ca.AudioObjectRemovePropertyListener(
+                    self._device, ctypes.byref(addr), self._proc, None
+                )
+            if dev:
+                ca.AudioObjectAddPropertyListener(dev, ctypes.byref(addr), self._proc, None)
+            self._device = dev
+        except Exception:
+            _log.debug("Mic listener refresh failed", exc_info=True)
+
+    def stop(self) -> None:
+        if not self._started:
+            return
+        self._started = False
+        try:
+            ca = _coreaudio()
+            addr = _PropAddr(_kDefaultInputDevice, _kScopeGlobal, _kElementMain)
+            ca.AudioObjectRemovePropertyListener(_kSysObject, ctypes.byref(addr), self._proc, None)
+            if self._device:
+                addr2 = _PropAddr(_kIsRunningSomewhere, _kScopeGlobal, _kElementMain)
+                ca.AudioObjectRemovePropertyListener(
+                    self._device, ctypes.byref(addr2), self._proc, None
+                )
+                self._device = 0
+        except Exception:
+            pass
 
 
 # ── Meeting presence checks ───────────────────────────────────────────────────
@@ -354,7 +476,7 @@ def _pids_using_mic_input() -> set[int]:
     """
     pids: set[int] = set()
     try:
-        ca = ctypes.CDLL("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")
+        ca = _coreaudio()
         # 1. How many process objects are there?
         addr = _PropAddr(_kProcessObjectList, _kScopeGlobal, _kElementMain)
         sz = ctypes.c_uint32(0)
@@ -448,7 +570,10 @@ def is_meeting_app_running() -> bool:
         # fall through — browser-based meeting processes may not be in
         # _ACTIVE_SESSION_PROCS, so we still check the browser tabs.
 
-    # 2. Active-session native process check (narrow list — no helper false-positives)
+    # 2. Active-session native process check (narrow list — no helper
+    #    false-positives). Keep the process listing: steps 3 and 4 use it to
+    #    avoid spawning osascript for apps that aren't even running.
+    ps_out = ""
     try:
         ps = subprocess.run(
             ["ps", "-ax", "-o", "comm="],
@@ -456,20 +581,21 @@ def is_meeting_app_running() -> bool:
             text=True,
             timeout=3,
         )
+        ps_out = ps.stdout
         for frag in _ACTIVE_SESSION_PROCS:
-            if frag in ps.stdout:
+            if frag in ps_out:
                 _log.debug("is_meeting_app_running: ps check succeeded (process=%s)", frag)
                 return True
     except Exception:
         pass
 
     # 3. Teams desktop app — window count > 1 means active call
-    if _teams_call_active():
+    if (not ps_out or "MSTeams" in ps_out) and _teams_call_active():
         _log.debug("is_meeting_app_running: Teams window count check succeeded")
         return True
 
-    # 4. Browser tab URL + title check
-    result = _browser_has_meeting_tab()
+    # 4. Browser tab URL + title check — only for browsers actually running
+    result = _browser_has_meeting_tab(browsers=_running_browsers(ps_out))
     if result:
         _log.debug("is_meeting_app_running: browser tab check succeeded")
     return result
@@ -666,20 +792,39 @@ def _run_osascript(label: str, script: str) -> str | None:
     return None
 
 
-def _browser_has_meeting_tab(return_name: bool = False):
+_BROWSER_DEFS = [
+    # (label, ps comm fragment, AppleScript)
+    ("Chrome", "Google Chrome.app/", _CHROME_TAB_SCRIPT),
+    ("Safari", "Safari.app/Contents/MacOS/Safari", _SAFARI_TAB_SCRIPT),
+    ("Firefox", "Firefox.app/", _FIREFOX_WINDOW_SCRIPT),
+]
+
+
+def _running_browsers(ps_out: str) -> list[tuple[str, str]]:
+    """(label, script) pairs for browsers with live processes.
+
+    No point spawning osascript for browsers that aren't running — a meeting
+    tab can only exist in a running browser. Empty/unknown ps output → all.
     """
-    Check Chrome, Safari, and Firefox for open meeting tabs in parallel.
+    if not ps_out:
+        return [(label, script) for label, _frag, script in _BROWSER_DEFS]
+    return [(label, script) for label, frag, script in _BROWSER_DEFS if frag in ps_out]
+
+
+def _browser_has_meeting_tab(return_name: bool = False, browsers=None):
+    """
+    Check browsers for open meeting tabs in parallel.
     return_name=False → returns bool (fast presence check)
     return_name=True  → returns str name or None
+    browsers=None → check all supported browsers (Chrome, Safari, Firefox)
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    browsers = [
-        ("Chrome", _CHROME_TAB_SCRIPT),
-        ("Safari", _SAFARI_TAB_SCRIPT),
-        ("Firefox", _FIREFOX_WINDOW_SCRIPT),
-    ]
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    if browsers is None:
+        browsers = [(label, script) for label, _frag, script in _BROWSER_DEFS]
+    if not browsers:
+        return None if return_name else False
+    with ThreadPoolExecutor(max_workers=len(browsers)) as pool:
         futures = {pool.submit(_run_osascript, label, script): label for label, script in browsers}
         for future in as_completed(futures, timeout=5):
             try:

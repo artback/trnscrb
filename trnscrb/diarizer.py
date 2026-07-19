@@ -44,6 +44,17 @@ def _get_pipeline(hf_token: str):
     return _pipeline
 
 
+def unload_pipeline() -> None:
+    """Release the diarization pipeline to free memory after a long idle period."""
+    global _pipeline
+    import gc
+
+    with _diarize_lock:
+        _pipeline = None
+    gc.collect()
+    log.info("Diarization pipeline unloaded")
+
+
 def diarize(audio_path: Path, hf_token: str) -> list[dict]:
     """Return [{start, end, speaker}] segments.
 
