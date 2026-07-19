@@ -95,5 +95,53 @@ class IntegrateNotesTest(unittest.TestCase):
         self.assertFalse(_DEFAULTS["auto_integrate"], "auto_integrate must default to off")
 
 
+class OnBatteryTest(unittest.TestCase):
+    def _pmset(self, stdout):
+        from unittest.mock import MagicMock
+
+        return MagicMock(stdout=stdout)
+
+    def test_ac_power_is_false(self):
+        with patch.object(
+            menu_bar.subprocess, "run", return_value=self._pmset("Now drawing from 'AC Power'\n")
+        ):
+            self.assertFalse(menu_bar._on_battery())
+
+    def test_battery_power_is_true(self):
+        with patch.object(
+            menu_bar.subprocess,
+            "run",
+            return_value=self._pmset("Now drawing from 'Battery Power'\n -InternalBattery-0"),
+        ):
+            self.assertTrue(menu_bar._on_battery())
+
+    def test_error_defaults_to_false(self):
+        with patch.object(menu_bar.subprocess, "run", side_effect=OSError("no pmset")):
+            self.assertFalse(menu_bar._on_battery())
+
+
+class ModelUnloadTest(unittest.TestCase):
+    def test_transcriber_unload_clears_all_models(self):
+        from trnscrb import transcriber
+
+        sentinel = object()
+        with (
+            patch.object(transcriber, "_whisper_model", sentinel),
+            patch.object(transcriber, "_parakeet_model", sentinel),
+            patch.object(transcriber, "_voxtral_pipeline", sentinel),
+        ):
+            transcriber.unload_models()
+            self.assertIsNone(transcriber._whisper_model)
+            self.assertIsNone(transcriber._parakeet_model)
+            self.assertIsNone(transcriber._voxtral_pipeline)
+
+    def test_diarizer_unload_clears_pipeline(self):
+        from trnscrb import diarizer
+
+        with patch.object(diarizer, "_pipeline", object()):
+            diarizer.unload_pipeline()
+            self.assertIsNone(diarizer._pipeline)
+
+
 if __name__ == "__main__":
     unittest.main()

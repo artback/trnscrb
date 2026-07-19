@@ -87,6 +87,9 @@ class WatcherStateMachineTest(unittest.TestCase):
             patch.object(watcher, "is_mic_in_use", side_effect=fake_mic),
             patch.object(watcher, "is_meeting_app_running", side_effect=fake_app),
             patch.object(watcher, "detect_meeting", return_value="Google Meet"),
+            # Mic state is simulated, so CoreAudio events never fire — force
+            # the polling fallback to keep the simulated timing meaningful.
+            patch.object(watcher._MicActivityListener, "start", return_value=False),
             patch.object(watcher, "POLL_SECS", 0.01),
             patch.object(watcher, "WARMUP_SECS", 0.1),
             patch.object(watcher, "GRACE_SECS", 0.1),

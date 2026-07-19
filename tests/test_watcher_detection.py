@@ -411,5 +411,83 @@ class MinSaveSecsTest(unittest.TestCase):
         w.on_stop.assert_called_once()
 
 
+class SourceAwareBrowserCheckTest(unittest.TestCase):
+    """Browser AppleScript sweeps run only for browsers that are running."""
+
+    def test_running_browsers_filters_by_ps_output(self):
+        out = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\n/usr/libexec/foo\n"
+        labels = [label for label, _ in watcher._running_browsers(out)]
+        self.assertEqual(labels, ["Chrome"])
+
+    def test_running_browsers_unknown_ps_checks_all(self):
+        labels = [label for label, _ in watcher._running_browsers("")]
+        self.assertEqual(labels, ["Chrome", "Safari", "Firefox"])
+
+    def test_empty_browser_list_short_circuits(self):
+        self.assertIs(watcher._browser_has_meeting_tab(browsers=[]), False)
+        self.assertIsNone(watcher._browser_has_meeting_tab(return_name=True, browsers=[]))
+
+    def test_no_browsers_no_teams_spawns_no_osascript(self):
+        """Zoom-only machine: meeting check must not spawn any osascript."""
+        ps = MagicMock(stdout="/usr/sbin/somedaemon\n/Applications/Zoom.us.app/nothing\n")
+        with (
+            patch.object(watcher, "_pids_using_mic_input", return_value=set()),
+            patch.object(watcher.subprocess, "run", return_value=ps),
+            patch.object(watcher, "_teams_call_active") as teams,
+            patch.object(watcher, "_run_osascript") as osascript,
+        ):
+            result = watcher.is_meeting_app_running()
+
+        self.assertFalse(result)
+        teams.assert_not_called()
+        osascript.assert_not_called()
+
+    def test_only_running_browser_is_queried(self):
+        ps = MagicMock(stdout="/Applications/Safari.app/Contents/MacOS/Safari\n")
+        queried = []
+        with (
+            patch.object(watcher, "_pids_using_mic_input", return_value=set()),
+            patch.object(watcher.subprocess, "run", return_value=ps),
+            patch.object(watcher, "_teams_call_active", return_value=False),
+            patch.object(
+                watcher, "_run_osascript", side_effect=lambda label, s: queried.append(label)
+            ),
+        ):
+            watcher.is_meeting_app_running()
+
+        self.assertEqual(queried, ["Safari"])
+
+
+class MicActivityListenerTest(unittest.TestCase):
+    """Event-driven idle watching with polling fallback."""
+
+    def test_listener_lifecycle_does_not_crash(self):
+        import threading
+
+        listener = watcher._MicActivityListener(threading.Event())
+        started = listener.start()
+        self.assertIsInstance(started, bool)
+        listener.refresh()
+        listener.stop()
+
+    def test_watcher_falls_back_to_polling_when_listener_fails(self):
+        with patch.object(watcher._MicActivityListener, "start", return_value=False):
+            w = MicWatcher(on_start=lambda name: None, on_stop=lambda: None)
+            w.start()
+            try:
+                self.assertFalse(w._event_driven)
+            finally:
+                w.stop()
+
+    def test_watcher_uses_events_when_listener_starts(self):
+        with patch.object(watcher._MicActivityListener, "start", return_value=True):
+            w = MicWatcher(on_start=lambda name: None, on_stop=lambda: None)
+            w.start()
+            try:
+                self.assertTrue(w._event_driven)
+            finally:
+                w.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

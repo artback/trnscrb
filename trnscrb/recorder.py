@@ -177,23 +177,37 @@ class Recorder:
 
     def snapshot(self) -> Path | None:
         """Create a valid WAV copy of audio captured so far (non-destructive)."""
-        import shutil
+        result = self.snapshot_since(0)
+        return result[0] if result else None
 
+    def snapshot_since(self, start_frame: int) -> tuple[Path, int] | None:
+        """WAV copy of audio from ``start_frame`` up to now (non-destructive).
+
+        Returns ``(path, end_frame)`` so callers can transcribe incrementally —
+        pass the returned ``end_frame`` as the next call's ``start_frame``.
+        None if nothing new was captured.
+        """
         with self._lock:
-            if not self._tmpfile or self._frame_count == 0:
+            if not self._tmpfile or self._frame_count <= start_frame:
                 return None
             # Flush pending writes
             self._tmpfile.flush()
             src = self._tmpfile.name
-            frame_count = self._frame_count
+            end_frame = self._frame_count
 
-        # Copy the raw file, then overwrite its header with correct size
+        n_bytes = (end_frame - start_frame) * 2  # int16 samples
         snap = Path(src).with_suffix(".snap.wav")
-        shutil.copy2(src, snap)
-        data_size = frame_count * 2
-        with open(snap, "r+b") as f:
-            f.write(_wav_header(SAMPLE_RATE, 1, data_size))
-        return snap
+        with open(src, "rb") as f_in, open(snap, "wb") as f_out:
+            f_out.write(_wav_header(SAMPLE_RATE, 1, n_bytes))
+            f_in.seek(44 + start_frame * 2)
+            remaining = n_bytes
+            while remaining > 0:
+                chunk = f_in.read(min(1 << 20, remaining))
+                if not chunk:
+                    break
+                f_out.write(chunk)
+                remaining -= len(chunk)
+        return snap, end_frame
 
     @property
     def is_recording(self) -> bool:
