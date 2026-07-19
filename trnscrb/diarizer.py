@@ -5,6 +5,7 @@ Requires a HuggingFace token with access to:
 (accept the model's conditions at hf.co once, then it works offline).
 """
 
+import threading
 from pathlib import Path
 
 from trnscrb.log import get_logger
@@ -12,6 +13,8 @@ from trnscrb.log import get_logger
 log = get_logger(__name__)
 
 _pipeline = None
+# Serializes MPS/GPU inference when transcription jobs overlap.
+_diarize_lock = threading.Lock()
 
 
 def _get_pipeline(hf_token: str):
@@ -22,10 +25,16 @@ def _get_pipeline(hf_token: str):
         from pyannote.audio import Pipeline
 
         log.info("Loading pyannote speaker-diarization pipeline …")
-        _pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            use_auth_token=hf_token,
-        )
+        try:
+            _pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1",
+                token=hf_token,  # pyannote.audio >= 4
+            )
+        except TypeError:
+            _pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1",
+                use_auth_token=hf_token,  # pyannote.audio 3.x
+            )
 
         # Prefer Apple Silicon Metal, fallback to CPU
         if torch.backends.mps.is_available():
@@ -36,9 +45,13 @@ def _get_pipeline(hf_token: str):
 
 
 def diarize(audio_path: Path, hf_token: str) -> list[dict]:
-    """Return [{start, end, speaker}] segments."""
-    pipeline = _get_pipeline(hf_token)
-    diarization = pipeline(str(audio_path))
+    """Return [{start, end, speaker}] segments.
+
+    Serialized with a lock so concurrent jobs don't overlap on the GPU.
+    """
+    with _diarize_lock:
+        pipeline = _get_pipeline(hf_token)
+        diarization = pipeline(str(audio_path))
 
     return [
         {"start": turn.start, "end": turn.end, "speaker": speaker}

@@ -70,6 +70,10 @@ def install(force: bool):
         "openai": "openai>=2.24.0",
         "scipy": "scipy>=1.11",
         "numpy": "numpy>=1.24",
+        "ScreenCaptureKit": "pyobjc-framework-ScreenCaptureKit>=10.3",
+        "CoreMedia": "pyobjc-framework-CoreMedia>=10.3",
+        "Quartz": "pyobjc-framework-Quartz>=10.3",
+        "libdispatch": "pyobjc-framework-libdispatch>=10.3",
     }
     to_install = []
     for import_name, pkg_spec in packages.items():
@@ -85,13 +89,20 @@ def install(force: bool):
     click.echo()
 
     # ── 3. Audio setup ───────────────────────────────────────────────────────
-    bh_ok = _blackhole_installed()
-    _row("BlackHole 2ch", bh_ok, "captures other participants' audio")
-    if not bh_ok:
-        if click.confirm("  Install BlackHole via Homebrew?", default=True):
-            _run(["brew", "install", "blackhole-2ch"])
-            click.echo("  After install: open System Settings → Sound → Output and select")
-            click.echo("  'Multi-Output Device' that includes BlackHole to capture system audio.")
+    sa_ok = _system_audio_ready()
+    _row("System audio capture", sa_ok, "captures other participants' audio (ScreenCaptureKit)")
+    if not sa_ok:
+        from trnscrb.system_audio import SystemAudioCapture
+
+        if not SystemAudioCapture.is_supported():
+            click.echo("  Requires macOS 13+ — recording will use the microphone only.")
+        elif click.confirm("  Request Screen Recording permission now?", default=True):
+            if SystemAudioCapture.request_permission():
+                click.echo(click.style("  Permission granted.", fg="green"))
+            else:
+                click.echo("  Enable it under System Settings → Privacy & Security →")
+                click.echo("  Screen & System Audio Recording, then restart trnscrb.")
+                click.echo("  Until then, recording uses the microphone only.")
     click.echo()
 
     # ── 4. Transcription model ───────────────────────────────────────────────
@@ -169,6 +180,12 @@ def install(force: bool):
     # Launch at login
     login_ok = _login_item_exists()
     _row("Launch at login", login_ok)
+    if login_ok and _login_item_needs_update():
+        import shutil
+
+        binary = shutil.which("trnscrb") or sys.executable
+        if _setup_login_item(binary):
+            click.echo("  Launch agent refreshed (single-instance restart policy).")
     if not login_ok:
         if click.confirm("  Start trnscrb automatically on login?", default=False):
             import shutil
@@ -238,7 +255,17 @@ def watch():
     from trnscrb import diarizer, storage, transcriber
     from trnscrb import recorder as rec_module
     from trnscrb.recorder import cleanup_stale_temp_files
+    from trnscrb.single_instance import SingleInstance
     from trnscrb.watcher import GRACE_SECS, WARMUP_SECS, MicWatcher
+
+    # Shares the menu bar app's lock — running both would double-record.
+    _instance_lock = SingleInstance()
+    if not _instance_lock.acquire():
+        pid = _instance_lock.holder_pid()
+        suffix = f" (pid {pid})" if pid else ""
+        raise click.ClickException(
+            f"trnscrb is already running{suffix} — quit it first (menu bar → Quit)."
+        )
 
     cleanup_stale_temp_files()
     from trnscrb.calendar_integration import get_current_or_upcoming_event
@@ -249,8 +276,7 @@ def watch():
     def on_start(meeting_name: str):
         _log.info("watch: recording started, meeting=%s", meeting_name)
         click.echo(f"  🔴 Meeting detected: {meeting_name} — recording started")
-        device = rec_module.Recorder.find_blackhole_device()
-        r = rec_module.Recorder(device=device)
+        r = rec_module.Recorder()
         r.start()
         _recorder_ref[0] = r
         _started_ref[0] = datetime.now()
@@ -764,8 +790,7 @@ def devices():
         click.echo("No input devices found.")
         return
     for d in devs:
-        tag = "  (BlackHole)" if "BlackHole" in d["name"] else ""
-        click.echo(f"  [{d['index']}] {d['name']}  {d['channels']}ch{tag}")
+        click.echo(f"  [{d['index']}] {d['name']}  {d['channels']}ch")
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -782,13 +807,11 @@ def _pkg_installed(import_name: str) -> bool:
     return importlib.util.find_spec(import_name.split(".")[0]) is not None
 
 
-def _blackhole_installed() -> bool:
+def _system_audio_ready() -> bool:
     try:
-        import sounddevice as sd
+        from trnscrb.recorder import Recorder
 
-        return any(
-            "BlackHole" in d["name"] for d in sd.query_devices() if d["max_input_channels"] > 0
-        )
+        return Recorder.system_audio_available()
     except Exception:
         return False
 
@@ -913,6 +936,14 @@ def _login_item_exists() -> bool:
     return _PLIST_PATH.exists()
 
 
+def _login_item_needs_update() -> bool:
+    """True if the installed plist predates the single-instance restart policy."""
+    try:
+        return "SuccessfulExit" not in _PLIST_PATH.read_text()
+    except OSError:
+        return False
+
+
 def _setup_login_item(binary_path: str) -> bool:
     plist = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -929,7 +960,10 @@ def _setup_login_item(binary_path: str) -> bool:
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
     <key>EnvironmentVariables</key>
     <dict>
         <key>DYLD_LIBRARY_PATH</key>

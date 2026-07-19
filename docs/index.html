@@ -344,7 +344,7 @@
       <div class="step-n">2</div>
       <div class="step-body">
         <strong>Records locally</strong>
-        <p>Captures mic only, or mic + system audio via BlackHole virtual driver.</p>
+        <p>Captures mic + system audio natively via ScreenCaptureKit — no virtual driver.</p>
       </div>
     </div>
     <div class="step">
@@ -414,7 +414,7 @@ uv tool install trnscrb &amp;&amp; trnscrb install</pre>
     </div>
   </div>
 
-  <p style="margin-top:16px;font-size:13px;"><code style="font-family:monospace;font-size:12px;background:var(--surface);border:1px solid var(--border);padding:1px 5px;border-radius:3px">trnscrb install</code> handles BlackHole, HuggingFace token, default transcription model setup (Parakeet by default), Claude Desktop MCP config, and launch-at-login.</p>
+  <p style="margin-top:16px;font-size:13px;"><code style="font-family:monospace;font-size:12px;background:var(--surface);border:1px solid var(--border);padding:1px 5px;border-radius:3px">trnscrb install</code> handles the system-audio (Screen Recording) permission, HuggingFace token, default transcription model setup (Parakeet by default), Claude Desktop MCP config, and launch-at-login.</p>
 
   <hr />
 
@@ -452,8 +452,8 @@ uv tool install trnscrb &amp;&amp; trnscrb install</pre>
       <div class="faq-a">Only for speaker labels (SPEAKER_00, SPEAKER_01 etc.). It's a free account — <code>trnscrb install</code> walks you through it. Without it, transcription still works, just without speaker separation.</div>
     </div>
     <div class="faq-item">
-      <div class="faq-q">What is BlackHole and do I need it?</div>
-      <div class="faq-a">BlackHole is a free virtual audio driver that lets trnscrb capture system audio alongside your mic — meaning you record both your voice and the other participants. Without it, only your mic is recorded. <code>trnscrb install</code> sets it up automatically.</div>
+      <div class="faq-q">How does trnscrb capture the other participants' audio?</div>
+      <div class="faq-a">Through Apple's native ScreenCaptureKit — system audio is recorded alongside your mic, so you get both your voice and the other participants. No virtual audio driver (like BlackHole) is needed; just grant the Screen Recording permission when <code>trnscrb install</code> asks for it. Without the permission, only your mic is recorded.</div>
     </div>
     <div class="faq-item">
       <div class="faq-q">Does it work on Intel Macs?</div>

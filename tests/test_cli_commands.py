@@ -361,25 +361,14 @@ class DevicesCommandTest(unittest.TestCase):
         """When devices are found, should list them."""
         devices = [
             {"index": 0, "name": "Built-in Microphone", "channels": 1},
-            {"index": 1, "name": "BlackHole 2ch", "channels": 2},
+            {"index": 1, "name": "USB Microphone", "channels": 2},
         ]
         result = self._run_devices(devices)
         self.assertEqual(result.exit_code, 0)
         self.assertIn("Built-in Microphone", result.output)
-        self.assertIn("BlackHole 2ch", result.output)
-        self.assertIn("(BlackHole)", result.output)
+        self.assertIn("USB Microphone", result.output)
         self.assertIn("[0]", result.output)
         self.assertIn("[1]", result.output)
-
-    def test_no_blackhole_tag_for_regular_device(self):
-        """Regular devices should not have the (BlackHole) tag."""
-        devices = [
-            {"index": 0, "name": "USB Microphone", "channels": 1},
-        ]
-        result = self._run_devices(devices)
-        self.assertEqual(result.exit_code, 0)
-        self.assertIn("USB Microphone", result.output)
-        self.assertNotIn("(BlackHole)", result.output)
 
 
 if __name__ == "__main__":

@@ -169,7 +169,7 @@ class MicWatcher:
                 elif elapsed >= WARMUP_SECS:
                     # Mic has been active long enough — but only start recording
                     # if a meeting app/tab is actually detected.  Without this
-                    # gate, system audio (YouTube, music) routed through BlackHole
+                    # gate, ambient mic activity (Siri, dictation, voice memos)
                     # would trigger hours-long ghost recordings.
                     if not is_meeting_app_running():
                         _log.debug(
@@ -607,6 +607,26 @@ return ""
 """
 
 
+# Firefox has no AppleScript tab API, so match window titles instead.
+# Meeting tabs put a recognisable prefix in the window title while active.
+_FIREFOX_WINDOW_SCRIPT = """
+tell application "System Events"
+    if not (exists process "firefox") then return ""
+end tell
+tell application "Firefox"
+    repeat with w in windows
+        set t to name of w
+        if t is "Meet" or t starts with "Meet -" or t starts with "Meet —" then
+            if t does not contain "ended" then return "Google Meet"
+        end if
+        if t contains "Microsoft Teams" then return "Microsoft Teams"
+        if t contains "Zoom Meeting" then return "Zoom"
+    end repeat
+end tell
+return ""
+"""
+
+
 def _teams_call_active() -> bool:
     """True if Microsoft Teams has an active call (detected by window count > 1)."""
     try:
@@ -648,14 +668,18 @@ def _run_osascript(label: str, script: str) -> str | None:
 
 def _browser_has_meeting_tab(return_name: bool = False):
     """
-    Check Chrome and Safari for open meeting tabs in parallel.
+    Check Chrome, Safari, and Firefox for open meeting tabs in parallel.
     return_name=False → returns bool (fast presence check)
     return_name=True  → returns str name or None
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    browsers = [("Chrome", _CHROME_TAB_SCRIPT), ("Safari", _SAFARI_TAB_SCRIPT)]
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    browsers = [
+        ("Chrome", _CHROME_TAB_SCRIPT),
+        ("Safari", _SAFARI_TAB_SCRIPT),
+        ("Firefox", _FIREFOX_WINDOW_SCRIPT),
+    ]
+    with ThreadPoolExecutor(max_workers=3) as pool:
         futures = {pool.submit(_run_osascript, label, script): label for label, script in browsers}
         for future in as_completed(futures, timeout=5):
             try:

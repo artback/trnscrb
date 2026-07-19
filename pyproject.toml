@@ -36,6 +36,10 @@ dependencies = [
     "scipy>=1.11",
     "parakeet-mlx>=0.5.1",
     "openai>=2.24.0",
+    "pyobjc-framework-ScreenCaptureKit>=10.3",
+    "pyobjc-framework-CoreMedia>=10.3",
+    "pyobjc-framework-Quartz>=10.3",
+    "pyobjc-framework-libdispatch>=10.3",
 ]
 
 [project.urls]

@@ -50,9 +50,21 @@ _DEFAULT_ENRICH_PROFILES = {
     },
 }
 
+_DEFAULT_INTEGRATE_PROMPT = (
+    "Read the meeting transcript at {transcript_path} and integrate the key "
+    "decisions and action items into my notes."
+)
+
 _DEFAULTS: dict = {
     "auto_record": True,  # start watching for mic activity on launch
     "auto_enrich": False,  # run LLM enrichment automatically after transcription
+    "auto_integrate": False,  # push transcripts into notes via the Claude Code CLI
+    # Prompt for note integration; {transcript_path} is replaced with the
+    # absolute path of the saved transcript.
+    "integrate_prompt": _DEFAULT_INTEGRATE_PROMPT,
+    # Comma-separated list passed to `claude -p --allowedTools`.
+    # Empty string omits the flag (all tools allowed).
+    "integrate_allowed_tools": "Read,Write,Edit,Glob,Grep",
     "transcription_backend": "auto",  # auto | parakeet | whisper | voxtral
     "parakeet_model_id": "mlx-community/parakeet-tdt-0.6b-v3",
     "model_size": "small",  # whisper model size (used when backend=whisper)

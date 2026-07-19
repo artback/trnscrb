@@ -52,11 +52,10 @@ def start_recording() -> str:
     with _state_lock:
         if _recorder and _recorder.is_recording:
             return "Already recording."
-        device = rec_module.Recorder.find_blackhole_device()
-        _recorder = rec_module.Recorder(device=device)
+        _recorder = rec_module.Recorder()
         _recorder.start()
         _recording_started_at = datetime.now()
-    source = "BlackHole (system + mic)" if device is not None else "built-in mic"
+    source = "system audio + mic" if _recorder.system_audio_active else "built-in mic"
     _log.info("start_recording: device=%s", source)
     return f"Recording started at {_recording_started_at.strftime('%H:%M')} using {source}."
 
