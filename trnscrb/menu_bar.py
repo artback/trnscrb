@@ -42,6 +42,17 @@ def _notify(title: str, subtitle: str, message: str) -> None:
         pass
 
 
+def _on_battery() -> bool:
+    """True when running on battery power (best-effort; False on any error)."""
+    try:
+        out = subprocess.run(
+            ["pmset", "-g", "batt"], capture_output=True, text=True, timeout=3
+        ).stdout
+        return "Battery Power" in out
+    except Exception:
+        return False
+
+
 def _find_claude_cli() -> str | None:
     """Locate the claude CLI — launchd runs with a bare PATH, so check common spots."""
     import os
@@ -169,8 +180,35 @@ class TrnscrbApp(rumps.App):
             self._integrate_item.title = "Auto-integrate notes: On ✓"
         self._refresh_enrich_settings_menu()
 
-        # Preload transcription model in background so first recording is fast
-        threading.Thread(target=self._preload_model, daemon=True).start()
+        # Models load lazily when a recording starts (see _do_start) and are
+        # released again after a long idle period to free ~1 GB of memory.
+        self._unload_timer: threading.Timer | None = None
+
+    _MODEL_IDLE_UNLOAD_SECS = 30 * 60
+
+    def _cancel_model_unload(self):
+        if self._unload_timer:
+            self._unload_timer.cancel()
+            self._unload_timer = None
+
+    def _schedule_model_unload(self):
+        self._cancel_model_unload()
+        timer = threading.Timer(self._MODEL_IDLE_UNLOAD_SECS, self._unload_idle_models)
+        timer.daemon = True
+        timer.start()
+        self._unload_timer = timer
+
+    def _unload_idle_models(self):
+        if self._recorder and self._recorder.is_recording:
+            return  # a new recording started; _do_start reschedules
+        if self._process_thread and self._process_thread.is_alive():
+            self._schedule_model_unload()  # transcription still running — try later
+            return
+        try:
+            transcriber.unload_models()
+            diarizer.unload_pipeline()
+        except Exception:
+            _log.debug("Idle model unload failed", exc_info=True)
 
     def _preload_model(self):
         try:
@@ -483,6 +521,10 @@ class TrnscrbApp(rumps.App):
                 meeting_name = evt["title"] if evt else ""
             except Exception:
                 meeting_name = ""
+        # Kick the model load now so it's ready before the first live pass.
+        self._cancel_model_unload()
+        threading.Thread(target=self._preload_model, daemon=True).start()
+
         with self._rec_lock:
             if self._recorder and self._recorder.is_recording:
                 return
@@ -517,25 +559,48 @@ class TrnscrbApp(rumps.App):
     _LIVE_INTERVAL = 60  # seconds between live transcription updates
 
     def _live_transcribe(self):
-        """Periodically snapshot audio and transcribe during recording."""
+        """Incrementally transcribe new audio during recording.
+
+        Each pass transcribes only the audio captured since the previous pass
+        (constant work per tick, instead of re-transcribing the whole meeting).
+        Paused while on battery unless the `live_on_battery` setting is set.
+        """
         import time
+
+        transcribed_frames = 0
+        segments_acc: list[dict] = []
 
         time.sleep(self._LIVE_INTERVAL)  # wait before first snapshot
         while self._recorder and self._recorder.is_recording:
             try:
-                snap = self._recorder.snapshot()
-                if snap:
-                    try:
-                        segments = transcriber.transcribe(snap)
-                        text = storage.format_transcript(
-                            segments, self._started_at, self._meeting_name
-                        )
-                        text += "\n\n[Live — recording in progress…]\n"
-                        if self._live_path:
-                            storage.save_transcript(self._live_path, text)
-                        _log.debug("Live transcription updated (%d segments)", len(segments))
-                    finally:
-                        snap.unlink(missing_ok=True)
+                if _on_battery() and not get_setting("live_on_battery"):
+                    _log.debug("Live transcription paused (on battery)")
+                else:
+                    recorder = self._recorder
+                    result = recorder.snapshot_since(transcribed_frames) if recorder else None
+                    if result:
+                        snap, end_frame = result
+                        try:
+                            offset = transcribed_frames / rec_module.SAMPLE_RATE
+                            new_segments = transcriber.transcribe(snap)
+                            for seg in new_segments:
+                                seg["start"] += offset
+                                seg["end"] += offset
+                            segments_acc.extend(new_segments)
+                            transcribed_frames = end_frame
+                            text = storage.format_transcript(
+                                segments_acc, self._started_at, self._meeting_name
+                            )
+                            text += "\n\n[Live — recording in progress…]\n"
+                            if self._live_path:
+                                storage.save_transcript(self._live_path, text)
+                            _log.debug(
+                                "Live transcription updated (+%d segments, %d total)",
+                                len(new_segments),
+                                len(segments_acc),
+                            )
+                        finally:
+                            snap.unlink(missing_ok=True)
             except Exception:
                 _log.debug("Live transcription update failed", exc_info=True)
             time.sleep(self._LIVE_INTERVAL)
@@ -658,6 +723,7 @@ class TrnscrbApp(rumps.App):
         """Called from background thread when transcription finishes."""
         state = "watching" if (self._watcher and self._watcher.is_watching) else "idle"
         self._set_state(state)
+        self._schedule_model_unload()
 
     # ── state / icon management ───────────────────────────────────────────────
 

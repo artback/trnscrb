@@ -292,3 +292,26 @@ def transcribe(audio_path: Path) -> list[dict]:
             segments = _transcribe_whisper(audio_path)
     _log.info("Transcription complete: %d segments", len(segments))
     return segments
+
+
+def unload_models() -> None:
+    """Release all loaded models to free memory after a long idle period.
+
+    Safe to call at any time — takes the transcribe lock, so it waits for any
+    in-flight transcription; models reload lazily on next use.
+    """
+    global _whisper_model, _parakeet_model, _parakeet_model_id
+    global _voxtral_pipeline, _voxtral_model_id
+    import gc
+
+    with _transcribe_lock:
+        with _whisper_model_lock:
+            _whisper_model = None
+        with _parakeet_model_lock:
+            _parakeet_model = None
+            _parakeet_model_id = None
+        with _voxtral_pipeline_lock:
+            _voxtral_pipeline = None
+            _voxtral_model_id = None
+    gc.collect()
+    _log.info("Transcription models unloaded")

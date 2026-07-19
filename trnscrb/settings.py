@@ -65,6 +65,7 @@ _DEFAULTS: dict = {
     # Comma-separated list passed to `claude -p --allowedTools`.
     # Empty string omits the flag (all tools allowed).
     "integrate_allowed_tools": "Read,Write,Edit,Glob,Grep",
+    "live_on_battery": False,  # keep the live-transcription loop running on battery
     "transcription_backend": "auto",  # auto | parakeet | whisper | voxtral
     "parakeet_model_id": "mlx-community/parakeet-tdt-0.6b-v3",
     "model_size": "small",  # whisper model size (used when backend=whisper)
