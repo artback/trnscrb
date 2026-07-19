@@ -20,7 +20,7 @@ Or with `uv`:
 uv tool install trnscrb && trnscrb install
 ```
 
-`trnscrb install` handles the system-audio (Screen Recording) permission, model downloads, Claude Desktop MCP config, and launch-at-login.
+`trnscrb install` handles the system-audio (Screen Recording) permission, model downloads, Claude Desktop MCP config, and launch-at-login. It also creates a `~/Applications/Trnscrb.app` wrapper so macOS permission prompts are attributed to **Trnscrb** rather than your terminal.
 
 ---
 
