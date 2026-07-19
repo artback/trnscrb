@@ -150,25 +150,17 @@ def _codesign(bundle: Path) -> None:
         _log.warning("Ad-hoc codesign failed (harmless, but TCC may re-prompt): %s", e)
 
 
-def ensure_bundle(trnscrb_binary: str | None = None) -> Path | None:
-    """Create or refresh ~/Applications/Trnscrb.app. Returns the executable path.
+def build_bundle(dest: Path, trnscrb_binary: str) -> Path | None:
+    """Assemble a Trnscrb.app at ``dest`` wrapping ``trnscrb_binary``.
 
-    Idempotent — rebuilds only when the wrapped binary path or launcher
-    version changed. Returns None if the bundle could not be built.
+    Used both by ``ensure_bundle`` (fallback local build) and by the Homebrew
+    formula (``python -m trnscrb.app_bundle <dest> <target>``), which ships
+    the resulting bundle inside the package. Returns the executable path.
     """
-    trnscrb_binary = trnscrb_binary or shutil.which("trnscrb") or sys.argv[0]
-    if not trnscrb_binary or not Path(trnscrb_binary).exists():
-        _log.warning("Cannot build app bundle: trnscrb binary not found")
-        return None
-
-    if is_current(trnscrb_binary):
-        return executable_path()
-
     try:
         from trnscrb import __version__
 
-        bundle = bundle_path()
-        contents = bundle / "Contents"
+        contents = dest / "Contents"
         macos_dir = contents / "MacOS"
         resources = contents / "Resources"
         macos_dir.mkdir(parents=True, exist_ok=True)
@@ -177,13 +169,113 @@ def ensure_bundle(trnscrb_binary: str | None = None) -> Path | None:
         with open(contents / "Info.plist", "wb") as f:
             plistlib.dump(_info_plist(__version__), f)
 
-        executable = executable_path()
+        executable = macos_dir / "Trnscrb"
         executable.unlink(missing_ok=True)
         kind = _build_launcher(trnscrb_binary, executable)
-        _codesign(bundle)
+        _codesign(dest)
         (resources / "launcher.txt").write_text(_marker(trnscrb_binary))
-        _log.info("App bundle ready at %s (%s launcher)", bundle, kind)
+        _log.info("App bundle ready at %s (%s launcher)", dest, kind)
         return executable
     except Exception:
         _log.warning("App bundle creation failed", exc_info=True)
         return None
+
+
+def _bundle_version(bundle: Path) -> str | None:
+    try:
+        with open(bundle / "Contents" / "Info.plist", "rb") as f:
+            return str(plistlib.load(f).get("CFBundleVersion") or "") or None
+    except Exception:
+        return None
+
+
+def _packaged_bundle(binary: Path) -> Path | None:
+    """Find a Trnscrb.app shipped inside the package prefix (e.g. by Homebrew)."""
+    try:
+        real = binary.resolve()
+        installed = bundle_path().resolve()
+    except OSError:
+        return None
+    for parent in list(real.parents)[:5]:
+        candidate = parent / "Trnscrb.app"
+        if candidate == installed:
+            continue
+        if (candidate / "Contents" / "MacOS" / "Trnscrb").exists():
+            return candidate
+    return None
+
+
+def _install_packaged(packaged: Path) -> Path | None:
+    """Copy the package-shipped bundle into ~/Applications when out of date."""
+    installed = bundle_path()
+    executable = executable_path()
+    try:
+        packaged_version = _bundle_version(packaged)
+        if (
+            executable.exists()
+            and packaged_version is not None
+            and _bundle_version(installed) == packaged_version
+        ):
+            return executable
+        if installed.exists():
+            shutil.rmtree(installed)
+        installed.parent.mkdir(parents=True, exist_ok=True)
+        # ditto preserves the code signature; copytree is the fallback
+        result = subprocess.run(
+            ["ditto", str(packaged), str(installed)], capture_output=True, timeout=60
+        )
+        if result.returncode != 0:
+            shutil.copytree(packaged, installed, symlinks=True)
+        _log.info("Installed packaged app bundle from %s", packaged)
+        return executable
+    except Exception:
+        _log.warning("Could not install packaged bundle from %s", packaged, exc_info=True)
+        return None
+
+
+def is_installed(trnscrb_binary: str) -> bool:
+    """True if ~/Applications/Trnscrb.app is present and up to date for this binary."""
+    if is_current(trnscrb_binary):
+        return True
+    packaged = _packaged_bundle(Path(trnscrb_binary))
+    if packaged is None or not executable_path().exists():
+        return False
+    packaged_version = _bundle_version(packaged)
+    return packaged_version is not None and _bundle_version(bundle_path()) == packaged_version
+
+
+def ensure_bundle(trnscrb_binary: str | None = None) -> Path | None:
+    """Install or refresh ~/Applications/Trnscrb.app. Returns the executable path.
+
+    Prefers the prebuilt bundle shipped inside the package (Homebrew builds it
+    at package-install time) and just copies it; falls back to building one
+    locally for pip/uv installs. Idempotent. None if neither path worked.
+    """
+    trnscrb_binary = trnscrb_binary or shutil.which("trnscrb") or sys.argv[0]
+    if not trnscrb_binary or not Path(trnscrb_binary).exists():
+        _log.warning("Cannot set up app bundle: trnscrb binary not found")
+        return None
+
+    packaged = _packaged_bundle(Path(trnscrb_binary))
+    if packaged is not None:
+        executable = _install_packaged(packaged)
+        if executable is not None:
+            return executable
+
+    if is_current(trnscrb_binary):
+        return executable_path()
+    return build_bundle(bundle_path(), trnscrb_binary)
+
+
+def _main(argv: list[str]) -> int:
+    if len(argv) != 2:
+        print(
+            "usage: python -m trnscrb.app_bundle <dest-bundle> <target-binary>",
+            file=sys.stderr,
+        )
+        return 2
+    return 0 if build_bundle(Path(argv[0]), argv[1]) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main(sys.argv[1:]))

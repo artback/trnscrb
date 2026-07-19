@@ -182,10 +182,10 @@ def install(force: bool):
     # instead of the terminal (or a bare python binary under launchd).
     import shutil as _shutil
 
-    from trnscrb.app_bundle import bundle_path, ensure_bundle, is_current
+    from trnscrb.app_bundle import bundle_path, ensure_bundle, is_installed
 
     _binary = _shutil.which("trnscrb") or sys.executable
-    bundle_ok = is_current(_binary)
+    bundle_ok = is_installed(_binary)
     _row("Trnscrb.app wrapper", bundle_ok, "permission prompts show 'Trnscrb'")
     if not bundle_ok:
         if ensure_bundle(_binary):
