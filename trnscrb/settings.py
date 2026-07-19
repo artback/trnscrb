@@ -66,12 +66,9 @@ _DEFAULTS: dict = {
     # Empty string omits the flag (all tools allowed).
     "integrate_allowed_tools": "Read,Write,Edit,Glob,Grep",
     "live_on_battery": False,  # keep the live-transcription loop running on battery
-    "transcription_backend": "auto",  # auto | parakeet | whisper | voxtral | qwen3
+    "transcription_backend": "auto",  # auto | parakeet | whisper | voxtral
     "parakeet_model_id": "mlx-community/parakeet-tdt-0.6b-v3",
-    "qwen3_model_id": "Qwen/Qwen3-ASR-0.6B",  # ~1.2 GB; Qwen3-ASR-1.7B for more accuracy
     "model_size": "small",  # whisper model size (used when backend=whisper)
-    # Diarization pipeline; falls back to pyannote/speaker-diarization-3.1
-    "diarization_pipeline": "pyannote/speaker-diarization-community-1",
     "enrich": {
         "provider": "llama_cpp",
         "profiles": _DEFAULT_ENRICH_PROFILES,
