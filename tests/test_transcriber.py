@@ -200,6 +200,61 @@ class TranscriberTests(unittest.TestCase):
         self.assertEqual(segments, [{"text": "hallo"}])
 
 
+class InferenceThreadTests(unittest.TestCase):
+    """MLX binds arrays to their creating thread — every load and inference
+    must run on the transcriber's single dedicated worker thread."""
+
+    def test_transcribe_runs_on_inference_thread_from_any_caller(self):
+        import threading
+
+        seen_threads = []
+
+        class ParakeetModel:
+            def transcribe(self, _audio_path):
+                seen_threads.append(threading.current_thread().name)
+                return types.SimpleNamespace(sentences=[])
+
+        fake_parakeet = types.SimpleNamespace(from_pretrained=lambda _id: ParakeetModel())
+
+        with mock.patch.dict(sys.modules, {"parakeet_mlx": fake_parakeet}, clear=False):
+            with mock.patch("trnscrb.settings.get", side_effect=_settings_getter("parakeet")):
+                transcriber = importlib.reload(__import__("trnscrb.transcriber", fromlist=["x"]))
+                with (
+                    mock.patch.object(Path, "exists", return_value=True),
+                    mock.patch.object(Path, "stat", return_value=_fake_stat()),
+                ):
+                    transcriber.transcribe(Path("audio.wav"))  # from main thread
+                    worker = threading.Thread(target=transcriber.transcribe, args=(Path("a.wav"),))
+                    worker.start()
+                    worker.join()
+
+        self.assertEqual(len(seen_threads), 2)
+        for name in seen_threads:
+            self.assertTrue(
+                name.startswith("trnscrb-inference"),
+                f"inference ran on wrong thread: {name}",
+            )
+
+    def test_preload_runs_on_inference_thread(self):
+        import threading
+
+        load_threads = []
+
+        def fake_from_pretrained(_model_id):
+            load_threads.append(threading.current_thread().name)
+            return object()
+
+        fake_parakeet = types.SimpleNamespace(from_pretrained=fake_from_pretrained)
+
+        with mock.patch.dict(sys.modules, {"parakeet_mlx": fake_parakeet}, clear=False):
+            with mock.patch("trnscrb.settings.get", side_effect=_settings_getter("parakeet")):
+                transcriber = importlib.reload(__import__("trnscrb.transcriber", fromlist=["x"]))
+                transcriber.preload("parakeet")
+
+        self.assertEqual(len(load_threads), 1)
+        self.assertTrue(load_threads[0].startswith("trnscrb-inference"))
+
+
 class WordsToSegmentsTests(unittest.TestCase):
     def _fn(self):
         import trnscrb.transcriber as transcriber

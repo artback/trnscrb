@@ -212,20 +212,10 @@ class TrnscrbApp(rumps.App):
 
     def _preload_model(self):
         try:
-            backend = get_setting("transcription_backend") or "auto"
-            if backend in ("auto", "parakeet"):
-                from trnscrb.transcriber import _get_parakeet_model
-
-                _get_parakeet_model()
-            if backend in ("auto", "whisper"):
-                from trnscrb.transcriber import _get_whisper_model
-
-                _get_whisper_model()
-            if backend == "voxtral":
-                from trnscrb.transcriber import _get_voxtral_pipeline
-
-                _get_voxtral_pipeline()
-            _log.info("Transcription model preloaded (%s)", backend)
+            backend = str(get_setting("transcription_backend") or "auto")
+            # Loads happen on the transcriber's dedicated inference thread —
+            # MLX models must be loaded and evaluated on the same thread.
+            transcriber.preload(backend)
         except Exception as e:
             _log.debug("Model preload skipped: %s", e)
 
@@ -645,6 +635,7 @@ class TrnscrbApp(rumps.App):
         live_path: Path | None = None,
     ):
         audio_path = None
+        transcript_saved = False
         try:
             audio_path = recorder.stop()
             if not audio_path:
@@ -681,6 +672,7 @@ class TrnscrbApp(rumps.App):
             text = storage.format_transcript(segments, started_at, meeting_name)
             path = live_path or storage.get_transcript_path(meeting_name, started_at)
             storage.save_transcript(path, text)
+            transcript_saved = True
             _log.info("Transcription complete: %s -> %s", meeting_name, path.name)
             _notify("Trnscrb", f"Saved: {meeting_name}", f"~/meeting-notes/{path.name}")
 
@@ -716,7 +708,18 @@ class TrnscrbApp(rumps.App):
             _notify("Trnscrb", "Error", str(e)[:180])
         finally:
             if audio_path:
-                audio_path.unlink(missing_ok=True)
+                if transcript_saved:
+                    audio_path.unlink(missing_ok=True)
+                else:
+                    # Never discard the meeting because transcription failed.
+                    name = meeting_name or f"meeting-{started_at.strftime('%H%M')}"
+                    saved = storage.preserve_audio(audio_path, name, started_at)
+                    if saved:
+                        _notify(
+                            "Trnscrb",
+                            "Audio saved for retry",
+                            f"Transcription failed — audio kept at {saved.name}",
+                        )
             self._restore_idle()
 
     def _restore_idle(self):

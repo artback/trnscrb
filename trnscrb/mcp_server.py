@@ -377,9 +377,9 @@ def _process_audio(audio_path: Path, started_at: datetime, meeting_name: str) ->
             _last_result = f"Saved: {path.name}\n\n{preview}"
     except Exception as e:
         _log.error("Transcription failed for %s: %s", meeting_name, e)
-        audio_path.unlink(missing_ok=True)
+        saved = storage.preserve_audio(audio_path, meeting_name, started_at)
         with _state_lock:
-            _last_error = str(e)
+            _last_error = str(e) + (f" (audio preserved at {saved})" if saved else "")
     finally:
         with _state_lock:
             _processing = False

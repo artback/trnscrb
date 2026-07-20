@@ -33,9 +33,27 @@ _DEFAULT_PARAKEET_MODEL_ID = "mlx-community/parakeet-tdt-0.6b-v3"
 # ── CLI group ─────────────────────────────────────────────────────────────────
 
 
+def _ensure_tool_path() -> None:
+    """Make Homebrew/local tool dirs visible on PATH.
+
+    launchd and LaunchServices launches get a bare PATH (/usr/bin:/bin:…), but
+    external tools live in the Homebrew prefixes: ffmpeg (audio decoding for
+    Parakeet/Qwen3) and the claude CLI (note integration). Appended, not
+    prepended, so user-configured paths keep priority.
+    """
+    import os
+
+    parts = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+    for extra in ("/opt/homebrew/bin", "/usr/local/bin"):
+        if extra not in parts and Path(extra).is_dir():
+            parts.append(extra)
+    os.environ["PATH"] = os.pathsep.join(parts)
+
+
 @click.group()
 def cli():
     """Trnscrb — lightweight offline meeting transcription for Claude Desktop."""
+    _ensure_tool_path()
 
 
 # ── install ───────────────────────────────────────────────────────────────────
@@ -104,6 +122,15 @@ def install(force: bool):
                 click.echo("  Enable it under System Settings → Privacy & Security →")
                 click.echo("  Screen & System Audio Recording, then restart trnscrb.")
                 click.echo("  Until then, recording uses the microphone only.")
+    click.echo()
+
+    # ── 3½. ffmpeg — audio decoding for Parakeet/Qwen3 ───────────────────────
+    import shutil as _sh_ffmpeg
+
+    ffmpeg_ok = bool(_sh_ffmpeg.which("ffmpeg"))
+    _row("ffmpeg", ffmpeg_ok, "audio decoding for transcription")
+    if not ffmpeg_ok:
+        click.echo("  Install it with: brew install ffmpeg")
     click.echo()
 
     # ── 4. Transcription model ───────────────────────────────────────────────
@@ -337,7 +364,6 @@ def watch():
         try:
             segments = transcriber.transcribe(audio_path)
         except Exception as e:
-            audio_path.unlink(missing_ok=True)
             _log.error(
                 "Transcription failed: backend=%s file=%s err=%s",
                 _backend,
@@ -345,6 +371,9 @@ def watch():
                 e,
             )
             click.echo(f"  ✗ Transcription failed ({_backend}, {audio_path.name}): {e}")
+            saved = storage.preserve_audio(audio_path, meeting_name, started_at)
+            if saved:
+                click.echo(f"  ⚠  Audio preserved for retry: {saved}")
             return
 
         from trnscrb.settings import read_hf_token
