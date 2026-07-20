@@ -3706,7 +3706,7 @@ wheels = [
 
 [[package]]
 name = "trnscrb"
-version = "0.10.1"
+version = "0.11.1"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
