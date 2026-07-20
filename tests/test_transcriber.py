@@ -47,8 +47,11 @@ class TranscriberTests(unittest.TestCase):
                 self.end = end
                 self.text = text
 
+        seen_kwargs = {}
+
         class ParakeetModel:
-            def transcribe(self, _audio_path):
+            def transcribe(self, _audio_path, **kwargs):
+                seen_kwargs.update(kwargs)
                 return types.SimpleNamespace(
                     sentences=[
                         Sentence(0.0, 1.5, " hello "),
@@ -89,6 +92,8 @@ class TranscriberTests(unittest.TestCase):
                 {"start": 2.0, "end": 3.0, "text": "world", "speaker": None},
             ],
         )
+        # Long recordings must be chunked or Metal OOMs on multi-hour meetings.
+        self.assertGreater(seen_kwargs.get("chunk_duration") or 0, 0)
 
     def test_uses_whisper_backend_when_configured(self):
         class WhisperModel:
@@ -210,7 +215,7 @@ class InferenceThreadTests(unittest.TestCase):
         seen_threads = []
 
         class ParakeetModel:
-            def transcribe(self, _audio_path):
+            def transcribe(self, _audio_path, **kwargs):
                 seen_threads.append(threading.current_thread().name)
                 return types.SimpleNamespace(sentences=[])
 
