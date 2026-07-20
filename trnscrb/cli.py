@@ -525,24 +525,39 @@ def show(transcript_id: str):
 # ── live ──────────────────────────────────────────────────────────────────────
 
 
-_LIVE_MARKERS = (
-    "[Recording in progress",
-    "[Live — recording in progress",
-)
+_LIVE_FRESHNESS_SECS = 15 * 60
 
 
 def _is_live_file(path: Path) -> bool:
     """Return True if the file contains a live-recording marker."""
+    from trnscrb.storage import LIVE_MARKERS
+
     try:
         text = path.read_text(encoding="utf-8")
-        return any(marker in text for marker in _LIVE_MARKERS)
+        return any(marker in text for marker in LIVE_MARKERS)
     except Exception:
         return False
 
 
 def _find_live_file(notes_dir: Path) -> Path | None:
     """Return the active live-recording file, or None."""
+    import time
+
+    from trnscrb import storage
+
+    # Authoritative: the recorder registers its live file and is checked to
+    # still be alive — covers battery mode, where the file itself goes stale.
+    session = storage.get_live_session()
+    if session is not None:
+        return session
+
+    # Fallback heuristic: newest marker file, but only if recently touched.
+    # Orphans from crashed sessions keep their markers forever and must not
+    # resurface as "live" months later.
+    now = time.time()
     for f in sorted(notes_dir.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if now - f.stat().st_mtime > _LIVE_FRESHNESS_SECS:
+            break  # sorted newest-first — everything after is older
         if _is_live_file(f):
             return f
     return None

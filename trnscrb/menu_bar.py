@@ -108,6 +108,8 @@ def _integrate_notes(transcript_path: Path) -> None:
 class TrnscrbApp(rumps.App):
     def __init__(self):
         cleanup_stale_temp_files()
+        storage.clear_live_session()  # any previous session died with us
+        storage.finalize_orphaned_live_markers()
 
         try:
             generate_icons()
@@ -532,6 +534,7 @@ class TrnscrbApp(rumps.App):
             + "\n\n[Recording in progress — live updates every 60s]\n",
         )
         self._open_latest_item.title = f"Open Latest ({self._meeting_name})"
+        storage.set_live_session(self._live_path)
 
         # Start live transcription thread
         self._live_thread = threading.Thread(target=self._live_transcribe, daemon=True)
@@ -606,6 +609,7 @@ class TrnscrbApp(rumps.App):
             self._set_state("transcribing")
 
         self._open_latest_item.title = "Open Latest"
+        storage.clear_live_session()
 
         self._process_thread = threading.Thread(
             target=self._process,
