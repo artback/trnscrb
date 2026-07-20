@@ -1,0 +1,89 @@
+name: Release
+
+# The version in pyproject.toml is the single source of truth: when it
+# changes on main, this workflow tags the release, publishes GitHub release
+# notes, and updates the Homebrew formula. No manual tagging.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - pyproject.toml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version from pyproject.toml
+        id: version
+        run: |
+          version=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether this version is already released
+        id: check
+        run: |
+          if git ls-remote --tags origin "refs/tags/${{ steps.version.outputs.tag }}" | grep -q .; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+            echo "${{ steps.version.outputs.tag }} already exists — nothing to do."
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Tag the release
+        if: steps.check.outputs.released == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
+      - name: Publish GitHub release
+        if: steps.check.outputs.released == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --title "${{ steps.version.outputs.tag }}" \
+            --generate-notes
+
+      - name: Compute tarball SHA256
+        if: steps.check.outputs.released == 'false'
+        id: sha
+        run: |
+          url="https://github.com/${{ github.repository }}/archive/refs/tags/${{ steps.version.outputs.tag }}.tar.gz"
+          sha=""
+          for _ in 1 2 3 4 5; do
+            sha=$(curl -sfL "$url" | sha256sum | awk '{print $1}') && [ -n "$sha" ] && break
+            sleep 5
+          done
+          [ -n "$sha" ] || { echo "::error::Could not download $url"; exit 1; }
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout homebrew tap
+        if: steps.check.outputs.released == 'false'
+        uses: actions/checkout@v4
+        with:
+          repository: artback/homebrew-trnscrb
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Update formula
+        if: steps.check.outputs.released == 'false'
+        working-directory: tap
+        run: |
+          sed -i 's|url "https://github.com/.*/archive/refs/tags/.*\.tar\.gz"|url "${{ steps.sha.outputs.url }}"|' Formula/trnscrb.rb
+          sed -i 's|sha256 ".*"|sha256 "${{ steps.sha.outputs.sha256 }}"|' Formula/trnscrb.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/trnscrb.rb
+          git commit -m "Update trnscrb to ${{ steps.version.outputs.tag }}"
+          git push
