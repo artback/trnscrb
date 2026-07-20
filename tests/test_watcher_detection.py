@@ -458,6 +458,119 @@ class SourceAwareBrowserCheckTest(unittest.TestCase):
         self.assertEqual(queried, ["Safari"])
 
 
+class CoreAudioConstantsTest(unittest.TestCase):
+    """The process-object fourccs were silently wrong for months — pin them.
+
+    Values verified against AudioHardware.h (macOS 14+):
+    'prs#' ProcessObjectList, 'piri' IsRunningInput, 'piro' IsRunningOutput.
+    """
+
+    def test_fourccs_match_audiohardware_header(self):
+        self.assertEqual(watcher._kProcessObjectList, 0x70727323)  # 'prs#'
+        self.assertEqual(watcher._kProcessIsRunningIn, 0x70697269)  # 'piri'
+        self.assertEqual(watcher._kProcessIsRunningOut, 0x7069726F)  # 'piro'
+        self.assertEqual(watcher._kDefaultOutputDevice, 0x644F7574)  # 'dOut'
+
+
+class MutedCallDetectionTest(unittest.TestCase):
+    """A live call with the mic muted must still count as call activity."""
+
+    def _watcher(self):
+        return MicWatcher(on_start=lambda name: None, on_stop=lambda: None)
+
+    def test_mic_active_short_circuits(self):
+        w = self._watcher()
+        with (
+            patch.object(watcher, "is_mic_in_use", return_value=True),
+            patch.object(watcher, "meeting_audio_output_active") as output,
+        ):
+            self.assertTrue(w._call_activity())
+        output.assert_not_called()
+
+    def test_no_output_means_inactive_without_app_check(self):
+        w = self._watcher()
+        with (
+            patch.object(watcher, "is_mic_in_use", return_value=False),
+            patch.object(watcher, "meeting_audio_output_active", return_value=False),
+            patch.object(watcher, "is_meeting_app_running") as app_check,
+        ):
+            self.assertFalse(w._call_activity())
+        app_check.assert_not_called()
+
+    def test_meeting_output_with_meeting_app_is_active(self):
+        w = self._watcher()
+        with (
+            patch.object(watcher, "is_mic_in_use", return_value=False),
+            patch.object(watcher, "meeting_audio_output_active", return_value=True),
+            patch.object(watcher, "is_meeting_app_running", return_value=True) as app_check,
+        ):
+            self.assertTrue(w._call_activity())
+            self.assertTrue(w._call_activity())  # cached — no second osascript
+        self.assertEqual(app_check.call_count, 1)
+
+    def test_meeting_output_without_meeting_app_is_inactive(self):
+        w = self._watcher()
+        with (
+            patch.object(watcher, "is_mic_in_use", return_value=False),
+            patch.object(watcher, "meeting_audio_output_active", return_value=True),
+            patch.object(watcher, "is_meeting_app_running", return_value=False),
+        ):
+            self.assertFalse(w._call_activity())
+
+    def test_meeting_output_matches_browser_process(self):
+        ps_out = MagicMock(
+            stdout="500 /Applications/Google Chrome.app/Contents/Frameworks/Helper\n"
+            "600 /usr/libexec/somedaemon\n"
+        )
+        with (
+            patch.object(watcher, "_pids_producing_output", return_value={500}),
+            patch.object(watcher.subprocess, "run", return_value=ps_out),
+        ):
+            self.assertTrue(watcher.meeting_audio_output_active())
+
+    def test_non_meeting_output_does_not_match(self):
+        ps_out = MagicMock(stdout="700 /Applications/Spotify.app/Contents/MacOS/Spotify\n")
+        with (
+            patch.object(watcher, "_pids_producing_output", return_value={700}),
+            patch.object(watcher.subprocess, "run", return_value=ps_out),
+        ):
+            self.assertFalse(watcher.meeting_audio_output_active())
+
+    def test_no_output_pids_skips_ps(self):
+        with (
+            patch.object(watcher, "_pids_producing_output", return_value=set()),
+            patch.object(watcher.subprocess, "run") as ps,
+        ):
+            self.assertFalse(watcher.meeting_audio_output_active())
+        ps.assert_not_called()
+
+
+class MutedCallStateMachineTest(unittest.TestCase):
+    def test_muted_call_starts_recording(self):
+        """Meeting audio playing + meeting tab present + mic off → record."""
+        import time as _time
+
+        started = []
+        w = MicWatcher(on_start=lambda name: started.append(name), on_stop=lambda: None)
+        with (
+            patch.object(watcher, "is_mic_in_use", return_value=False),
+            patch.object(watcher, "meeting_audio_output_active", return_value=True),
+            patch.object(watcher, "is_meeting_app_running", return_value=True),
+            patch.object(watcher, "detect_meeting", return_value="Google Meet"),
+            patch.object(watcher._MicActivityListener, "start", return_value=False),
+            patch.object(watcher, "POLL_SECS", 0.01),
+            patch.object(watcher, "WARMUP_SECS", 0.05),
+            patch.object(watcher, "OUTPUT_APP_CHECK_SECS", 0.0),
+        ):
+            w.start()
+            _time.sleep(0.5)
+            state = w.state
+            w.stop()
+
+        self.assertEqual(state, "recording")
+        self.assertEqual(started, ["Google Meet"])
+
+
 class MicActivityListenerTest(unittest.TestCase):
     """Event-driven idle watching with polling fallback."""
 
