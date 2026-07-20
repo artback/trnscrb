@@ -112,9 +112,15 @@ def _transcribe_whisper(audio_path: Path) -> list[dict]:
     return results
 
 
+# Long recordings must be chunked: unchunked, Parakeet builds attention
+# buffers over the whole file and a multi-hour meeting exceeds Metal's
+# maximum buffer size (observed: 43 GB requested for a 3.6 h recording).
+_PARAKEET_CHUNK_SECS = 120.0
+
+
 def _transcribe_parakeet(audio_path: Path) -> list[dict]:
     model = _get_parakeet_model()
-    result = model.transcribe(str(audio_path))
+    result = model.transcribe(str(audio_path), chunk_duration=_PARAKEET_CHUNK_SECS)
     sentences = getattr(result, "sentences", None)
     if sentences is None:
         raise RuntimeError("Parakeet transcription did not return aligned sentences output.")
