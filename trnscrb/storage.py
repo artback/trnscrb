@@ -23,6 +23,81 @@ def get_transcript_path(meeting_name: str, started_at: datetime) -> Path:
     return NOTES_DIR / f"{date_str}_{safe_name}.txt"
 
 
+_LIVE_SESSION_FILE = Path.home() / ".config" / "trnscrb" / "live_session.json"
+
+# Substrings that mark a transcript as still being live-updated.
+LIVE_MARKERS = (
+    "[Recording in progress",
+    "[Live — recording in progress",
+)
+_INTERRUPTED_NOTE = "[Recording was interrupted]"
+
+
+def set_live_session(path: Path) -> None:
+    """Record which transcript is being live-updated (read by `trnscrb live`)."""
+    import json
+    import os
+
+    try:
+        _LIVE_SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _LIVE_SESSION_FILE.write_text(json.dumps({"path": str(path), "pid": os.getpid()}))
+    except Exception:
+        _log.debug("Could not write live session file", exc_info=True)
+
+
+def clear_live_session() -> None:
+    _LIVE_SESSION_FILE.unlink(missing_ok=True)
+
+
+def get_live_session() -> Path | None:
+    """Path of the actively updated live transcript, or None.
+
+    Authoritative: written by the recording process on start, cleared on stop,
+    and validated against the recorder still being alive — so a crashed
+    session can never present a stale file as live.
+    """
+    import json
+    import os
+
+    try:
+        data = json.loads(_LIVE_SESSION_FILE.read_text())
+        path = Path(data["path"])
+        os.kill(int(data["pid"]), 0)  # raises if the recorder is gone
+        if path.exists():
+            return path
+    except Exception:
+        pass
+    return None
+
+
+def finalize_orphaned_live_markers(max_age_secs: float = 24 * 3600) -> None:
+    """Rewrite live markers left behind by crashed sessions.
+
+    Live transcripts keep their in-progress marker forever if the recorder
+    dies mid-meeting; months later `trnscrb live` would still present them
+    as active. Any marker file untouched for max_age_secs gets its marker
+    replaced with an interruption note.
+    """
+    import time
+
+    now = time.time()
+    try:
+        for f in NOTES_DIR.glob("*.txt"):
+            if now - f.stat().st_mtime < max_age_secs:
+                continue
+            text = f.read_text(encoding="utf-8")
+            if not any(marker in text for marker in LIVE_MARKERS):
+                continue
+            lines = [
+                _INTERRUPTED_NOTE if any(m in line for m in LIVE_MARKERS) else line
+                for line in text.splitlines()
+            ]
+            f.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            _log.info("Finalized orphaned live transcript: %s", f.name)
+    except Exception:
+        _log.debug("Orphan live-marker cleanup failed", exc_info=True)
+
+
 def preserve_audio(audio_path: Path, meeting_name: str, started_at: datetime) -> Path | None:
     """Move a recording into the notes folder instead of deleting it.
 
