@@ -13,6 +13,27 @@ jobs:
         id: tag
         run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
 
+      - name: Checkout tagged source
+        uses: actions/checkout@v4
+        with:
+          path: src
+
+      - name: Verify tag matches package version and sits on main
+        run: |
+          pkg_version=$(grep -m1 '^version = ' src/pyproject.toml | cut -d'"' -f2)
+          tag_version="${GITHUB_REF#refs/tags/v}"
+          if [ "$pkg_version" != "$tag_version" ]; then
+            echo "::error::Tag v${tag_version} points at a commit whose pyproject.toml says ${pkg_version}."
+            echo "::error::This usually means the tag was created on the wrong commit (stale local main?)."
+            echo "::error::Fix: git fetch origin && git tag -f v${pkg_version} origin/main && git push -f origin v${pkg_version}"
+            exit 1
+          fi
+          git -C src fetch --depth=200 origin main
+          if ! git -C src merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::Tag v${tag_version} is not on main — refusing to release it."
+            exit 1
+          fi
+
       - name: Download tarball and compute SHA256
         id: sha
         run: |
