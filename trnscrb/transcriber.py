@@ -1,6 +1,7 @@
-"""Transcription with configurable backend (Parakeet, Whisper, or Voxtral)."""
+"""Transcription with configurable backend (Parakeet, Qwen3, Whisper, or Voxtral)."""
 
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from trnscrb import settings
@@ -339,11 +340,37 @@ def _detect_language(audio_path: Path) -> str:
 # final post-meeting transcription may otherwise run on MPS concurrently.
 _transcribe_lock = threading.Lock()
 
+# All model loads and inference run on this single worker thread. MLX (0.32+)
+# binds arrays to the thread that created them — loading a model in one
+# thread and evaluating it in another raises
+# "There is no Stream(cpu, N) in current thread".
+_inference_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="trnscrb-inference")
+
+
+def preload(backend: str | None = None) -> None:
+    """Warm the configured backend's models on the shared inference thread."""
+    backend = backend or _backend()
+
+    def _load():
+        if backend in ("auto", "parakeet"):
+            _get_parakeet_model()
+        if backend in ("auto", "whisper"):
+            _get_whisper_model()
+        if backend == "qwen3":
+            _get_qwen3()
+        if backend == "voxtral":
+            _get_voxtral_pipeline()
+
+    with _transcribe_lock:
+        _inference_executor.submit(_load).result()
+    _log.info("Transcription model preloaded (%s)", backend)
+
 
 def transcribe(audio_path: Path) -> list[dict]:
     """Return segments: [{start, end, text, speaker}] — speaker filled later by diarizer.
 
-    Serialized with a lock so concurrent calls don't overlap on the GPU.
+    Serialized with a lock so concurrent calls don't overlap on the GPU, and
+    executed on the dedicated inference thread (see _inference_executor).
     """
     audio_path = Path(audio_path)
     file_size = audio_path.stat().st_size if audio_path.exists() else 0
@@ -354,40 +381,41 @@ def transcribe(audio_path: Path) -> list[dict]:
         raise FileNotFoundError(f"Audio file is empty: {audio_path}")
 
     backend = _backend()
-    auto_routed = False
-
     with _transcribe_lock:
-        if backend == "auto":
-            auto_routed = True
-            lang = _detect_language(audio_path)
-            if lang == "en":
-                backend = "parakeet"
-                _log.info("Auto-routing to Parakeet (English detected)")
-            else:
-                backend = "qwen3"
-                _log.info("Auto-routing to Qwen3-ASR (%s detected)", lang)
-        else:
-            _log.debug("Using backend: %s", backend)
-
-        if backend == "parakeet":
-            segments = _transcribe_parakeet(audio_path)
-        elif backend == "voxtral":
-            segments = _transcribe_voxtral(audio_path)
-        elif backend == "qwen3":
-            if auto_routed:
-                # Auto mode must always produce a transcript — fall back to
-                # Whisper if Qwen3 is unavailable (e.g. model never downloaded).
-                try:
-                    segments = _transcribe_qwen3(audio_path)
-                except Exception as e:
-                    _log.warning("Qwen3 backend failed (%s); falling back to Whisper", e)
-                    segments = _transcribe_whisper(audio_path)
-            else:
-                segments = _transcribe_qwen3(audio_path)
-        else:
-            segments = _transcribe_whisper(audio_path)
+        segments = _inference_executor.submit(_transcribe_on_worker, audio_path, backend).result()
     _log.info("Transcription complete: %d segments", len(segments))
     return segments
+
+
+def _transcribe_on_worker(audio_path: Path, backend: str) -> list[dict]:
+    auto_routed = False
+    if backend == "auto":
+        auto_routed = True
+        lang = _detect_language(audio_path)
+        if lang == "en":
+            backend = "parakeet"
+            _log.info("Auto-routing to Parakeet (English detected)")
+        else:
+            backend = "qwen3"
+            _log.info("Auto-routing to Qwen3-ASR (%s detected)", lang)
+    else:
+        _log.debug("Using backend: %s", backend)
+
+    if backend == "parakeet":
+        return _transcribe_parakeet(audio_path)
+    if backend == "voxtral":
+        return _transcribe_voxtral(audio_path)
+    if backend == "qwen3":
+        if auto_routed:
+            # Auto mode must always produce a transcript — fall back to
+            # Whisper if Qwen3 is unavailable (e.g. model never downloaded).
+            try:
+                return _transcribe_qwen3(audio_path)
+            except Exception as e:
+                _log.warning("Qwen3 backend failed (%s); falling back to Whisper", e)
+                return _transcribe_whisper(audio_path)
+        return _transcribe_qwen3(audio_path)
+    return _transcribe_whisper(audio_path)
 
 
 def unload_models() -> None:

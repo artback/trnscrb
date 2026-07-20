@@ -23,6 +23,24 @@ def get_transcript_path(meeting_name: str, started_at: datetime) -> Path:
     return NOTES_DIR / f"{date_str}_{safe_name}.txt"
 
 
+def preserve_audio(audio_path: Path, meeting_name: str, started_at: datetime) -> Path | None:
+    """Move a recording into the notes folder instead of deleting it.
+
+    Called when transcription fails — hours of meeting audio must never be
+    thrown away because of a transient error. Returns the saved path.
+    """
+    import shutil
+
+    try:
+        dest = get_transcript_path(meeting_name, started_at).with_suffix(".wav")
+        shutil.move(str(audio_path), dest)
+        _log.warning("Transcription failed — audio preserved at %s", dest)
+        return dest
+    except Exception:
+        _log.error("Could not preserve audio %s", audio_path, exc_info=True)
+        return None
+
+
 def save_transcript(path: Path, content: str) -> None:
     if not content or not content.strip():
         _log.warning("Skipping save_transcript: empty content")
