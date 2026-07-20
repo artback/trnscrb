@@ -2,6 +2,9 @@
 
 Uses CoreAudio's kAudioDevicePropertyDeviceIsRunningSomewhere to detect
 microphone activity — the same signal that lights up the orange menu-bar dot.
+A muted call still records: when the mic is off but a browser/meeting app is
+producing audio output (the other participants talking) and a meeting app/tab
+is confirmed present, that counts as call activity too.
 
 Two stop conditions (whichever comes first):
   1. Mic goes idle AND meeting app/tab is no longer detected for GRACE_SECS.
@@ -74,18 +77,43 @@ _ACTIVE_SESSION_PROCS = [
     "Tuple",  # Tuple — only runs during an active screen-share session
 ]
 
-# CoreAudio process-level constants (macOS 14+)
-# Powers the orange privacy indicator — lets us see which PID is using mic input.
-_kProcessObjectList = 0x706C7374  # 'plst'
-_kProcessPID = 0x70706964  # 'ppid'
-_kProcessIsRunningIn = 0x70697220  # 'pir ' — is this process using audio input?
+# CoreAudio process-level constants (macOS 14+, verified against
+# AudioHardware.h) — the API behind the orange privacy indicator. Lets us see
+# which PID is using mic input or producing audio output.
+_kProcessObjectList = 0x70727323  # 'prs#' kAudioHardwarePropertyProcessObjectList
+_kProcessPID = 0x70706964  # 'ppid' kAudioProcessPropertyPID
+_kProcessIsRunningIn = 0x70697269  # 'piri' kAudioProcessPropertyIsRunningInput
+_kProcessIsRunningOut = 0x7069726F  # 'piro' kAudioProcessPropertyIsRunningOutput
 
 # ── CoreAudio constants ───────────────────────────────────────────────────────
 _kSysObject = 1
 _kDefaultInputDevice = 0x64496E20  # 'dIn '
+_kDefaultOutputDevice = 0x644F7574  # 'dOut'
 _kScopeGlobal = 0x676C6F62  # 'glob'
 _kElementMain = 0
 _kIsRunningSomewhere = 0x676F6E65  # 'gone' (kAudioDevicePropertyDeviceIsRunningSomewhere)
+
+# While muted in a call, the mic is silent but the meeting app still plays the
+# other participants — that output is the "call is live" signal. The slow
+# osascript confirmation is throttled to this interval.
+OUTPUT_APP_CHECK_SECS = 10.0
+
+# Processes whose audio output counts as meeting audio (matched against
+# `ps -ax -o comm=` paths of output-producing PIDs). WebKit covers Safari's
+# GPU process, which is what actually plays tab audio.
+_MEETING_OUTPUT_PROC_FRAGMENTS = [
+    "Google Chrome",
+    "Safari",
+    "WebKit",
+    "firefox",
+    "Firefox",
+    "zoom.us",
+    "Teams",
+    "Slack",
+    "Discord",
+    "Webex",
+    "FaceTime",
+]
 
 
 class MicWatcher:
@@ -112,6 +140,8 @@ class MicWatcher:
         self._wake = threading.Event()
         self._listener: _MicActivityListener | None = None
         self._event_driven = False
+        self._last_output_app_check = 0.0  # throttles the muted-call osascript
+        self._output_meeting_cached = False
 
     def start(self) -> None:
         if self._running:
@@ -144,6 +174,26 @@ class MicWatcher:
     def state(self) -> str:
         return self._state
 
+    def _call_activity(self) -> bool:
+        """Mic in use, OR a meeting app playing audio while the mic is muted.
+
+        The mic path is cheap and checked first. The muted-call path needs an
+        osascript meeting-app confirmation, throttled to
+        OUTPUT_APP_CHECK_SECS; between confirmations the cached verdict holds
+        for as long as meeting audio keeps playing.
+        """
+        if is_mic_in_use():
+            return True
+        if not meeting_audio_output_active():
+            return False
+        now = time.monotonic()
+        if now - self._last_output_app_check >= OUTPUT_APP_CHECK_SECS:
+            self._last_output_app_check = now
+            self._output_meeting_cached = is_meeting_app_running()
+            if self._output_meeting_cached:
+                _log.debug("muted-call signal: meeting app playing audio, mic off")
+        return self._output_meeting_cached
+
     # ── event loop ────────────────────────────────────────────────────────────
 
     def _loop(self) -> None:
@@ -163,7 +213,7 @@ class MicWatcher:
         _app_running = False  # cached result of the last meeting-app check
 
         while self._running:
-            active = is_mic_in_use()
+            active = self._call_activity()
             now = datetime.now()
             elapsed = (now - self._since).total_seconds() if self._since else 0
 
@@ -282,7 +332,7 @@ class MicWatcher:
                         _log.info("on_stop firing — recording duration=%.1fs", duration)
                         self.on_stop()
 
-            if self._state == "idle" and self._event_driven:
+            if self._state == "idle" and self._event_driven and not active:
                 # Nothing to time — sleep until CoreAudio signals mic activity
                 # (or the safety fallback elapses).
                 self._wake.wait(IDLE_FALLBACK_SECS)
@@ -315,11 +365,11 @@ def _coreaudio():
     return _ca_handle
 
 
-def _default_input_device() -> int:
-    """AudioObjectID of the default input device, or 0."""
+def _default_device(selector: int) -> int:
+    """AudioObjectID of the default input/output device, or 0."""
     try:
         ca = _coreaudio()
-        addr = _PropAddr(_kDefaultInputDevice, _kScopeGlobal, _kElementMain)
+        addr = _PropAddr(selector, _kScopeGlobal, _kElementMain)
         dev = ctypes.c_uint32(0)
         sz = ctypes.c_uint32(ctypes.sizeof(dev))
         ca.AudioObjectGetPropertyData(
@@ -333,6 +383,10 @@ def _default_input_device() -> int:
         return dev.value
     except Exception:
         return 0
+
+
+def _default_input_device() -> int:
+    return _default_device(_kDefaultInputDevice)
 
 
 def is_mic_in_use() -> bool:
@@ -371,17 +425,20 @@ _ListenerProc = ctypes.CFUNCTYPE(
 class _MicActivityListener:
     """Wakes the watcher via CoreAudio property listeners instead of polling.
 
-    Registers for changes to the default-input-device selection and to that
-    device's is-running-somewhere state (the orange-dot signal). Callbacks
-    arrive on a CoreAudio thread and just set the wake event — all real work
-    stays in the watcher thread. If registration fails, the watcher falls
-    back to 1 Hz polling.
+    Registers for changes to the default input AND output device selections
+    and to those devices' is-running-somewhere state. Input activity is the
+    orange-dot mic signal; output activity is the muted-call signal (the
+    meeting app playing other participants). Callbacks arrive on a CoreAudio
+    thread and just set the wake event — all real work stays in the watcher
+    thread. If registration fails, the watcher falls back to 1 Hz polling.
     """
+
+    _DEVICE_SELECTORS = (_kDefaultInputDevice, _kDefaultOutputDevice)
 
     def __init__(self, wake: threading.Event):
         self._wake = wake
         self._proc = _ListenerProc(self._on_change)  # keep ref: C callback target
-        self._device = 0
+        self._devices: dict[int, int] = {}  # selector -> attached device id
         self._started = False
 
     def _on_change(self, obj_id, n_addresses, addresses, client_data) -> int:
@@ -391,9 +448,12 @@ class _MicActivityListener:
     def start(self) -> bool:
         try:
             ca = _coreaudio()
-            addr = _PropAddr(_kDefaultInputDevice, _kScopeGlobal, _kElementMain)
-            if ca.AudioObjectAddPropertyListener(_kSysObject, ctypes.byref(addr), self._proc, None):
-                return False
+            for selector in self._DEVICE_SELECTORS:
+                addr = _PropAddr(selector, _kScopeGlobal, _kElementMain)
+                if ca.AudioObjectAddPropertyListener(
+                    _kSysObject, ctypes.byref(addr), self._proc, None
+                ):
+                    return False
             self._started = True
             self.refresh()
             return True
@@ -401,24 +461,26 @@ class _MicActivityListener:
             return False
 
     def refresh(self) -> None:
-        """Re-attach the running-state listener if the default device changed."""
+        """Re-attach running-state listeners if a default device changed."""
         if not self._started:
             return
         try:
-            dev = _default_input_device()
-            if dev == self._device:
-                return
             ca = _coreaudio()
             addr = _PropAddr(_kIsRunningSomewhere, _kScopeGlobal, _kElementMain)
-            if self._device:
-                ca.AudioObjectRemovePropertyListener(
-                    self._device, ctypes.byref(addr), self._proc, None
-                )
-            if dev:
-                ca.AudioObjectAddPropertyListener(dev, ctypes.byref(addr), self._proc, None)
-            self._device = dev
+            for selector in self._DEVICE_SELECTORS:
+                dev = _default_device(selector)
+                attached = self._devices.get(selector, 0)
+                if dev == attached:
+                    continue
+                if attached:
+                    ca.AudioObjectRemovePropertyListener(
+                        attached, ctypes.byref(addr), self._proc, None
+                    )
+                if dev:
+                    ca.AudioObjectAddPropertyListener(dev, ctypes.byref(addr), self._proc, None)
+                self._devices[selector] = dev
         except Exception:
-            _log.debug("Mic listener refresh failed", exc_info=True)
+            _log.debug("Audio listener refresh failed", exc_info=True)
 
     def stop(self) -> None:
         if not self._started:
@@ -426,14 +488,17 @@ class _MicActivityListener:
         self._started = False
         try:
             ca = _coreaudio()
-            addr = _PropAddr(_kDefaultInputDevice, _kScopeGlobal, _kElementMain)
-            ca.AudioObjectRemovePropertyListener(_kSysObject, ctypes.byref(addr), self._proc, None)
-            if self._device:
-                addr2 = _PropAddr(_kIsRunningSomewhere, _kScopeGlobal, _kElementMain)
+            run_addr = _PropAddr(_kIsRunningSomewhere, _kScopeGlobal, _kElementMain)
+            for selector in self._DEVICE_SELECTORS:
+                addr = _PropAddr(selector, _kScopeGlobal, _kElementMain)
                 ca.AudioObjectRemovePropertyListener(
-                    self._device, ctypes.byref(addr2), self._proc, None
+                    _kSysObject, ctypes.byref(addr), self._proc, None
                 )
-                self._device = 0
+                attached = self._devices.pop(selector, 0)
+                if attached:
+                    ca.AudioObjectRemovePropertyListener(
+                        attached, ctypes.byref(run_addr), self._proc, None
+                    )
         except Exception:
             pass
 
@@ -467,8 +532,50 @@ def _meeting_app_pids() -> set[int]:
 
 
 def _pids_using_mic_input() -> set[int]:
+    """PIDs of all processes currently capturing audio input."""
+    return _process_pids_where(_kProcessIsRunningIn)
+
+
+def _pids_producing_output() -> set[int]:
+    """PIDs of all processes currently producing audio output."""
+    return _process_pids_where(_kProcessIsRunningOut)
+
+
+def meeting_audio_output_active() -> bool:
+    """True if a browser or meeting app is currently playing audio.
+
+    The muted-call signal: your mic is off, but the other participants'
+    voices still play through the meeting app.
     """
-    Return PIDs of all processes currently capturing audio input.
+    pids = _pids_producing_output()
+    if not pids:
+        return False
+    try:
+        ps = subprocess.run(
+            ["ps", "-ax", "-o", "pid=,comm="],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        for line in ps.stdout.splitlines():
+            parts = line.split(None, 1)
+            if len(parts) != 2:
+                continue
+            pid_str, comm = parts
+            try:
+                pid = int(pid_str)
+            except ValueError:
+                continue
+            if pid in pids and any(frag in comm for frag in _MEETING_OUTPUT_PROC_FRAGMENTS):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _process_pids_where(selector: int) -> set[int]:
+    """
+    Return PIDs of processes whose given CoreAudio process property is true.
 
     Uses CoreAudio's kAudioHardwarePropertyProcessObjectList API (macOS 14+),
     the same mechanism that drives the orange privacy-indicator dot.
@@ -507,7 +614,7 @@ def _pids_using_mic_input() -> set[int]:
         own_pid = os.getpid()
         for obj_id in objs:
             # Is this process using audio input?
-            addr_in = _PropAddr(_kProcessIsRunningIn, _kScopeGlobal, _kElementMain)
+            addr_in = _PropAddr(selector, _kScopeGlobal, _kElementMain)
             running = ctypes.c_uint32(0)
             sz_r = ctypes.c_uint32(ctypes.sizeof(running))
             if (
