@@ -635,6 +635,25 @@ class TrnscrbApp(rumps.App):
 
     _LIVE_INTERVAL = 60  # seconds between live transcription updates
 
+    def _write_paused_placeholder(self, frames: int) -> None:
+        """Show captured duration while live transcription is paused.
+
+        Proves the recording is progressing even though no text is appearing,
+        and confirms the audio on disk is safe.
+        """
+        if not self._live_path or not self._started_at:
+            return
+        minutes = frames / rec_module.SAMPLE_RATE / 60
+        try:
+            storage.save_transcript(
+                self._live_path,
+                storage.format_transcript([], self._started_at, self._meeting_name)
+                + f"\n\n[Recording in progress — {minutes:.0f} min captured and saved; "
+                "live updates paused on battery, full transcript on stop]\n",
+            )
+        except Exception:
+            _log.debug("Could not update paused placeholder", exc_info=True)
+
     def _live_transcribe(self):
         """Incrementally transcribe new audio during recording.
 
@@ -650,8 +669,15 @@ class TrnscrbApp(rumps.App):
         time.sleep(self._LIVE_INTERVAL)  # wait before first snapshot
         while self._recorder and self._recorder.is_recording:
             try:
+                # Safety net that runs every tick regardless of power state:
+                # keeps the WAV on disk valid and playable, so an abrupt end
+                # (kill, crash, power loss) costs at most one interval.
+                recorder = self._recorder
+                frames = recorder.flush_to_disk() if recorder else 0
+
                 if _on_battery() and not get_setting("live_on_battery"):
                     _log.debug("Live transcription paused (on battery)")
+                    self._write_paused_placeholder(frames)
                 else:
                     recorder = self._recorder
                     result = recorder.snapshot_since(transcribed_frames) if recorder else None

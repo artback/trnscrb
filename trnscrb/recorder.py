@@ -241,6 +241,29 @@ class Recorder:
         _log.info("Recording stopped: %d samples, saved to %s", frame_count, out)
         return out
 
+    def flush_to_disk(self) -> int:
+        """Make the in-progress recording a valid, playable WAV. Returns frames.
+
+        A 44-byte header rewrite — cheap enough to run every minute even on
+        battery. Without it a killed process leaves a file with a placeholder
+        header; with it the recording on disk is always directly usable.
+        """
+        with self._lock:
+            if not self._tmpfile or self._frame_count == 0:
+                return 0
+            frames = self._frame_count
+            try:
+                self._tmpfile.flush()
+                end = self._tmpfile.tell()
+                self._tmpfile.seek(0)
+                self._tmpfile.write(_wav_header(SAMPLE_RATE, 1, frames * 2))
+                self._tmpfile.seek(end)
+                self._tmpfile.flush()
+            except Exception:
+                _log.debug("Safety flush failed", exc_info=True)
+                return 0
+        return frames
+
     def snapshot(self) -> Path | None:
         """Create a valid WAV copy of audio captured so far (non-destructive)."""
         result = self.snapshot_since(0)

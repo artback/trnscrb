@@ -46,6 +46,48 @@ class FinalizeWavHeaderTest(unittest.TestCase):
         self.assertEqual(data_size, wav.stat().st_size - 44)
 
 
+class FlushToDiskTest(unittest.TestCase):
+    """The periodic safety flush keeps the in-progress WAV playable."""
+
+    def setUp(self):
+        import numpy as np
+
+        self.np = np
+        self.rec = recorder.Recorder(device=None, system_audio=False)
+        self.rec._tmpfile = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        self.rec._tmpfile.write(b"\x00" * 44)
+        self.rec._frame_count = 0
+        self.rec._recording = True
+        self.addCleanup(lambda: Path(self.rec._tmpfile.name).unlink(missing_ok=True))
+
+    def _feed(self, seconds):
+        n = int(SAMPLE_RATE * seconds)
+        block = self.np.zeros((n, 1), dtype=self.np.float32)
+        self.rec._callback(block, n, None, None)
+
+    def test_flush_makes_partial_recording_playable(self):
+        self._feed(2)
+        frames = self.rec.flush_to_disk()
+        self.assertEqual(frames, SAMPLE_RATE * 2)
+
+        with wave.open(self.rec._tmpfile.name, "rb") as wf:
+            self.assertEqual(wf.getnframes(), SAMPLE_RATE * 2)
+            self.assertEqual(wf.getframerate(), SAMPLE_RATE)
+
+    def test_recording_continues_correctly_after_flush(self):
+        """The write position must be restored, or audio would be corrupted."""
+        self._feed(1)
+        self.rec.flush_to_disk()
+        self._feed(1)
+        self.rec.flush_to_disk()
+
+        with wave.open(self.rec._tmpfile.name, "rb") as wf:
+            self.assertEqual(wf.getnframes(), SAMPLE_RATE * 2, "second second lost or overwritten")
+
+    def test_flush_before_any_audio_is_a_noop(self):
+        self.assertEqual(self.rec.flush_to_disk(), 0)
+
+
 class RecoverOrphanedRecordingsTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
