@@ -85,6 +85,61 @@ class LiveSessionTest(unittest.TestCase):
         self.assertIsNone(storage.get_live_session())
 
 
+class AppStateTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        state_file = Path(self._tmp.name) / "app_state.json"
+        patcher = patch.object(storage, "_APP_STATE_FILE", state_file)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_write_read_roundtrip(self):
+        storage.write_app_state(system_audio_permission=True, version="1.0")
+        state = storage.read_app_state()
+        self.assertTrue(state["system_audio_permission"])
+        self.assertEqual(state["version"], "1.0")
+        self.assertEqual(state["pid"], os.getpid())
+
+    def test_updates_merge_previous_fields(self):
+        storage.write_app_state(system_audio_permission=False)
+        storage.write_app_state(system_audio_active=True)
+        state = storage.read_app_state()
+        self.assertFalse(state["system_audio_permission"])
+        self.assertTrue(state["system_audio_active"])
+
+    def test_dead_pid_invalidates_state(self):
+        import json
+
+        storage._APP_STATE_FILE.write_text(
+            json.dumps({"pid": 99999999, "system_audio_permission": True})
+        )
+        self.assertIsNone(storage.read_app_state())
+
+    def test_missing_file_reads_none(self):
+        self.assertIsNone(storage.read_app_state())
+
+
+class SystemAudioReadyTest(unittest.TestCase):
+    def test_prefers_running_app_state(self):
+        from trnscrb.cli import _system_audio_ready
+
+        with patch(
+            "trnscrb.storage.read_app_state",
+            return_value={"pid": os.getpid(), "system_audio_permission": True},
+        ):
+            self.assertEqual(_system_audio_ready(), (True, "app"))
+
+    def test_falls_back_to_terminal_identity(self):
+        from trnscrb.cli import _system_audio_ready
+
+        with (
+            patch("trnscrb.storage.read_app_state", return_value=None),
+            patch("trnscrb.recorder.Recorder.system_audio_available", return_value=False),
+        ):
+            self.assertEqual(_system_audio_ready(), (False, "terminal"))
+
+
 class OrphanedLiveMarkerTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

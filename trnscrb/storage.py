@@ -24,6 +24,41 @@ def get_transcript_path(meeting_name: str, started_at: datetime) -> Path:
 
 
 _LIVE_SESSION_FILE = Path.home() / ".config" / "trnscrb" / "live_session.json"
+_APP_STATE_FILE = Path.home() / ".config" / "trnscrb" / "app_state.json"
+
+
+def write_app_state(**fields) -> None:
+    """Publish state of the running app for CLI commands to read.
+
+    TCC permissions are per process identity: a terminal running
+    `trnscrb status` cannot answer questions about Trnscrb.app's own
+    permissions — only the app process can, so it publishes them here.
+    """
+    import json
+    import os
+
+    try:
+        _APP_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        state = read_app_state() or {}
+        state.update(fields)
+        state["pid"] = os.getpid()
+        _APP_STATE_FILE.write_text(json.dumps(state))
+    except Exception:
+        _log.debug("Could not write app state", exc_info=True)
+
+
+def read_app_state() -> dict | None:
+    """State published by a running app instance, or None if it isn't running."""
+    import json
+    import os
+
+    try:
+        data = json.loads(_APP_STATE_FILE.read_text())
+        os.kill(int(data["pid"]), 0)  # raises if that process is gone
+        return data
+    except Exception:
+        return None
+
 
 # Substrings that mark a transcript as still being live-updated.
 LIVE_MARKERS = (
