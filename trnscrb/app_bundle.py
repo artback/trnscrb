@@ -25,7 +25,11 @@ from trnscrb.log import get_logger
 _log = get_logger("trnscrb.app_bundle")
 
 BUNDLE_ID = "io.trnscrb.app"
-_LAUNCHER_VERSION = 1  # bump to force a rebuild on upgrade
+# Bundle identity version: bump ONLY for changes that must reach installed
+# bundles (launcher behavior, icon, plist capabilities). Each bump replaces
+# the installed bundle → new ad-hoc signature → the user must re-grant
+# Screen Recording once. Routine releases must NOT bump this.
+_LAUNCHER_VERSION = 2  # v2: app icon + professional Info.plist metadata
 
 _LAUNCHER_C = """\
 #include <signal.h>
@@ -87,15 +91,19 @@ def _marker(trnscrb_binary: str) -> str:
     return f"{_LAUNCHER_VERSION}\n{trnscrb_binary}\n"
 
 
-def _info_plist(version: str) -> dict:
-    return {
+def _info_plist(version: str, has_icon: bool = False) -> dict:
+    plist = {
         "CFBundleIdentifier": BUNDLE_ID,
         "CFBundleName": "Trnscrb",
         "CFBundleDisplayName": "Trnscrb",
         "CFBundleExecutable": "Trnscrb",
         "CFBundlePackageType": "APPL",
+        "CFBundleInfoDictionaryVersion": "6.0",
         "CFBundleShortVersionString": version,
         "CFBundleVersion": version,
+        "LSApplicationCategoryType": "public.app-category.productivity",
+        "NSHumanReadableCopyright": "MIT License",
+        "NSHighResolutionCapable": True,
         "LSMinimumSystemVersion": "13.0",
         # Menu bar app — no Dock icon, no app switcher entry.
         "LSUIElement": True,
@@ -109,6 +117,9 @@ def _info_plist(version: str) -> dict:
             "Trnscrb reads your calendar to name transcripts after the meeting."
         ),
     }
+    if has_icon:
+        plist["CFBundleIconFile"] = "Trnscrb"
+    return plist
 
 
 def _build_launcher(target: str, dest: Path) -> str:
@@ -166,8 +177,12 @@ def build_bundle(dest: Path, trnscrb_binary: str) -> Path | None:
         macos_dir.mkdir(parents=True, exist_ok=True)
         resources.mkdir(parents=True, exist_ok=True)
 
+        from trnscrb.app_icon import build_icns
+
+        has_icon = build_icns(resources / "Trnscrb.icns")
+
         with open(contents / "Info.plist", "wb") as f:
-            plistlib.dump(_info_plist(__version__), f)
+            plistlib.dump(_info_plist(__version__, has_icon=has_icon), f)
 
         executable = macos_dir / "Trnscrb"
         executable.unlink(missing_ok=True)
@@ -205,11 +220,12 @@ def _packaged_bundle(binary: Path) -> Path | None:
     return None
 
 
-def _launchers_identical(a: Path, b: Path) -> bool:
+def _bundle_marker(bundle: Path) -> str | None:
+    """Identity marker of a bundle (launcher version + wrapped target)."""
     try:
-        return a.read_bytes() == b.read_bytes()
+        return (bundle / "Contents" / "Resources" / "launcher.txt").read_text()
     except OSError:
-        return False
+        return None
 
 
 def _install_packaged(packaged: Path) -> Path | None:
@@ -217,16 +233,20 @@ def _install_packaged(packaged: Path) -> Path | None:
 
     TCC ties Screen Recording grants to the bundle's (ad-hoc) code
     signature, and every copy is a fresh signature — so the installed bundle
-    is REPLACED ONLY when its launcher binary actually differs. The launcher
-    targets the version-stable opt path, so routine version bumps leave it
-    byte-identical and the user's permission grant intact (Info.plist keeps
-    the older version string; that is deliberate and purely cosmetic).
+    is REPLACED ONLY when its identity marker (launcher version + wrapped
+    target) differs. Routine version bumps keep the marker identical and the
+    user's permission grant intact (Info.plist keeps the older version
+    string; that is deliberate and purely cosmetic). Bumping
+    _LAUNCHER_VERSION is the explicit, documented way to roll the identity.
     """
     installed = bundle_path()
     executable = executable_path()
     try:
-        if executable.exists() and _launchers_identical(
-            executable, packaged / "Contents" / "MacOS" / "Trnscrb"
+        installed_marker = _bundle_marker(installed)
+        if (
+            executable.exists()
+            and installed_marker is not None
+            and installed_marker == _bundle_marker(packaged)
         ):
             return executable
         replacing = installed.exists()
@@ -255,7 +275,7 @@ def _install_packaged(packaged: Path) -> Path | None:
 def is_installed(trnscrb_binary: str) -> bool:
     """True if ~/Applications/Trnscrb.app is present and up to date for this binary.
 
-    "Up to date" means the launcher binary matches — version strings are
+    "Up to date" means the identity marker matches — version strings are
     ignored on purpose, since replacing the bundle invalidates the user's
     Screen Recording grant (TCC is keyed to the code signature).
     """
@@ -264,7 +284,8 @@ def is_installed(trnscrb_binary: str) -> bool:
     packaged = _packaged_bundle(Path(trnscrb_binary))
     if packaged is None or not executable_path().exists():
         return False
-    return _launchers_identical(executable_path(), packaged / "Contents" / "MacOS" / "Trnscrb")
+    installed_marker = _bundle_marker(bundle_path())
+    return installed_marker is not None and installed_marker == _bundle_marker(packaged)
 
 
 def ensure_bundle(trnscrb_binary: str | None = None) -> Path | None:
