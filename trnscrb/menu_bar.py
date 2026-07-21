@@ -176,6 +176,7 @@ class TrnscrbApp(rumps.App):
         self._meeting_name: str = ""
 
         self._set_state("idle")
+        self._install_signal_handlers()
 
         if get_setting("auto_record"):
             self._start_watcher()
@@ -501,12 +502,20 @@ class TrnscrbApp(rumps.App):
         subprocess.run(["open", str(storage.ensure_notes_dir())])
 
     def quit_app(self, _):
+        self._shutdown("Quit")
+
+    def _shutdown(self, reason: str) -> None:
+        """Stop cleanly, never losing an in-progress recording.
+
+        Shared by the Quit menu item and the SIGTERM/SIGINT handlers, so a
+        restart, upgrade, or logout saves the meeting instead of killing it.
+        """
         if self._watcher:
             self._watcher.stop()
 
         # If a recording is in progress, stop it and save the WAV so it isn't lost.
         if self._recorder and self._recorder.is_recording:
-            _log.info("Quit requested while recording; stopping recorder and saving audio")
+            _log.info("%s while recording; stopping recorder and saving audio", reason)
             audio_path = self._recorder.stop()
             self._recorder = None
             if audio_path:
@@ -518,8 +527,15 @@ class TrnscrbApp(rumps.App):
 
                     shutil.move(str(audio_path), str(saved))
                     _log.info("Saved in-progress recording to %s", saved)
+                    _notify(
+                        "Trnscrb",
+                        "Recording saved",
+                        f"Interrupted by {reason.lower()} — audio kept as {saved.name}",
+                    )
                 except Exception:
                     _log.error("Failed to rescue recording from %s", audio_path, exc_info=True)
+
+        storage.clear_live_session()
 
         # If a background transcription thread is running, give it a few seconds.
         if self._process_thread and self._process_thread.is_alive():
@@ -529,6 +545,37 @@ class TrnscrbApp(rumps.App):
                 _log.warning("Transcription thread still running; quitting anyway")
 
         rumps.quit_application()
+
+    def _install_signal_handlers(self) -> None:
+        """Route SIGTERM/SIGINT into the clean shutdown path.
+
+        launchd sends SIGTERM on `launchctl kickstart -k`, upgrades, and
+        logout. Plain signal handlers are unreliable under the AppKit run
+        loop, so use libdispatch sources on the main queue.
+        """
+        try:
+            import signal
+
+            import libdispatch
+
+            self._signal_sources = []
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                signal.signal(sig, signal.SIG_IGN)  # required for dispatch sources
+                source = libdispatch.dispatch_source_create(
+                    libdispatch.DISPATCH_SOURCE_TYPE_SIGNAL,
+                    sig,
+                    0,
+                    libdispatch.dispatch_get_main_queue(),
+                )
+                name = signal.Signals(sig).name
+                libdispatch.dispatch_source_set_event_handler(
+                    source, lambda n=name: self._shutdown(n)
+                )
+                libdispatch.dispatch_resume(source)
+                self._signal_sources.append(source)  # keep refs alive
+            _log.debug("Signal handlers installed (SIGTERM, SIGINT)")
+        except Exception:
+            _log.warning("Could not install signal handlers", exc_info=True)
 
     # ── shared start / stop ───────────────────────────────────────────────────
 
@@ -554,11 +601,18 @@ class TrnscrbApp(rumps.App):
 
         self._meeting_name = meeting_name or f"meeting-{self._started_at.strftime('%H%M')}"
         self._live_path = storage.get_transcript_path(self._meeting_name, self._started_at)
-        # Write a placeholder so the file exists immediately
+        # Write a placeholder so the file exists immediately. Say plainly when
+        # live updates are paused, so an empty file isn't mistaken for a
+        # failed recording — the audio is still being captured either way.
+        if _on_battery() and not get_setting("live_on_battery"):
+            note = (
+                "[Recording in progress — live updates paused on battery; full transcript on stop]"
+            )
+        else:
+            note = "[Recording in progress — live updates every 60s]"
         storage.save_transcript(
             self._live_path,
-            storage.format_transcript([], self._started_at, self._meeting_name)
-            + "\n\n[Recording in progress — live updates every 60s]\n",
+            storage.format_transcript([], self._started_at, self._meeting_name) + f"\n\n{note}\n",
         )
         self._open_latest_item.title = f"Open Latest ({self._meeting_name})"
         storage.set_live_session(self._live_path, self._meeting_name, self._started_at)
@@ -581,6 +635,25 @@ class TrnscrbApp(rumps.App):
 
     _LIVE_INTERVAL = 60  # seconds between live transcription updates
 
+    def _write_paused_placeholder(self, frames: int) -> None:
+        """Show captured duration while live transcription is paused.
+
+        Proves the recording is progressing even though no text is appearing,
+        and confirms the audio on disk is safe.
+        """
+        if not self._live_path or not self._started_at:
+            return
+        minutes = frames / rec_module.SAMPLE_RATE / 60
+        try:
+            storage.save_transcript(
+                self._live_path,
+                storage.format_transcript([], self._started_at, self._meeting_name)
+                + f"\n\n[Recording in progress — {minutes:.0f} min captured and saved; "
+                "live updates paused on battery, full transcript on stop]\n",
+            )
+        except Exception:
+            _log.debug("Could not update paused placeholder", exc_info=True)
+
     def _live_transcribe(self):
         """Incrementally transcribe new audio during recording.
 
@@ -596,8 +669,15 @@ class TrnscrbApp(rumps.App):
         time.sleep(self._LIVE_INTERVAL)  # wait before first snapshot
         while self._recorder and self._recorder.is_recording:
             try:
+                # Safety net that runs every tick regardless of power state:
+                # keeps the WAV on disk valid and playable, so an abrupt end
+                # (kill, crash, power loss) costs at most one interval.
+                recorder = self._recorder
+                frames = recorder.flush_to_disk() if recorder else 0
+
                 if _on_battery() and not get_setting("live_on_battery"):
                     _log.debug("Live transcription paused (on battery)")
+                    self._write_paused_placeholder(frames)
                 else:
                     recorder = self._recorder
                     result = recorder.snapshot_since(transcribed_frames) if recorder else None

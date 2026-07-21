@@ -6,11 +6,13 @@ BlackHole driver or Multi-Output Device needed.
 Records at 16 kHz mono — suitable for local ASR backends used by trnscrb.
 """
 
+import shutil
 import struct
 import tempfile
 import threading
 import time
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -41,17 +43,70 @@ _NOISE_FLOOR = 1e-6  # mean-square ≈ -60 dBFS; blocks below this don't update
 _MIC_STALL_SECS = 3.0
 
 
-def cleanup_stale_temp_files() -> None:
-    """Remove orphaned trnscrb WAV files from previous crashes."""
+# A killed recording leaves a temp WAV with a placeholder header. Anything
+# longer than this is worth rescuing; shorter is noise from a false start.
+_MIN_RECOVERABLE_SECS = 20
+# Don't touch a file that a recording might still be writing to.
+_ORPHAN_QUIET_SECS = 120
+
+
+def finalize_wav_header(path: Path) -> int:
+    """Write a correct header on a WAV left with the placeholder. Returns frames.
+
+    Recording streams to disk with a zeroed 44-byte header that is only
+    filled in on stop, so a process killed mid-meeting leaves an unreadable
+    file whose audio is nevertheless fully intact.
+    """
+    size = path.stat().st_size
+    data_size = max(0, size - 44)
+    with open(path, "r+b") as f:
+        f.write(_wav_header(SAMPLE_RATE, 1, data_size))
+    return data_size // 2
+
+
+def recover_orphaned_recordings(notes_dir: Path | None = None) -> list[Path]:
+    """Rescue recordings left behind by a crash, kill, or logout.
+
+    Called at startup. Orphaned temp WAVs are repaired and moved into the
+    notes folder rather than deleted — audio is the one thing that cannot be
+    regenerated. Transcribe them later with `trnscrb transcribe <file>`.
+    """
+    from trnscrb import storage
+
+    notes_dir = notes_dir or storage.ensure_notes_dir()
+    recovered: list[Path] = []
     tmp_dir = Path(tempfile.gettempdir())
     now = time.time()
-    for p in tmp_dir.glob("tmp*.wav"):
+    min_bytes = 44 + _MIN_RECOVERABLE_SECS * SAMPLE_RATE * 2
+
+    for p in sorted(tmp_dir.glob("tmp*.wav")):
         try:
-            if now - p.stat().st_mtime > _STALE_AGE_SECS:
-                p.unlink()
-                _log.debug("Deleted stale temp file: %s", p)
+            stat = p.stat()
+            if now - stat.st_mtime < _ORPHAN_QUIET_SECS:
+                continue  # possibly still being written
+            if stat.st_size < min_bytes:
+                p.unlink()  # too short to be a meeting
+                continue
+            frames = finalize_wav_header(p)
+            started = datetime.fromtimestamp(stat.st_mtime)
+            dest = notes_dir / f"{started:%Y-%m-%d_%H-%M-%S}_recovered-recording.wav"
+            shutil.move(str(p), dest)
+            recovered.append(dest)
+            _log.warning(
+                "Recovered interrupted recording: %s (%.1f min) — transcribe with "
+                "`trnscrb transcribe %s`",
+                dest.name,
+                frames / SAMPLE_RATE / 60,
+                dest,
+            )
         except Exception:
-            pass
+            _log.debug("Could not recover %s", p, exc_info=True)
+    return recovered
+
+
+def cleanup_stale_temp_files() -> None:
+    """Backwards-compatible alias — recovers rather than deletes."""
+    recover_orphaned_recordings()
 
 
 def _wav_header(sample_rate: int, channels: int, data_size: int) -> bytes:
@@ -185,6 +240,29 @@ class Recorder:
 
         _log.info("Recording stopped: %d samples, saved to %s", frame_count, out)
         return out
+
+    def flush_to_disk(self) -> int:
+        """Make the in-progress recording a valid, playable WAV. Returns frames.
+
+        A 44-byte header rewrite — cheap enough to run every minute even on
+        battery. Without it a killed process leaves a file with a placeholder
+        header; with it the recording on disk is always directly usable.
+        """
+        with self._lock:
+            if not self._tmpfile or self._frame_count == 0:
+                return 0
+            frames = self._frame_count
+            try:
+                self._tmpfile.flush()
+                end = self._tmpfile.tell()
+                self._tmpfile.seek(0)
+                self._tmpfile.write(_wav_header(SAMPLE_RATE, 1, frames * 2))
+                self._tmpfile.seek(end)
+                self._tmpfile.flush()
+            except Exception:
+                _log.debug("Safety flush failed", exc_info=True)
+                return 0
+        return frames
 
     def snapshot(self) -> Path | None:
         """Create a valid WAV copy of audio captured so far (non-destructive)."""
