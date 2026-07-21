@@ -180,11 +180,31 @@ def _python_runtime() -> tuple[str, str, str]:
     return python_binary, home, purelib
 
 
+def _python_script(target: str) -> str:
+    """The Python script the embedded interpreter should run.
+
+    The launcher invokes ``TrnscrbPython <script> start``, so the script must
+    be Python. Homebrew's ``bin/trnscrb`` is a *shell* wrapper (it sets PATH
+    and execs the venv script), which Python cannot parse — in that case use
+    the venv console script this build is running from.
+    """
+    try:
+        first_line = Path(target).read_text(errors="replace").splitlines()[0]
+    except (OSError, IndexError):
+        first_line = ""
+    if first_line.startswith("#!") and "python" not in first_line:
+        derived = _stable_path(os.path.join(sys.prefix, "bin", "trnscrb"))
+        if Path(derived).exists():
+            _log.debug("Target %s is a shell wrapper; launching %s", target, derived)
+            return derived
+    return target
+
+
 def _build_launcher(target: str, dest: Path) -> str:
     """Create the bundle's main executable. Returns 'compiled' or 'script'."""
     _python_bin, pythonhome, pythonpath = _python_runtime()
     fmt = {
-        "target": target,
+        "target": _python_script(target),
         "pythonhome": pythonhome,
         "pythonpath": pythonpath,
         "python_name": _EMBEDDED_PYTHON,

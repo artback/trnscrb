@@ -116,6 +116,24 @@ class AppBundleTest(unittest.TestCase):
     def test_returns_none_for_missing_binary(self):
         self.assertIsNone(app_bundle.ensure_bundle(str(self.root / "nope")))
 
+    def test_shell_wrapper_target_resolves_to_venv_python_script(self):
+        """Homebrew's bin/trnscrb is a shell wrapper — Python can't run it, so
+        the launcher must fall back to the venv's console script."""
+        wrapper = self.root / "brew-shim"
+        wrapper.write_text('#!/bin/bash\nPATH="/x/bin:$PATH" exec "/x/bin/trnscrb" "$@"\n')
+        wrapper.chmod(0o755)
+
+        venv_script = self.root / "venv-trnscrb"
+        venv_script.write_text("#!/usr/bin/python3\nprint('hi')\n")
+        with (
+            patch.object(app_bundle.sys, "prefix", str(self.root)),
+            patch.object(app_bundle, "_stable_path", lambda p: str(venv_script)),
+        ):
+            self.assertEqual(app_bundle._python_script(str(wrapper)), str(venv_script))
+
+    def test_python_script_target_is_used_as_is(self):
+        self.assertEqual(app_bundle._python_script(str(self.target)), str(self.target))
+
 
 class PackagedBundleTest(unittest.TestCase):
     """When the package ships a prebuilt bundle (Homebrew), it is copied, not rebuilt."""
