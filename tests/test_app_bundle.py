@@ -1,6 +1,5 @@
 """Tests for the Trnscrb.app wrapper bundle."""
 
-import os
 import plistlib
 import shutil
 import subprocess
@@ -25,15 +24,11 @@ class AppBundleTest(unittest.TestCase):
         icon_patch.start()
         self.addCleanup(icon_patch.stop)
 
-        # The launcher runs the bundle's embedded Python with this script as
-        # its argument, so the fake target must be Python, not shell.
+        # A fake trnscrb binary that records how it was invoked, then exits 7.
         self.target = self.root / "trnscrb"
         self.record = self.root / "invoked.txt"
         self.target.write_text(
-            "import os, sys\n"
-            f"open({str(self.record)!r}, 'w').write("
-            "sys.argv[1] + ' bundle=' + os.environ.get('TRNSCRB_IN_BUNDLE', ''))\n"
-            "sys.exit(7)\n"
+            f'#!/bin/sh\necho "$1 bundle=$TRNSCRB_IN_BUNDLE" > "{self.record}"\nexit 7\n'
         )
         self.target.chmod(0o755)
 
@@ -50,27 +45,11 @@ class AppBundleTest(unittest.TestCase):
         self.assertIn("NSAppleEventsUsageDescription", info)
 
     @unittest.skipUnless(shutil.which("cc") or shutil.which("clang"), "needs a C compiler")
-    def test_launcher_runs_embedded_python_and_propagates_exit_code(self):
+    def test_launcher_spawns_target_and_propagates_exit_code(self):
         executable = app_bundle.ensure_bundle(str(self.target))
-        result = subprocess.run([str(executable)], timeout=60)
+        result = subprocess.run([str(executable)], timeout=30)
         self.assertEqual(result.returncode, 7, "child exit code must propagate")
         self.assertEqual(self.record.read_text().strip(), "start bundle=1")
-
-    def test_embedded_python_is_copied_into_the_bundle(self):
-        """The interpreter must live inside the bundle, or macOS attributes
-        Screen Recording to org.python.python instead of Trnscrb."""
-        executable = app_bundle.ensure_bundle(str(self.target))
-        embedded = executable.parent / app_bundle._EMBEDDED_PYTHON
-        self.assertTrue(embedded.exists(), "embedded interpreter missing")
-        self.assertFalse(embedded.is_symlink(), "must be a real copy, not a symlink")
-        self.assertTrue(os.access(embedded, os.X_OK))
-
-    @unittest.skipUnless(shutil.which("cc") or shutil.which("clang"), "needs a C compiler")
-    def test_launcher_bakes_stable_paths(self):
-        """Versioned Cellar paths would change the launcher every release,
-        replacing the bundle and voiding the user's TCC grant."""
-        executable = app_bundle.ensure_bundle(str(self.target))
-        self.assertNotIn(b"/Cellar/", executable.read_bytes())
 
     @unittest.skipUnless(shutil.which("codesign"), "needs codesign")
     def test_bundle_signature_seal_is_valid(self):
@@ -115,24 +94,6 @@ class AppBundleTest(unittest.TestCase):
 
     def test_returns_none_for_missing_binary(self):
         self.assertIsNone(app_bundle.ensure_bundle(str(self.root / "nope")))
-
-    def test_shell_wrapper_target_resolves_to_venv_python_script(self):
-        """Homebrew's bin/trnscrb is a shell wrapper — Python can't run it, so
-        the launcher must fall back to the venv's console script."""
-        wrapper = self.root / "brew-shim"
-        wrapper.write_text('#!/bin/bash\nPATH="/x/bin:$PATH" exec "/x/bin/trnscrb" "$@"\n')
-        wrapper.chmod(0o755)
-
-        venv_script = self.root / "venv-trnscrb"
-        venv_script.write_text("#!/usr/bin/python3\nprint('hi')\n")
-        with (
-            patch.object(app_bundle.sys, "prefix", str(self.root)),
-            patch.object(app_bundle, "_stable_path", lambda p: str(venv_script)),
-        ):
-            self.assertEqual(app_bundle._python_script(str(wrapper)), str(venv_script))
-
-    def test_python_script_target_is_used_as_is(self):
-        self.assertEqual(app_bundle._python_script(str(self.target)), str(self.target))
 
 
 class PackagedBundleTest(unittest.TestCase):

@@ -14,7 +14,6 @@ we fall back to a shell-script launcher, which still works but macOS may
 attribute prompts less cleanly.
 """
 
-import os
 import plistlib
 import shutil
 import subprocess
@@ -30,16 +29,12 @@ BUNDLE_ID = "io.trnscrb.app"
 # bundles (launcher behavior, icon, plist capabilities). Each bump replaces
 # the installed bundle → new ad-hoc signature → the user must re-grant
 # Screen Recording once. Routine releases must NOT bump this.
-_LAUNCHER_VERSION = 4  # v4: embedded Python so TCC sees the bundle's identity
+_LAUNCHER_VERSION = 5  # v5: reverted embedded interpreter (crashed under launchd)
 
 _LAUNCHER_C = """\
-#include <limits.h>
-#include <mach-o/dyld.h>
 #include <signal.h>
 #include <spawn.h>
-#include <stdint.h>
 #include <stdlib.h>
-#include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -51,28 +46,11 @@ static void forward(int sig) {{
 }}
 
 int main(void) {{
-    /* Run the Python copy that lives INSIDE this bundle, so the process that
-       calls ScreenCaptureKit carries the bundle's code identity (see the
-       module docstring). Resolve it relative to ourselves — the bundle is
-       built in the package prefix and copied to ~/Applications. */
-    char python[PATH_MAX];
-    uint32_t size = sizeof(python);
-    if (_NSGetExecutablePath(python, &size) != 0)
-        return 1;
-    char *slash = strrchr(python, '/');
-    if (slash == NULL || (slash - python) + sizeof("{python_name}") >= PATH_MAX)
-        return 1;
-    strcpy(slash + 1, "{python_name}");
-
+    char *argv[] = {{"{target}", "start", NULL}};
     setenv("TRNSCRB_IN_BUNDLE", "1", 1);
-    setenv("PYTHONHOME", "{pythonhome}", 1);
-    setenv("PYTHONPATH", "{pythonpath}", 1);
-    setenv("PYTHONNOUSERSITE", "1", 1);
-
-    char *argv[] = {{python, "{target}", "start", NULL}};
     signal(SIGTERM, forward);
     signal(SIGINT, forward);
-    if (posix_spawn(&child, python, NULL, NULL, argv, environ) != 0)
+    if (posix_spawn(&child, "{target}", NULL, NULL, argv, environ) != 0)
         return 1;
     int status = 0;
     while (waitpid(child, &status, 0) < 0) {{
@@ -87,17 +65,9 @@ int main(void) {{
 _LAUNCHER_SH = """\
 #!/bin/sh
 # Fallback launcher (no C compiler available at install time).
-# Note: a shell launcher makes /bin/sh the running binary, so macOS will not
-# attribute Screen Recording to this bundle — the compiled launcher is what
-# gives the app its own TCC identity.
 export TRNSCRB_IN_BUNDLE=1
-export PYTHONHOME="{pythonhome}"
-export PYTHONPATH="{pythonpath}"
-export PYTHONNOUSERSITE=1
-exec "$(dirname "$0")/{python_name}" "{target}" start
+exec "{target}" start
 """
-
-_EMBEDDED_PYTHON = "TrnscrbPython"  # Python copy inside Contents/MacOS/
 
 
 def bundle_path() -> Path:
@@ -152,67 +122,12 @@ def _info_plist(version: str, has_icon: bool = False) -> dict:
     return plist
 
 
-def _stable_path(path: str) -> str:
-    """Rewrite a versioned Homebrew Cellar path to its stable opt equivalent.
-
-    /opt/homebrew/Cellar/trnscrb/1.2.3/x → /opt/homebrew/opt/trnscrb/x
-    Baking a Cellar path into the launcher would change its bytes every
-    release, replacing the bundle and voiding the user's TCC grant.
-    """
-    parts = Path(path).parts
-    try:
-        i = parts.index("Cellar")
-    except ValueError:
-        return path
-    if len(parts) < i + 3:
-        return path
-    candidate = Path(*parts[:i], "opt", parts[i + 1], *parts[i + 3 :])
-    return str(candidate) if candidate.exists() else path
-
-
-def _python_runtime() -> tuple[str, str, str]:
-    """(python_binary, PYTHONHOME, PYTHONPATH) for the embedded interpreter."""
-    import sysconfig
-
-    python_binary = os.path.realpath(sys.executable)
-    home = sys.base_prefix
-    purelib = _stable_path(sysconfig.get_paths()["purelib"])
-    return python_binary, home, purelib
-
-
-def _python_script(target: str) -> str:
-    """The Python script the embedded interpreter should run.
-
-    The launcher invokes ``TrnscrbPython <script> start``, so the script must
-    be Python. Homebrew's ``bin/trnscrb`` is a *shell* wrapper (it sets PATH
-    and execs the venv script), which Python cannot parse — in that case use
-    the venv console script this build is running from.
-    """
-    try:
-        first_line = Path(target).read_text(errors="replace").splitlines()[0]
-    except (OSError, IndexError):
-        first_line = ""
-    if first_line.startswith("#!") and "python" not in first_line:
-        derived = _stable_path(os.path.join(sys.prefix, "bin", "trnscrb"))
-        if Path(derived).exists():
-            _log.debug("Target %s is a shell wrapper; launching %s", target, derived)
-            return derived
-    return target
-
-
 def _build_launcher(target: str, dest: Path) -> str:
     """Create the bundle's main executable. Returns 'compiled' or 'script'."""
-    _python_bin, pythonhome, pythonpath = _python_runtime()
-    fmt = {
-        "target": _python_script(target),
-        "pythonhome": pythonhome,
-        "pythonpath": pythonpath,
-        "python_name": _EMBEDDED_PYTHON,
-    }
     cc = shutil.which("cc") or shutil.which("clang")
     if cc:
         src = dest.parent / "launcher.c"
-        src.write_text(_LAUNCHER_C.format(**fmt))
+        src.write_text(_LAUNCHER_C.format(target=target))
         try:
             subprocess.run(
                 [cc, "-O2", "-o", str(dest), str(src)],
@@ -225,7 +140,7 @@ def _build_launcher(target: str, dest: Path) -> str:
             _log.warning("Launcher compile failed (%s); using script fallback", e)
         finally:
             src.unlink(missing_ok=True)
-    dest.write_text(_LAUNCHER_SH.format(**fmt))
+    dest.write_text(_LAUNCHER_SH.format(target=target))
     dest.chmod(0o755)
     return "script"
 
@@ -242,20 +157,9 @@ def _codesign(bundle: Path) -> None:
     if not codesign:
         return
     try:
-        # --identifier is essential: the embedded Python binary carries its own
-        # __info_plist declaring org.python.python, which codesign would
-        # otherwise adopt — and TCC would attribute recordings to "Python"
-        # instead of Trnscrb, so the user's grant would never apply.
-        embedded = bundle / "Contents" / "MacOS" / _EMBEDDED_PYTHON
-        if embedded.exists():
-            subprocess.run(
-                [codesign, "--force", "--identifier", BUNDLE_ID, "--sign", "-", str(embedded)],
-                check=True,
-                capture_output=True,
-                timeout=60,
-            )
+        # No --deep: there is no nested code to sign, and --deep is deprecated.
         subprocess.run(
-            [codesign, "--force", "--identifier", BUNDLE_ID, "--sign", "-", str(bundle)],
+            [codesign, "--force", "--sign", "-", str(bundle)],
             check=True,
             capture_output=True,
             timeout=60,
@@ -294,15 +198,6 @@ def build_bundle(dest: Path, trnscrb_binary: str) -> Path | None:
 
         with open(contents / "Info.plist", "wb") as f:
             plistlib.dump(_info_plist(__version__, has_icon=has_icon), f)
-
-        # Copy the interpreter INTO the bundle — a process running Homebrew's
-        # Python.app is identified by macOS as org.python.python, so a grant
-        # given to Trnscrb would never apply to it.
-        python_binary, _home, _path = _python_runtime()
-        embedded_python = macos_dir / _EMBEDDED_PYTHON
-        embedded_python.unlink(missing_ok=True)
-        shutil.copy2(python_binary, embedded_python)
-        embedded_python.chmod(0o755)
 
         executable = macos_dir / "Trnscrb"
         executable.unlink(missing_ok=True)
