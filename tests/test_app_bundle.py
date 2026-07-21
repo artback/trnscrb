@@ -96,12 +96,12 @@ class PackagedBundleTest(unittest.TestCase):
         self.binary.chmod(0o755)
         self._make_packaged(version="0.10.0")
 
-    def _make_packaged(self, version):
+    def _make_packaged(self, version, launcher_body="#!/bin/sh\nexit 0\n"):
         packaged = self.prefix / "Trnscrb.app"
         macos_dir = packaged / "Contents" / "MacOS"
         macos_dir.mkdir(parents=True, exist_ok=True)
         launcher = macos_dir / "Trnscrb"
-        launcher.write_text("#!/bin/sh\nexit 0\n")
+        launcher.write_text(launcher_body)
         launcher.chmod(0o755)
         with open(packaged / "Contents" / "Info.plist", "wb") as f:
             plistlib.dump(
@@ -120,24 +120,42 @@ class PackagedBundleTest(unittest.TestCase):
         installed_plist = app_bundle.bundle_path() / "Contents" / "Info.plist"
         self.assertEqual(plistlib.loads(installed_plist.read_bytes())["CFBundleVersion"], "0.10.0")
 
-    def test_same_version_is_not_recopied(self):
+    def test_same_launcher_is_not_recopied(self):
         first = app_bundle.ensure_bundle(str(self.binary))
         mtime = first.stat().st_mtime_ns
         second = app_bundle.ensure_bundle(str(self.binary))
         self.assertEqual(second.stat().st_mtime_ns, mtime)
 
-    def test_new_version_replaces_installed(self):
+    def test_version_bump_with_identical_launcher_keeps_installed_bundle(self):
+        """Replacing the bundle invalidates the TCC grant — a pure version
+        bump must leave the installed bundle (and its signature) untouched."""
+        first = app_bundle.ensure_bundle(str(self.binary))
+        mtime = first.stat().st_mtime_ns
+        self._make_packaged(version="0.11.0")  # same launcher bytes
+        second = app_bundle.ensure_bundle(str(self.binary))
+        self.assertEqual(second.stat().st_mtime_ns, mtime, "must not re-copy")
+        installed_plist = app_bundle.bundle_path() / "Contents" / "Info.plist"
+        self.assertEqual(
+            plistlib.loads(installed_plist.read_bytes())["CFBundleVersion"],
+            "0.10.0",
+            "old Info.plist kept on purpose — cosmetic staleness beats losing the grant",
+        )
+
+    def test_changed_launcher_replaces_installed(self):
         app_bundle.ensure_bundle(str(self.binary))
-        self._make_packaged(version="0.11.0")
-        app_bundle.ensure_bundle(str(self.binary))
+        self._make_packaged(version="0.11.0", launcher_body="#!/bin/sh\nexit 1\n")
+        executable = app_bundle.ensure_bundle(str(self.binary))
+        self.assertEqual(executable.read_text(), "#!/bin/sh\nexit 1\n")
         installed_plist = app_bundle.bundle_path() / "Contents" / "Info.plist"
         self.assertEqual(plistlib.loads(installed_plist.read_bytes())["CFBundleVersion"], "0.11.0")
 
-    def test_is_installed_tracks_packaged_version(self):
+    def test_is_installed_tracks_launcher_identity(self):
         self.assertFalse(app_bundle.is_installed(str(self.binary)))
         app_bundle.ensure_bundle(str(self.binary))
         self.assertTrue(app_bundle.is_installed(str(self.binary)))
-        self._make_packaged(version="0.11.0")
+        self._make_packaged(version="0.11.0")  # same launcher — still installed
+        self.assertTrue(app_bundle.is_installed(str(self.binary)))
+        self._make_packaged(version="0.12.0", launcher_body="#!/bin/sh\nexit 2\n")
         self.assertFalse(app_bundle.is_installed(str(self.binary)))
 
 

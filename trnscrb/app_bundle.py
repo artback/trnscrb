@@ -205,19 +205,32 @@ def _packaged_bundle(binary: Path) -> Path | None:
     return None
 
 
+def _launchers_identical(a: Path, b: Path) -> bool:
+    try:
+        return a.read_bytes() == b.read_bytes()
+    except OSError:
+        return False
+
+
 def _install_packaged(packaged: Path) -> Path | None:
-    """Copy the package-shipped bundle into ~/Applications when out of date."""
+    """Copy the package-shipped bundle into ~/Applications when needed.
+
+    TCC ties Screen Recording grants to the bundle's (ad-hoc) code
+    signature, and every copy is a fresh signature — so the installed bundle
+    is REPLACED ONLY when its launcher binary actually differs. The launcher
+    targets the version-stable opt path, so routine version bumps leave it
+    byte-identical and the user's permission grant intact (Info.plist keeps
+    the older version string; that is deliberate and purely cosmetic).
+    """
     installed = bundle_path()
     executable = executable_path()
     try:
-        packaged_version = _bundle_version(packaged)
-        if (
-            executable.exists()
-            and packaged_version is not None
-            and _bundle_version(installed) == packaged_version
+        if executable.exists() and _launchers_identical(
+            executable, packaged / "Contents" / "MacOS" / "Trnscrb"
         ):
             return executable
-        if installed.exists():
+        replacing = installed.exists()
+        if replacing:
             shutil.rmtree(installed)
         installed.parent.mkdir(parents=True, exist_ok=True)
         # ditto preserves the code signature; copytree is the fallback
@@ -226,6 +239,12 @@ def _install_packaged(packaged: Path) -> Path | None:
         )
         if result.returncode != 0:
             shutil.copytree(packaged, installed, symlinks=True)
+        if replacing:
+            _log.warning(
+                "App bundle launcher changed — the Screen Recording permission "
+                "must be granted again (System Settings, or approve the prompt "
+                "at the next recording)."
+            )
         _log.info("Installed packaged app bundle from %s", packaged)
         return executable
     except Exception:
@@ -234,14 +253,18 @@ def _install_packaged(packaged: Path) -> Path | None:
 
 
 def is_installed(trnscrb_binary: str) -> bool:
-    """True if ~/Applications/Trnscrb.app is present and up to date for this binary."""
+    """True if ~/Applications/Trnscrb.app is present and up to date for this binary.
+
+    "Up to date" means the launcher binary matches — version strings are
+    ignored on purpose, since replacing the bundle invalidates the user's
+    Screen Recording grant (TCC is keyed to the code signature).
+    """
     if is_current(trnscrb_binary):
         return True
     packaged = _packaged_bundle(Path(trnscrb_binary))
     if packaged is None or not executable_path().exists():
         return False
-    packaged_version = _bundle_version(packaged)
-    return packaged_version is not None and _bundle_version(bundle_path()) == packaged_version
+    return _launchers_identical(executable_path(), packaged / "Contents" / "MacOS" / "Trnscrb")
 
 
 def ensure_bundle(trnscrb_binary: str | None = None) -> Path | None:
