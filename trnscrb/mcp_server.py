@@ -75,6 +75,7 @@ def stop_recording(meeting_name: str = "") -> str:
             return "Not currently recording."
         started_at = _recording_started_at or datetime.now()
         audio_path = _recorder.stop()  # stops the stream, returns WAV path
+        attribution_timeline = _recorder.attribution_timeline()
         _recorder = None
 
     if not audio_path:
@@ -94,7 +95,7 @@ def stop_recording(meeting_name: str = "") -> str:
 
     thread = threading.Thread(
         target=_process_audio,
-        args=(audio_path, started_at, meeting_name),
+        args=(audio_path, started_at, meeting_name, attribution_timeline),
         daemon=True,
     )
     thread.start()
@@ -341,7 +342,12 @@ def enrich_transcript(transcript_id: str) -> str:
 # ── Background processing ─────────────────────────────────────────────────────
 
 
-def _process_audio(audio_path: Path, started_at: datetime, meeting_name: str) -> None:
+def _process_audio(
+    audio_path: Path,
+    started_at: datetime,
+    meeting_name: str,
+    attribution_timeline=None,
+) -> None:
     global _processing, _last_result, _last_error
     try:
         try:
@@ -364,6 +370,11 @@ def _process_audio(audio_path: Path, started_at: datetime, meeting_name: str) ->
             except Exception:
                 _log.warning("Diarization skipped", exc_info=True)
                 pass
+
+        if attribution_timeline is not None and segments:
+            from trnscrb import attribution
+
+            attribution.label_segments(segments, attribution_timeline)
 
         audio_path.unlink(missing_ok=True)
 

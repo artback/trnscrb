@@ -14,7 +14,7 @@ from pathlib import Path
 
 import rumps
 
-from trnscrb import diarizer, enricher, storage, transcriber
+from trnscrb import attribution, diarizer, enricher, storage, transcriber
 from trnscrb import recorder as rec_module
 from trnscrb.calendar_integration import get_current_or_upcoming_event
 from trnscrb.enricher import enrich_transcript
@@ -110,6 +110,7 @@ class TrnscrbApp(rumps.App):
         cleanup_stale_temp_files()
         storage.clear_live_session()  # any previous session died with us
         storage.finalize_orphaned_live_markers()
+        storage.apply_retention()
 
         try:
             generate_icons()
@@ -185,6 +186,11 @@ class TrnscrbApp(rumps.App):
         # Models load lazily when a recording starts (see _do_start) and are
         # released again after a long idle period to free ~1 GB of memory.
         self._unload_timer: threading.Timer | None = None
+
+        # Elapsed recording time next to the menu bar icon (🔴 12:34).
+        self._duration_shown = False
+        self._duration_timer = rumps.Timer(self._update_duration_title, 15)
+        self._duration_timer.start()
 
     _MODEL_IDLE_UNLOAD_SECS = 30 * 60
 
@@ -534,7 +540,7 @@ class TrnscrbApp(rumps.App):
             + "\n\n[Recording in progress — live updates every 60s]\n",
         )
         self._open_latest_item.title = f"Open Latest ({self._meeting_name})"
-        storage.set_live_session(self._live_path)
+        storage.set_live_session(self._live_path, self._meeting_name, self._started_at)
 
         # Start live transcription thread
         self._live_thread = threading.Thread(target=self._live_transcribe, daemon=True)
@@ -579,6 +585,9 @@ class TrnscrbApp(rumps.App):
                             for seg in new_segments:
                                 seg["start"] += offset
                                 seg["end"] += offset
+                            attribution.label_segments(
+                                new_segments, recorder.attribution_timeline()
+                            )
                             segments_acc.extend(new_segments)
                             transcribed_frames = end_frame
                             text = storage.format_transcript(
@@ -673,6 +682,9 @@ class TrnscrbApp(rumps.App):
                     _log.warning("Diarization skipped: %s", e)
                     _notify("Trnscrb", "Speaker labels skipped", str(e)[:180])
 
+            if segments:
+                attribution.label_segments(segments, recorder.attribution_timeline())
+
             text = storage.format_transcript(segments, started_at, meeting_name)
             path = live_path or storage.get_transcript_path(meeting_name, started_at)
             storage.save_transcript(path, text)
@@ -759,6 +771,21 @@ class TrnscrbApp(rumps.App):
             self.icon, self.title = (rec_icon, None) if rec_icon else (None, _EMOJI_RECORDING)
         else:
             self.icon, self.title = (idle_icon, None) if idle_icon else (None, _EMOJI_IDLE)
+        self._duration_shown = False
+
+    def _update_duration_title(self, _timer):
+        """Show elapsed recording time next to the menu bar icon."""
+        if getattr(self, "_current_state", "idle") == "recording" and self._started_at:
+            secs = int((datetime.now() - self._started_at).total_seconds())
+            if secs >= 3600:
+                elapsed = f"{secs // 3600}:{(secs % 3600) // 60:02d}:{secs % 60:02d}"
+            else:
+                elapsed = f"{secs // 60}:{secs % 60:02d}"
+            prefix = "" if self.icon else _EMOJI_RECORDING
+            self.title = f"{prefix} {elapsed}".strip()
+            self._duration_shown = True
+        elif self._duration_shown:
+            self._set_icon_state(getattr(self, "_current_state", "idle"))
 
 
 def main():
