@@ -19,6 +19,10 @@ class AppBundleTest(unittest.TestCase):
         patcher = patch.object(app_bundle, "bundle_path", lambda: self.root / "Trnscrb.app")
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Icon rendering is slow and covered by its own test.
+        icon_patch = patch("trnscrb.app_icon.build_icns", return_value=False)
+        icon_patch.start()
+        self.addCleanup(icon_patch.stop)
 
         # A fake trnscrb binary that records how it was invoked, then exits 7.
         self.target = self.root / "trnscrb"
@@ -96,13 +100,16 @@ class PackagedBundleTest(unittest.TestCase):
         self.binary.chmod(0o755)
         self._make_packaged(version="0.10.0")
 
-    def _make_packaged(self, version, launcher_body="#!/bin/sh\nexit 0\n"):
+    def _make_packaged(self, version, launcher_body="#!/bin/sh\nexit 0\n", marker="2\n/opt/x\n"):
         packaged = self.prefix / "Trnscrb.app"
         macos_dir = packaged / "Contents" / "MacOS"
+        resources = packaged / "Contents" / "Resources"
         macos_dir.mkdir(parents=True, exist_ok=True)
+        resources.mkdir(parents=True, exist_ok=True)
         launcher = macos_dir / "Trnscrb"
         launcher.write_text(launcher_body)
         launcher.chmod(0o755)
+        (resources / "launcher.txt").write_text(marker)
         with open(packaged / "Contents" / "Info.plist", "wb") as f:
             plistlib.dump(
                 {"CFBundleIdentifier": app_bundle.BUNDLE_ID, "CFBundleVersion": version}, f
@@ -120,18 +127,18 @@ class PackagedBundleTest(unittest.TestCase):
         installed_plist = app_bundle.bundle_path() / "Contents" / "Info.plist"
         self.assertEqual(plistlib.loads(installed_plist.read_bytes())["CFBundleVersion"], "0.10.0")
 
-    def test_same_launcher_is_not_recopied(self):
+    def test_same_marker_is_not_recopied(self):
         first = app_bundle.ensure_bundle(str(self.binary))
         mtime = first.stat().st_mtime_ns
         second = app_bundle.ensure_bundle(str(self.binary))
         self.assertEqual(second.stat().st_mtime_ns, mtime)
 
-    def test_version_bump_with_identical_launcher_keeps_installed_bundle(self):
+    def test_version_bump_with_same_marker_keeps_installed_bundle(self):
         """Replacing the bundle invalidates the TCC grant — a pure version
         bump must leave the installed bundle (and its signature) untouched."""
         first = app_bundle.ensure_bundle(str(self.binary))
         mtime = first.stat().st_mtime_ns
-        self._make_packaged(version="0.11.0")  # same launcher bytes
+        self._make_packaged(version="0.11.0")  # same identity marker
         second = app_bundle.ensure_bundle(str(self.binary))
         self.assertEqual(second.stat().st_mtime_ns, mtime, "must not re-copy")
         installed_plist = app_bundle.bundle_path() / "Contents" / "Info.plist"
@@ -141,22 +148,67 @@ class PackagedBundleTest(unittest.TestCase):
             "old Info.plist kept on purpose — cosmetic staleness beats losing the grant",
         )
 
-    def test_changed_launcher_replaces_installed(self):
+    def test_changed_marker_replaces_installed(self):
         app_bundle.ensure_bundle(str(self.binary))
-        self._make_packaged(version="0.11.0", launcher_body="#!/bin/sh\nexit 1\n")
+        self._make_packaged(
+            version="0.11.0", launcher_body="#!/bin/sh\nexit 1\n", marker="3\n/opt/x\n"
+        )
         executable = app_bundle.ensure_bundle(str(self.binary))
         self.assertEqual(executable.read_text(), "#!/bin/sh\nexit 1\n")
         installed_plist = app_bundle.bundle_path() / "Contents" / "Info.plist"
         self.assertEqual(plistlib.loads(installed_plist.read_bytes())["CFBundleVersion"], "0.11.0")
 
-    def test_is_installed_tracks_launcher_identity(self):
+    def test_is_installed_tracks_bundle_identity(self):
         self.assertFalse(app_bundle.is_installed(str(self.binary)))
         app_bundle.ensure_bundle(str(self.binary))
         self.assertTrue(app_bundle.is_installed(str(self.binary)))
-        self._make_packaged(version="0.11.0")  # same launcher — still installed
+        self._make_packaged(version="0.11.0")  # same marker — still installed
         self.assertTrue(app_bundle.is_installed(str(self.binary)))
-        self._make_packaged(version="0.12.0", launcher_body="#!/bin/sh\nexit 2\n")
+        self._make_packaged(version="0.12.0", marker="3\n/opt/x\n")
         self.assertFalse(app_bundle.is_installed(str(self.binary)))
+
+
+class AppIconTest(unittest.TestCase):
+    def _pillow_and_iconutil(self):
+        if not shutil.which("iconutil"):
+            return False
+        try:
+            import PIL  # noqa: F401
+
+            return True
+        except ImportError:
+            return False
+
+    def test_build_icns_produces_valid_icon(self):
+        if not self._pillow_and_iconutil():
+            self.skipTest("needs Pillow and iconutil")
+        from trnscrb import app_icon
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "Trnscrb.icns"
+            with patch.object(app_icon, "_MASTER", 1024):  # keep the test fast
+                self.assertTrue(app_icon.build_icns(dest))
+            self.assertTrue(dest.exists())
+            self.assertEqual(dest.read_bytes()[:4], b"icns", "must be a valid icns file")
+
+    def test_bundle_gets_icon_and_plist_entry(self):
+        if not self._pillow_and_iconutil():
+            self.skipTest("needs Pillow and iconutil")
+        from trnscrb import app_icon
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "trnscrb"
+            target.write_text("#!/bin/sh\nexit 0\n")
+            target.chmod(0o755)
+            with patch.object(app_icon, "_MASTER", 1024):
+                executable = app_bundle.build_bundle(root / "Trnscrb.app", str(target))
+            self.assertIsNotNone(executable)
+            bundle = root / "Trnscrb.app"
+            self.assertTrue((bundle / "Contents" / "Resources" / "Trnscrb.icns").exists())
+            info = plistlib.loads((bundle / "Contents" / "Info.plist").read_bytes())
+            self.assertEqual(info["CFBundleIconFile"], "Trnscrb")
+            self.assertEqual(info["LSApplicationCategoryType"], "public.app-category.productivity")
 
 
 if __name__ == "__main__":
