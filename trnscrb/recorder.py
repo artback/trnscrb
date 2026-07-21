@@ -96,6 +96,13 @@ class Recorder:
         self._sys_loudness = 0.0  # EMA of system-audio mean-square
         self._last_mic_frame = 0.0  # time.monotonic() of last mic callback
         self._watchdog: threading.Thread | None = None
+        # Per-block energy timeline of both source streams, recorded before
+        # mixing — lets the transcriber attribute segments to "Me" (mic) vs
+        # "Them" (system audio) without any diarization model.
+        self._attr_lock = threading.Lock()
+        self._attr_offsets: list[int] = []  # frame offset of each block
+        self._attr_mic: list[float] = []  # mic mean-square per block
+        self._attr_sys: list[float] = []  # system-audio mean-square per block
 
     # ── public ──────────────────────────────────────────────────────────────
 
@@ -104,6 +111,10 @@ class Recorder:
         # Write a placeholder WAV header (44 bytes); finalized in stop().
         self._tmpfile.write(b"\x00" * 44)
         self._frame_count = 0
+        with self._attr_lock:
+            self._attr_offsets.clear()
+            self._attr_mic.clear()
+            self._attr_sys.clear()
         self._recording = True
         self._stream = sd.InputStream(
             device=self.device,
@@ -218,6 +229,19 @@ class Recorder:
         """True while system audio is being captured alongside the mic."""
         return self._system_audio_active
 
+    def attribution_timeline(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Per-block (frame_offset, mic_energy, system_energy) arrays.
+
+        Snapshot of the dual-stream energy timeline used to attribute
+        transcript segments to "Me" (mic) vs "Them" (system audio).
+        """
+        with self._attr_lock:
+            return (
+                np.array(self._attr_offsets, dtype=np.int64),
+                np.array(self._attr_mic, dtype=np.float32),
+                np.array(self._attr_sys, dtype=np.float32),
+            )
+
     # ── helpers ─────────────────────────────────────────────────────────────
 
     def _start_system_audio(self) -> None:
@@ -285,8 +309,15 @@ class Recorder:
         self._last_mic_frame = time.monotonic()
         try:
             if self._recording and self._tmpfile:
+                block_offset = self._frame_count  # only this thread mutates it
                 mic = indata[:, 0]
                 system = self._pull_system_frames(len(mic))
+                with self._attr_lock:
+                    self._attr_offsets.append(block_offset)
+                    self._attr_mic.append(float(np.mean(np.square(mic))))
+                    self._attr_sys.append(
+                        float(np.mean(np.square(system))) if system is not None else 0.0
+                    )
                 if system is not None:
                     mixed = mic * self._mic_gain(mic, system) + system
                 else:

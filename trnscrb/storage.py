@@ -33,14 +33,19 @@ LIVE_MARKERS = (
 _INTERRUPTED_NOTE = "[Recording was interrupted]"
 
 
-def set_live_session(path: Path) -> None:
+def set_live_session(
+    path: Path, meeting_name: str = "", started_at: datetime | None = None
+) -> None:
     """Record which transcript is being live-updated (read by `trnscrb live`)."""
     import json
     import os
 
     try:
+        payload: dict = {"path": str(path), "pid": os.getpid(), "meeting": meeting_name}
+        if started_at is not None:
+            payload["started_at"] = started_at.isoformat()
         _LIVE_SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _LIVE_SESSION_FILE.write_text(json.dumps({"path": str(path), "pid": os.getpid()}))
+        _LIVE_SESSION_FILE.write_text(json.dumps(payload))
     except Exception:
         _log.debug("Could not write live session file", exc_info=True)
 
@@ -49,8 +54,8 @@ def clear_live_session() -> None:
     _LIVE_SESSION_FILE.unlink(missing_ok=True)
 
 
-def get_live_session() -> Path | None:
-    """Path of the actively updated live transcript, or None.
+def get_live_session_info() -> dict | None:
+    """Details of the active recording session, or None.
 
     Authoritative: written by the recording process on start, cleared on stop,
     and validated against the recorder still being alive — so a crashed
@@ -64,10 +69,49 @@ def get_live_session() -> Path | None:
         path = Path(data["path"])
         os.kill(int(data["pid"]), 0)  # raises if the recorder is gone
         if path.exists():
-            return path
+            data["path"] = path
+            return data
     except Exception:
         pass
     return None
+
+
+def get_live_session() -> Path | None:
+    """Path of the actively updated live transcript, or None."""
+    info = get_live_session_info()
+    return info["path"] if info else None
+
+
+def apply_retention() -> None:
+    """Delete old files per the retention settings.
+
+    Preserved audio is large (~230 MB/hour); default is to keep it 30 days.
+    Transcripts are kept forever unless retention_transcript_days is set.
+    A value of 0 disables deletion for that category.
+    """
+    import time
+
+    from trnscrb import settings
+
+    now = time.time()
+
+    def _purge(pattern: str, days: int) -> None:
+        if days <= 0:
+            return
+        cutoff = now - days * 86400
+        for f in NOTES_DIR.glob(pattern):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+                    _log.info("Retention: deleted %s (older than %d days)", f.name, days)
+            except OSError:
+                pass
+
+    try:
+        _purge("*.wav", int(settings.get("retention_audio_days") or 0))
+        _purge("*.txt", int(settings.get("retention_transcript_days") or 0))
+    except Exception:
+        _log.debug("Retention pass failed", exc_info=True)
 
 
 def finalize_orphaned_live_markers(max_age_secs: float = 24 * 3600) -> None:

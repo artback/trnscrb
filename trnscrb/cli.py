@@ -387,6 +387,11 @@ def watch():
                 _log.warning("Diarization skipped: %s", e)
                 click.echo(f"  ⚠  Speaker diarization skipped: {e}")
 
+        if segments:
+            from trnscrb import attribution
+
+            attribution.label_segments(segments, r.attribution_timeline())
+
         audio_path.unlink(missing_ok=True)
         text = storage.format_transcript(segments, started_at, meeting_name)
         path = storage.get_transcript_path(meeting_name, started_at)
@@ -855,6 +860,123 @@ def mic_status():
         active = is_mic_in_use()
         mark = "🔴" if active else "⚪"
         click.echo(f"  {i + 1:2d}s  {mark}", nl=True)
+    click.echo()
+
+
+@cli.command(name="transcribe")
+@click.argument("audio_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--name", "meeting_name", default="", help="Meeting name (default: from filename).")
+def transcribe_cmd(audio_file: Path, meeting_name: str):
+    """Transcribe a WAV file (e.g. audio preserved after a failed transcription)."""
+    import re as _re
+
+    from trnscrb import diarizer, storage, transcriber
+    from trnscrb.settings import read_hf_token
+
+    _finalize_wav_header(audio_file)
+
+    # Preserved-audio filenames carry the original meeting name and time:
+    # 2026-07-20_09-52-03_meeting-0952.wav
+    started_at = datetime.fromtimestamp(audio_file.stat().st_mtime)
+    match = _re.match(
+        r"(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2}(?:-\d{2})?)_(.+?)(?:-recovered)?$",
+        audio_file.stem,
+    )
+    if match:
+        date_part, time_part, name_part = match.groups()
+        fmt = "%Y-%m-%d %H-%M-%S" if time_part.count("-") == 2 else "%Y-%m-%d %H-%M"
+        started_at = datetime.strptime(f"{date_part} {time_part}", fmt)
+        meeting_name = meeting_name or name_part
+    meeting_name = meeting_name or audio_file.stem
+
+    click.echo(f"Transcribing {audio_file.name} …")
+    segments = transcriber.transcribe(audio_file)
+
+    hf_token = read_hf_token()
+    if hf_token and segments:
+        try:
+            segments = diarizer.merge(segments, diarizer.diarize(audio_file, hf_token))
+        except Exception as e:
+            click.echo(f"  ⚠  Speaker diarization skipped: {e}")
+
+    text = storage.format_transcript(segments, started_at, meeting_name)
+    out = storage.get_transcript_path(meeting_name, started_at)
+    storage.save_transcript(out, text)
+    click.echo(f"  ✓ {len(segments)} segments → {out}")
+
+
+def _finalize_wav_header(path: Path) -> None:
+    """Write a proper WAV header if a killed recorder left the placeholder."""
+    from trnscrb.recorder import SAMPLE_RATE, _wav_header
+
+    with open(path, "r+b") as f:
+        if f.read(4) == b"RIFF":
+            return
+        f.seek(0)
+        f.write(_wav_header(SAMPLE_RATE, 1, path.stat().st_size - 44))
+    click.echo("  (finalized interrupted WAV header)")
+
+
+@cli.command()
+def status():
+    """Show what trnscrb is doing right now and whether it's healthy."""
+    import shutil as _sh
+
+    import trnscrb
+    from trnscrb import storage
+    from trnscrb.app_bundle import is_installed
+    from trnscrb.settings import load as load_settings
+    from trnscrb.settings import read_hf_token
+    from trnscrb.single_instance import SingleInstance
+    from trnscrb.storage import NOTES_DIR
+
+    click.echo()
+    click.echo(click.style(f"Trnscrb {trnscrb.__version__}", bold=True))
+    click.echo("=" * 42)
+
+    lock = SingleInstance()
+    if lock.acquire():
+        lock.release()
+        _row("App running", False, "start with `trnscrb start`")
+    else:
+        _row("App running", True, f"pid {lock.holder_pid()}")
+
+    info = storage.get_live_session_info()
+    if info:
+        detail = Path(str(info["path"])).name
+        started = info.get("started_at")
+        if started:
+            secs = int((datetime.now() - datetime.fromisoformat(started)).total_seconds())
+            detail += f" — {secs // 60}m{secs % 60:02d}s"
+        _row("Recording", True, detail)
+    else:
+        _row("Recording", False, "idle")
+
+    settings = load_settings()
+    _row("Auto-transcribe", bool(settings.get("auto_record")), "")
+    backend = str(settings.get("transcription_backend") or "auto")
+    click.echo(f"  Backend: {backend}")
+    click.echo()
+
+    binary = _sh.which("trnscrb") or sys.executable
+    _row("Trnscrb.app wrapper", is_installed(binary), "permission identity")
+    _row("System audio permission", _system_audio_ready(), "Screen Recording")
+    _row("ffmpeg", bool(_sh.which("ffmpeg")), "audio decoding")
+    _row("HF token", bool(read_hf_token()), "optional — pyannote speaker labels")
+    click.echo()
+
+    transcripts = sorted(NOTES_DIR.glob("*.txt"), key=lambda p: p.stat().st_mtime)
+    if transcripts:
+        click.echo(f"  Transcripts: {len(transcripts)} in {NOTES_DIR}")
+        click.echo(f"  Latest:      {transcripts[-1].name}")
+    else:
+        click.echo(f"  Transcripts: none yet ({NOTES_DIR})")
+    preserved = list(NOTES_DIR.glob("*.wav"))
+    if preserved:
+        total_mb = sum(w.stat().st_size for w in preserved) / 1_000_000
+        days = int(settings.get("retention_audio_days") or 0)
+        note = f"deleted after {days} days" if days else "kept forever"
+        click.echo(f"  Preserved audio: {len(preserved)} file(s), {total_mb:.0f} MB ({note})")
     click.echo()
 
 

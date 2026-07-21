@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trnscrb"
-version = "0.12.0"
+version = "0.13.0"
 description = "Offline meeting transcription for macOS — auto-detects meetings, transcribes locally with Parakeet or Whisper, saves to Claude Desktop via MCP"
 readme = "README.md"
 license = "MIT"
@@ -60,7 +60,9 @@ where = ["."]
 include = ["trnscrb*"]
 
 [tool.ruff]
-target-version = "py314"
+# Must match requires-python: with py314 the formatter emits PEP 758 except
+# syntax that is a SyntaxError on the Python 3.12 the Homebrew build runs.
+target-version = "py312"
 line-length = 100
 
 [tool.ruff.lint]
