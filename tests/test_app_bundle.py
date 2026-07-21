@@ -51,6 +51,22 @@ class AppBundleTest(unittest.TestCase):
         self.assertEqual(result.returncode, 7, "child exit code must propagate")
         self.assertEqual(self.record.read_text().strip(), "start bundle=1")
 
+    @unittest.skipUnless(shutil.which("codesign"), "needs codesign")
+    def test_bundle_signature_seal_is_valid(self):
+        """An invalid seal stops macOS persisting the Screen Recording grant.
+
+        launcher.txt in Resources/ must be signed, not added afterward.
+        """
+        app_bundle.ensure_bundle(str(self.target))
+        bundle = app_bundle.bundle_path()
+        verify = subprocess.run(
+            ["codesign", "--verify", "--strict", str(bundle)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(verify.returncode, 0, f"sealed resource invalid: {verify.stderr.strip()}")
+
     def test_script_fallback_without_compiler(self):
         with patch.object(app_bundle.shutil, "which", return_value=None):
             executable = app_bundle.ensure_bundle(str(self.target))

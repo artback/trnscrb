@@ -29,7 +29,7 @@ BUNDLE_ID = "io.trnscrb.app"
 # bundles (launcher behavior, icon, plist capabilities). Each bump replaces
 # the installed bundle → new ad-hoc signature → the user must re-grant
 # Screen Recording once. Routine releases must NOT bump this.
-_LAUNCHER_VERSION = 2  # v2: app icon + professional Info.plist metadata
+_LAUNCHER_VERSION = 3  # v3: sign bundle last so the code-signature seal is valid
 
 _LAUNCHER_C = """\
 #include <signal.h>
@@ -146,17 +146,32 @@ def _build_launcher(target: str, dest: Path) -> str:
 
 
 def _codesign(bundle: Path) -> None:
-    """Ad-hoc sign so the TCC identity stays stable across rebuilds."""
+    """Ad-hoc sign the finished bundle so TCC can persist grants for it.
+
+    Must be the LAST build step — codesign seals the current bundle contents,
+    and any later change invalidates the seal. The resulting cdhash is stable
+    across rebuilds as long as the sealed bytes are identical, which is what
+    lets a Screen Recording grant survive upgrades.
+    """
     codesign = shutil.which("codesign")
     if not codesign:
         return
     try:
+        # No --deep: there is no nested code to sign, and --deep is deprecated.
         subprocess.run(
-            [codesign, "--force", "--deep", "--sign", "-", str(bundle)],
+            [codesign, "--force", "--sign", "-", str(bundle)],
             check=True,
             capture_output=True,
             timeout=60,
         )
+        verify = subprocess.run(
+            [codesign, "--verify", "--strict", str(bundle)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if verify.returncode != 0:
+            _log.warning("Bundle signature verification failed: %s", verify.stderr.strip())
     except Exception as e:
         _log.warning("Ad-hoc codesign failed (harmless, but TCC may re-prompt): %s", e)
 
@@ -187,8 +202,12 @@ def build_bundle(dest: Path, trnscrb_binary: str) -> Path | None:
         executable = macos_dir / "Trnscrb"
         executable.unlink(missing_ok=True)
         kind = _build_launcher(trnscrb_binary, executable)
-        _codesign(dest)
+        # Every file must be in place BEFORE signing — codesign seals the
+        # bundle's resources, and adding a file afterward invalidates the seal
+        # ("a sealed resource is missing or invalid"), which stops macOS from
+        # persisting the Screen Recording grant across launches.
         (resources / "launcher.txt").write_text(_marker(trnscrb_binary))
+        _codesign(dest)
         _log.info("App bundle ready at %s (%s launcher)", dest, kind)
         return executable
     except Exception:
