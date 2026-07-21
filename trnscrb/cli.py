@@ -108,20 +108,27 @@ def install(force: bool):
     click.echo()
 
     # ── 3. Audio setup ───────────────────────────────────────────────────────
-    sa_ok = _system_audio_ready()
-    _row("System audio capture", sa_ok, "captures other participants' audio (ScreenCaptureKit)")
+    sa_ok, sa_source = _system_audio_ready()
+    _row(
+        "System audio capture",
+        sa_ok,
+        "captures other participants' audio (ScreenCaptureKit)"
+        + ("" if sa_source == "app" else " — checked from this terminal"),
+    )
     if not sa_ok:
         from trnscrb.system_audio import SystemAudioCapture
 
         if not SystemAudioCapture.is_supported():
             click.echo("  Requires macOS 13+ — recording will use the microphone only.")
-        elif click.confirm("  Request Screen Recording permission now?", default=True):
-            if SystemAudioCapture.request_permission():
-                click.echo(click.style("  Permission granted.", fg="green"))
-            else:
-                click.echo("  Enable it under System Settings → Privacy & Security →")
-                click.echo("  Screen & System Audio Recording, then restart trnscrb.")
-                click.echo("  Until then, recording uses the microphone only.")
+        elif sa_source == "terminal":
+            click.echo("  The app isn't running, so only this terminal's permission could be")
+            click.echo("  checked. Grant 'Trnscrb' under System Settings → Privacy & Security →")
+            click.echo("  Screen & System Audio Recording, then start the app and re-run.")
+        else:
+            click.echo("  Grant 'Trnscrb' under System Settings → Privacy & Security →")
+            click.echo("  Screen & System Audio Recording, then restart the app")
+            click.echo("  (launchctl kickstart -k gui/$UID/io.trnscrb.app).")
+            click.echo("  Until then, recording uses the microphone only.")
     click.echo()
 
     # ── 3½. ffmpeg — audio decoding for Parakeet/Qwen3 ───────────────────────
@@ -960,12 +967,19 @@ def status():
 
     binary = _sh.which("trnscrb") or sys.executable
     _row("Trnscrb.app wrapper", is_installed(binary), "permission identity")
-    _row("System audio permission", _system_audio_ready(), "Screen Recording")
+    sa_ok, sa_source = _system_audio_ready()
+    _row(
+        "System audio permission",
+        sa_ok,
+        "Screen Recording" + ("" if sa_source == "app" else " (this terminal — app not running)"),
+    )
     _row("ffmpeg", bool(_sh.which("ffmpeg")), "audio decoding")
     _row("HF token", bool(read_hf_token()), "optional — pyannote speaker labels")
     click.echo()
 
-    transcripts = sorted(NOTES_DIR.glob("*.txt"), key=lambda p: p.stat().st_mtime)
+    # Sort by the filename's date prefix, not mtime — maintenance passes
+    # (orphan finalization) touch old files and would skew "latest".
+    transcripts = sorted(NOTES_DIR.glob("*.txt"), key=lambda p: p.name)
     if transcripts:
         click.echo(f"  Transcripts: {len(transcripts)} in {NOTES_DIR}")
         click.echo(f"  Latest:      {transcripts[-1].name}")
@@ -1007,13 +1021,27 @@ def _pkg_installed(import_name: str) -> bool:
     return importlib.util.find_spec(import_name.split(".")[0]) is not None
 
 
-def _system_audio_ready() -> bool:
+def _system_audio_ready() -> tuple[bool, str]:
+    """(granted, source) for the Screen Recording permission.
+
+    TCC permissions are per process identity: only the running app can answer
+    for Trnscrb.app, so its published state wins; otherwise we can merely
+    check this terminal's identity, and say so.
+    """
+    try:
+        from trnscrb.storage import read_app_state
+
+        state = read_app_state()
+        if state is not None and "system_audio_permission" in state:
+            return bool(state["system_audio_permission"]), "app"
+    except Exception:
+        pass
     try:
         from trnscrb.recorder import Recorder
 
-        return Recorder.system_audio_available()
+        return Recorder.system_audio_available(), "terminal"
     except Exception:
-        return False
+        return False, "terminal"
 
 
 def _get_hf_token() -> str | None:

@@ -110,6 +110,7 @@ class TrnscrbApp(rumps.App):
         cleanup_stale_temp_files()
         storage.clear_live_session()  # any previous session died with us
         storage.finalize_orphaned_live_markers()
+        self._publish_app_state()
         storage.apply_retention()
 
         try:
@@ -217,6 +218,26 @@ class TrnscrbApp(rumps.App):
             diarizer.unload_pipeline()
         except Exception:
             _log.debug("Idle model unload failed", exc_info=True)
+
+    def _publish_app_state(self, **extra):
+        """Publish permission/capability state for `trnscrb status`/`install`.
+
+        Runs in the app's own process, so the TCC answers are for the
+        Trnscrb.app identity — the one that actually records.
+        """
+        try:
+            import trnscrb
+            from trnscrb.system_audio import SystemAudioCapture
+
+            storage.write_app_state(
+                version=trnscrb.__version__,
+                system_audio_permission=(
+                    SystemAudioCapture.is_supported() and SystemAudioCapture.has_permission()
+                ),
+                **extra,
+            )
+        except Exception:
+            _log.debug("Could not publish app state", exc_info=True)
 
     def _preload_model(self):
         try:
@@ -547,6 +568,9 @@ class TrnscrbApp(rumps.App):
         self._live_thread.start()
 
         source = "system audio + mic" if self._recorder.system_audio_active else "built-in mic"
+        # Ground truth from the actual capture attempt (permission may have
+        # just been granted or revoked) — keep the published state current.
+        self._publish_app_state(system_audio_active=self._recorder.system_audio_active)
         _log.info(
             "Recording started: meeting=%s device=%s",
             meeting_name or "(unnamed)",
