@@ -323,10 +323,28 @@ class Recorder:
     # ── helpers ─────────────────────────────────────────────────────────────
 
     def _start_system_audio(self) -> None:
-        """Try to add ScreenCaptureKit system audio; fall back to mic-only."""
+        """Try to add ScreenCaptureKit system audio; fall back to mic-only.
+
+        Prefers the bundled sck-capture helper: it carries Trnscrb.app's code
+        identity, so the Screen Recording grant is scoped to this app instead
+        of to the Python interpreter (see trnscrb/sck_helper.py).
+        """
         self._system_audio_active = False
         if not self.capture_system_audio:
             return
+
+        from trnscrb.sck_helper import HelperCapture
+
+        if HelperCapture.available():
+            capture = HelperCapture(self._on_system_chunk)
+            try:
+                capture.start()
+                self._system_capture = capture
+                self._system_audio_active = True
+                return
+            except Exception as e:
+                _log.warning("Bundled capture helper unavailable (%s); trying in-process", e)
+
         from trnscrb.system_audio import SystemAudioCapture
 
         if not SystemAudioCapture.is_supported():
@@ -462,7 +480,17 @@ class Recorder:
 
     @staticmethod
     def system_audio_available() -> bool:
-        """True if ScreenCaptureKit system audio capture can run right now."""
+        """True if system audio capture can run right now.
+
+        Asks the bundled helper first — it is the process that actually needs
+        the permission, so only its answer is meaningful.
+        """
+        from trnscrb.sck_helper import has_permission as helper_permission
+
+        granted = helper_permission()
+        if granted is not None:
+            return granted
+
         from trnscrb.system_audio import SystemAudioCapture
 
         return SystemAudioCapture.is_supported() and SystemAudioCapture.has_permission()

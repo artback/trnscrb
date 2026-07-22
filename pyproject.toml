@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trnscrb"
-version = "0.18.0"
+version = "0.19.0"
 description = "Offline meeting transcription for macOS — auto-detects meetings, transcribes locally with Parakeet or Whisper, saves to Claude Desktop via MCP"
 readme = "README.md"
 license = "MIT"
@@ -60,6 +60,11 @@ trnscrb = "trnscrb.cli:cli"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["trnscrb*"]
+
+[tool.setuptools.package-data]
+# The Swift capture helper is compiled into the app bundle at install time,
+# so its source must ship inside the package.
+trnscrb = ["helper/*.swift"]
 
 [tool.ruff]
 # Must match requires-python: with py314 the formatter emits PEP 758 except

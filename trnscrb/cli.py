@@ -116,10 +116,15 @@ def install(force: bool):
         + ("" if sa_source == "app" else " — checked from this terminal"),
     )
     if not sa_ok:
+        from trnscrb.sck_helper import helper_path
         from trnscrb.system_audio import SystemAudioCapture
 
         if not SystemAudioCapture.is_supported():
             click.echo("  Requires macOS 13+ — recording will use the microphone only.")
+        elif helper_path() is None:
+            click.echo("  The bundled capture helper is missing, so only the microphone can")
+            click.echo("  be recorded. It is built by `trnscrb install` and needs Swift")
+            click.echo("  (xcode-select --install), then re-run this command.")
         elif sa_source == "terminal":
             click.echo("  The app isn't running, so only this terminal's permission could be")
             click.echo("  checked. Grant 'Trnscrb' under System Settings → Privacy & Security →")
