@@ -29,7 +29,13 @@ BUNDLE_ID = "io.trnscrb.app"
 # bundles (launcher behavior, icon, plist capabilities). Each bump replaces
 # the installed bundle → new ad-hoc signature → the user must re-grant
 # Screen Recording once. Routine releases must NOT bump this.
-_LAUNCHER_VERSION = 5  # v5: reverted embedded interpreter (crashed under launchd)
+_LAUNCHER_VERSION = 6  # v6: bundled sck-capture helper (scoped Screen Recording)
+
+# Swift capture helper — the only process that touches ScreenCaptureKit, so
+# the Screen Recording grant belongs to Trnscrb rather than to the Python
+# interpreter. See trnscrb/sck_helper.py for why this indirection exists.
+HELPER_NAME = "sck-capture"
+_HELPER_SOURCE = Path(__file__).parent / "helper" / "sck_capture.swift"
 
 _LAUNCHER_C = """\
 #include <signal.h>
@@ -145,6 +151,38 @@ def _build_launcher(target: str, dest: Path) -> str:
     return "script"
 
 
+def build_helper(dest: Path) -> bool:
+    """Compile the Swift capture helper into the bundle. False if unavailable.
+
+    Without it the app still records, just mic-only — so a missing Swift
+    toolchain degrades the feature rather than breaking the install.
+    """
+    swiftc = shutil.which("swiftc")
+    if swiftc is None:
+        _log.info("swiftc not available — system audio capture will be unavailable")
+        return False
+    if not _HELPER_SOURCE.exists():
+        _log.warning("Capture helper source missing at %s", _HELPER_SOURCE)
+        return False
+    try:
+        subprocess.run(
+            [swiftc, "-O", "-o", str(dest), str(_HELPER_SOURCE)],
+            check=True,
+            capture_output=True,
+            timeout=600,
+        )
+        dest.chmod(0o755)
+        _log.info("Built capture helper at %s", dest)
+        return True
+    except subprocess.CalledProcessError as e:
+        _log.warning(
+            "Capture helper build failed: %s", (e.stderr or b"").decode(errors="replace")[:400]
+        )
+    except Exception:
+        _log.warning("Capture helper build failed", exc_info=True)
+    return False
+
+
 def _codesign(bundle: Path) -> None:
     """Ad-hoc sign the finished bundle so TCC can persist grants for it.
 
@@ -157,7 +195,18 @@ def _codesign(bundle: Path) -> None:
     if not codesign:
         return
     try:
-        # No --deep: there is no nested code to sign, and --deep is deprecated.
+        # Nested binaries must be signed before the bundle that seals them.
+        # --identifier is required for the helper: TCC identifies it by the
+        # signing identifier, and it must match the app or the Screen
+        # Recording grant would land on a separate, nameless subject.
+        helper = bundle / "Contents" / "MacOS" / HELPER_NAME
+        if helper.exists():
+            subprocess.run(
+                [codesign, "--force", "--identifier", BUNDLE_ID, "--sign", "-", str(helper)],
+                check=True,
+                capture_output=True,
+                timeout=60,
+            )
         subprocess.run(
             [codesign, "--force", "--sign", "-", str(bundle)],
             check=True,
@@ -198,6 +247,9 @@ def build_bundle(dest: Path, trnscrb_binary: str) -> Path | None:
 
         with open(contents / "Info.plist", "wb") as f:
             plistlib.dump(_info_plist(__version__, has_icon=has_icon), f)
+
+        # Build the capture helper before signing so the seal covers it.
+        build_helper(macos_dir / HELPER_NAME)
 
         executable = macos_dir / "Trnscrb"
         executable.unlink(missing_ok=True)

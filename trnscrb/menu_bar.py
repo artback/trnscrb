@@ -228,13 +228,10 @@ class TrnscrbApp(rumps.App):
         """
         try:
             import trnscrb
-            from trnscrb.system_audio import SystemAudioCapture
 
             storage.write_app_state(
                 version=trnscrb.__version__,
-                system_audio_permission=(
-                    SystemAudioCapture.is_supported() and SystemAudioCapture.has_permission()
-                ),
+                system_audio_permission=rec_module.Recorder.system_audio_available(),
                 **extra,
             )
         except Exception:
