@@ -85,8 +85,48 @@ def set_live_session(
         _log.debug("Could not write live session file", exc_info=True)
 
 
+_BOOKMARKS_FILE = Path.home() / ".config" / "trnscrb" / "bookmarks.json"
+
+
 def clear_live_session() -> None:
     _LIVE_SESSION_FILE.unlink(missing_ok=True)
+    _BOOKMARKS_FILE.unlink(missing_ok=True)
+
+
+def add_bookmark(label: str = "") -> float | None:
+    """Mark the current moment of the running recording. Returns its offset.
+
+    None when nothing is recording. Deliberately keyed off the live session
+    rather than a hotkey, so marking a moment needs no Accessibility grant —
+    the menu item and `trnscrb bookmark` both land here.
+    """
+    import json
+
+    info = get_live_session_info()
+    if not info or not info.get("started_at"):
+        return None
+    try:
+        started = datetime.fromisoformat(info["started_at"])
+        offset = max(0.0, (datetime.now() - started).total_seconds())
+        marks = read_bookmarks()
+        marks.append({"at": offset, "label": label.strip()})
+        _BOOKMARKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _BOOKMARKS_FILE.write_text(json.dumps(marks))
+        _log.info("Bookmark at %.0fs%s", offset, f" — {label}" if label else "")
+        return offset
+    except Exception:
+        _log.warning("Could not add bookmark", exc_info=True)
+        return None
+
+
+def read_bookmarks() -> list[dict]:
+    import json
+
+    try:
+        marks = json.loads(_BOOKMARKS_FILE.read_text())
+        return marks if isinstance(marks, list) else []
+    except Exception:
+        return []
 
 
 def get_live_session_info() -> dict | None:
@@ -229,7 +269,14 @@ def read_transcript(transcript_id: str) -> str | None:
     return path.read_text(encoding="utf-8")
 
 
-def format_transcript(segments: list[dict], started_at: datetime, meeting_name: str) -> str:
+def format_transcript(
+    segments: list[dict],
+    started_at: datetime,
+    meeting_name: str,
+    bookmarks: list[dict] | None = None,
+) -> str:
+    from trnscrb import analytics
+
     if segments:
         duration = _fmt_time(segments[-1]["end"])
     else:
@@ -239,12 +286,38 @@ def format_transcript(segments: list[dict], started_at: datetime, meeting_name: 
         f"Meeting: {meeting_name}",
         f"Date:    {started_at.strftime('%Y-%m-%d %H:%M')}",
         f"Duration: {duration}",
-        "",
-        "=" * 60,
-        "",
     ]
+
+    summary = analytics.format_talk_time(analytics.talk_time(segments))
+    if summary:
+        lines += ["", summary]
+
+    marks = sorted(bookmarks or [], key=lambda m: m.get("at", 0))
+    if marks:
+        lines += ["", "Bookmarks:"]
+        for mark in marks:
+            label = str(mark.get("label") or "").strip()
+            lines.append(
+                f"  ⭐ {_fmt_time(float(mark.get('at', 0)))}" + (f"  {label}" if label else "")
+            )
+
+    lines += ["", "=" * 60, ""]
+
+    # Interleave bookmarks with the transcript so a marked moment is visible
+    # in context, not just in the header.
+    pending = list(marks)
     current_speaker = None
     for seg in segments:
+        start = float(seg.get("start") or 0)
+        while pending and float(pending[0].get("at", 0)) <= start:
+            mark = pending.pop(0)
+            label = str(mark.get("label") or "").strip()
+            lines.append("")
+            lines.append(
+                f"  ⭐ {_fmt_time(float(mark.get('at', 0)))}" + (f"  {label}" if label else "")
+            )
+            lines.append("")
+            current_speaker = None  # re-print the speaker after the marker
         speaker = seg.get("speaker") or "Unknown"
         if speaker != current_speaker:
             if current_speaker is not None:
@@ -252,6 +325,12 @@ def format_transcript(segments: list[dict], started_at: datetime, meeting_name: 
             lines.append(f"[{speaker}]")
             current_speaker = speaker
         lines.append(f"  {_fmt_time(seg['start'])}  {clean_filler_words(seg['text'])}")
+
+    for mark in pending:  # marks after the last spoken segment
+        label = str(mark.get("label") or "").strip()
+        lines.append(
+            f"  ⭐ {_fmt_time(float(mark.get('at', 0)))}" + (f"  {label}" if label else "")
+        )
 
     return "\n".join(lines)
 
