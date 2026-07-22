@@ -724,6 +724,12 @@ class TrnscrbApp(rumps.App):
         self._open_latest_item.title = "Open Latest"
         storage.clear_live_session()
 
+        # Keep the watcher in step: it only fires on_start on a fresh
+        # warming → recording transition, so without this a manual Stop leaves
+        # it stuck in `recording` and auto-record never triggers again.
+        if self._watcher:
+            self._watcher.notify_recording_stopped()
+
         self._process_thread = threading.Thread(
             target=self._process,
             args=(recorder, started_at, self._meeting_name, self._live_path),
@@ -734,7 +740,11 @@ class TrnscrbApp(rumps.App):
     # ── auto-record callbacks ─────────────────────────────────────────────────
 
     def _auto_start(self, meeting_name: str):
-        if getattr(self, "_current_state", "idle") in ("recording", "transcribing"):
+        # Guard on the recorder itself: the icon state can lag or be stale,
+        # and a missed start is worse than a redundant check.
+        if self._recorder and self._recorder.is_recording:
+            return
+        if getattr(self, "_current_state", "idle") == "transcribing":
             return
         self._do_start(meeting_name=meeting_name)
 

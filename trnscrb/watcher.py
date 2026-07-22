@@ -140,6 +140,11 @@ class MicWatcher:
         self._wake = threading.Event()
         self._listener: _MicActivityListener | None = None
         self._event_driven = False
+        # Set when the app stops a recording we did not stop ourselves.
+        self._reset_requested = threading.Event()
+        # True between an app-side stop and the end of that call, so a
+        # deliberate Stop is not immediately undone by auto-record.
+        self._suppressed = False
         self._last_output_app_check = 0.0  # throttles the muted-call osascript
         self._output_meeting_cached = False
 
@@ -150,6 +155,7 @@ class MicWatcher:
         self._state = "idle"
         self._since = None
         self._no_app_polls = 0
+        self._suppressed = False
         # Event-driven idle: CoreAudio wakes us on mic/device changes so the
         # idle loop doesn't have to poll every second. Falls back to polling.
         self._listener = _MicActivityListener(self._wake)
@@ -173,6 +179,18 @@ class MicWatcher:
     @property
     def state(self) -> str:
         return self._state
+
+    def notify_recording_stopped(self) -> None:
+        """Tell the watcher a recording ended by some route other than us.
+
+        on_start only fires on the warming → recording transition, so a
+        watcher left in `recording` after a manual Stop (or any app-side stop)
+        can never trigger auto-record again — auto-record silently dies until
+        the app restarts. Handled in the loop rather than here so state is
+        only mutated on the watcher thread.
+        """
+        self._reset_requested.set()
+        self._wake.set()
 
     def _call_activity(self) -> bool:
         """Mic in use, OR a meeting app playing audio while the mic is muted.
@@ -213,9 +231,31 @@ class MicWatcher:
         _app_running = False  # cached result of the last meeting-app check
 
         while self._running:
+            if self._reset_requested.is_set():
+                self._reset_requested.clear()
+                if self._state != "idle":
+                    _log.info("state %s → idle (recording stopped by the app)", self._state)
+                self._state = "idle"
+                self._since = None
+                self._rec_started = None
+                self._no_app_polls = 0
+                _app_counter = 0
+                _app_running = False
+                # Stopping mid-call is a deliberate act ("stop recording this
+                # meeting"), so don't re-arm until the call actually ends —
+                # otherwise auto-record would restart seconds later.
+                self._suppressed = True
+
             active = self._call_activity()
             now = datetime.now()
             elapsed = (now - self._since).total_seconds() if self._since else 0
+
+            if self._suppressed:
+                if active:
+                    time.sleep(POLL_SECS)
+                    continue
+                _log.debug("call ended — auto-record re-armed")
+                self._suppressed = False
 
             if self._state == "idle":
                 if active:
