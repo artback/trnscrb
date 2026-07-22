@@ -66,6 +66,9 @@ _DEFAULTS: dict = {
     # Empty string omits the flag (all tools allowed).
     "integrate_allowed_tools": "Read,Write,Edit,Glob,Grep",
     "live_on_battery": False,  # keep the live-transcription loop running on battery
+    # Cap on MLX's GPU buffer cache (MB). Unbounded it grows to several GB and
+    # is never returned; 0 disables the cap.
+    "mlx_cache_limit_mb": 512,
     "retention_audio_days": 30,  # delete preserved .wav files after N days (0 = keep)
     "retention_transcript_days": 0,  # delete transcripts after N days (0 = keep forever)
     "transcription_backend": "auto",  # auto | parakeet | whisper | voxtral | qwen3
