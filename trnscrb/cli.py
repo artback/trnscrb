@@ -1000,6 +1000,23 @@ def status():
 
 
 @cli.command()
+@click.argument("label", required=False, default="")
+def bookmark(label: str):
+    """Mark this moment in the running recording (optionally with a note).
+
+    Bind it to a hotkey via Raycast/Shortcuts for one-key marking — no
+    Accessibility permission needed, unlike a built-in global hotkey.
+    """
+    from trnscrb import storage
+
+    offset = storage.add_bookmark(label)
+    if offset is None:
+        raise click.ClickException("Nothing is recording right now.")
+    stamp = f"{int(offset) // 60:02d}:{int(offset) % 60:02d}"
+    click.echo(f"  ⭐ Bookmarked at {stamp}" + (f" — {label}" if label else ""))
+
+
+@cli.command()
 def devices():
     """List available audio input devices."""
     from trnscrb.recorder import Recorder

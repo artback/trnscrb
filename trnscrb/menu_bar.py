@@ -151,6 +151,7 @@ class TrnscrbApp(rumps.App):
         self._settings_item.add(self._model_item)
 
         self._open_latest_item = rumps.MenuItem("Open Latest", callback=self.open_latest)
+        self._bookmark_item = rumps.MenuItem("Bookmark This Moment", callback=self.add_bookmark)
 
         self.menu = [
             self._start_item,
@@ -158,6 +159,7 @@ class TrnscrbApp(rumps.App):
             None,
             self._auto_item,
             self._integrate_item,
+            self._bookmark_item,
             self._open_latest_item,
             self._settings_item,
             None,
@@ -284,6 +286,15 @@ class TrnscrbApp(rumps.App):
                 "Auto-transcribe on",
                 "Will start when mic is active for 5+ seconds",
             )
+
+    def add_bookmark(self, _):
+        """Mark the current moment so it can be found in the transcript."""
+        offset = storage.add_bookmark()
+        if offset is None:
+            _notify("Trnscrb", "No recording in progress", "Start a recording to bookmark it")
+            return
+        stamp = f"{int(offset) // 60:02d}:{int(offset) % 60:02d}"
+        _notify("Trnscrb", f"Bookmarked at {stamp}", self._meeting_name or "")
 
     def toggle_auto_integrate(self, sender):
         if get_setting("auto_integrate"):
@@ -692,7 +703,10 @@ class TrnscrbApp(rumps.App):
                             segments_acc.extend(new_segments)
                             transcribed_frames = end_frame
                             text = storage.format_transcript(
-                                segments_acc, self._started_at, self._meeting_name
+                                segments_acc,
+                                self._started_at,
+                                self._meeting_name,
+                                bookmarks=storage.read_bookmarks(),
                             )
                             text += "\n\n[Live — recording in progress…]\n"
                             if self._live_path:
@@ -719,6 +733,8 @@ class TrnscrbApp(rumps.App):
             self._set_state("transcribing")
 
         self._open_latest_item.title = "Open Latest"
+        # Read before clearing: clear_live_session drops the bookmarks too.
+        bookmarks = storage.read_bookmarks()
         storage.clear_live_session()
 
         # Keep the watcher in step: it only fires on_start on a fresh
@@ -729,7 +745,7 @@ class TrnscrbApp(rumps.App):
 
         self._process_thread = threading.Thread(
             target=self._process,
-            args=(recorder, started_at, self._meeting_name, self._live_path),
+            args=(recorder, started_at, self._meeting_name, self._live_path, bookmarks),
             daemon=True,
         )
         self._process_thread.start()
@@ -757,6 +773,7 @@ class TrnscrbApp(rumps.App):
         started_at: datetime,
         meeting_name: str = "",
         live_path: Path | None = None,
+        bookmarks: list[dict] | None = None,
     ):
         audio_path = None
         transcript_saved = False
@@ -796,7 +813,9 @@ class TrnscrbApp(rumps.App):
             if segments:
                 attribution.label_segments(segments, recorder.attribution_timeline())
 
-            text = storage.format_transcript(segments, started_at, meeting_name)
+            text = storage.format_transcript(
+                segments, started_at, meeting_name, bookmarks=bookmarks
+            )
             path = live_path or storage.get_transcript_path(meeting_name, started_at)
             storage.save_transcript(path, text)
             transcript_saved = True
