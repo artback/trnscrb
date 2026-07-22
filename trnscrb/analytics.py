@@ -98,6 +98,54 @@ def format_talk_time(stats: dict) -> str:
     return "\n".join(lines)
 
 
+# Below this share of speech a "meeting" is really an idle tab left open —
+# the classic case is a call that ended while the browser kept the mic warm.
+LOW_SPEECH_RATIO = 0.15
+
+
+def capture_health(
+    segments: list[dict],
+    recorded_secs: float,
+    system_audio: bool,
+) -> dict:
+    """Facts about how well a recording captured the meeting.
+
+    Silent failures (mic-only when both sides were expected, or an hour of an
+    empty tab) are indistinguishable from success until someone reads the
+    transcript — this puts them in the transcript itself.
+    """
+    speech = 0.0
+    for seg in segments:
+        try:
+            speech += max(0.0, float(seg["end"]) - float(seg["start"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    ratio = (speech / recorded_secs) if recorded_secs > 0 else 0.0
+    return {
+        "recorded": recorded_secs,
+        "speech": speech,
+        "speech_ratio": ratio,
+        "system_audio": bool(system_audio),
+        "mostly_silent": recorded_secs > 300 and ratio < LOW_SPEECH_RATIO,
+    }
+
+
+def format_capture_health(health: dict) -> str:
+    """One-line capture summary, plus a warning when the recording looks idle."""
+    if not health or not health.get("recorded"):
+        return ""
+    source = "mic + system audio" if health["system_audio"] else "microphone only"
+    line = (
+        f"Captured: {source} · {_fmt_duration(health['recorded'])} recorded · "
+        f"{_fmt_duration(health['speech'])} speech ({health['speech_ratio'] * 100:.0f}%)"
+    )
+    if not health["system_audio"]:
+        line += "\n  ⚠︎ Other participants were not captured — check Screen Recording permission."
+    if health.get("mostly_silent"):
+        line += "\n  ⚠︎ Mostly silence — the meeting may have ended while a tab stayed open."
+    return line
+
+
 def _fmt_duration(seconds: float) -> str:
     minutes, secs = divmod(int(seconds), 60)
     if minutes >= 60:

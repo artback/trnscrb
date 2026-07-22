@@ -26,6 +26,54 @@ _DOMINANCE = 2.0
 
 _DIARIZER_PLACEHOLDERS = (None, "", "Unknown")
 
+THEM = "Them"
+
+
+def name_from_calendar(segments: list[dict], event: dict | None) -> str | None:
+    """Rename "Them" to the other attendee when the meeting has exactly one.
+
+    A 1:1 is the common case and the calendar already tells us who it is, so
+    the transcript can say "Anna" instead of "Them" without any diarization
+    model. With more attendees we cannot tell voices apart, so the generic
+    label stays — a plausible-looking wrong name is worse than "Them".
+    """
+    if not event:
+        return None
+    attendees = [str(a).strip() for a in (event.get("attendees") or []) if str(a).strip()]
+    # Calendar lists the organiser/self too; anything but one counterpart is
+    # ambiguous.
+    others = [a for a in attendees if not _looks_like_self(a)]
+    if len(others) != 1:
+        return None
+    name = others[0]
+    renamed = 0
+    for seg in segments:
+        if seg.get("speaker") == THEM:
+            seg["speaker"] = name
+            renamed += 1
+    if renamed:
+        _log.info("Named %d segments after the other attendee (%s)", renamed, name)
+        return name
+    return None
+
+
+def _looks_like_self(attendee: str) -> bool:
+    """True if this attendee is probably the user running trnscrb."""
+    import getpass
+    import os
+
+    candidates = {
+        os.environ.get("USER", ""),
+        getpass.getuser(),
+        os.environ.get("TRNSCRB_USER_NAME", ""),
+    }
+    name = attendee.casefold()
+    for candidate in candidates:
+        candidate = candidate.strip().casefold()
+        if candidate and (candidate == name or candidate in name.split()):
+            return True
+    return False
+
 
 def label_segments(segments: list[dict], timeline) -> list[dict]:
     """Assign "Me"/"Them" speaker labels in place from the energy timeline.
