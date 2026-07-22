@@ -353,6 +353,51 @@ _transcribe_lock = threading.Lock()
 _inference_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="trnscrb-inference")
 
 
+# MLX keeps every GPU buffer it allocates in a cache that never shrinks on its
+# own. Unbounded, a background app ends up holding multiple GB of Metal memory
+# between meetings (observed: 7.3 GB of IOAccelerator after a few passes).
+_MLX_CACHE_LIMIT_MB = 512
+
+
+def _mlx() -> object | None:
+    """mlx.core if it is already imported — never import it just to trim."""
+    import sys
+
+    return sys.modules.get("mlx.core")
+
+
+def _bound_mlx_cache() -> None:
+    """Cap MLX's GPU buffer cache. Safe to call repeatedly."""
+    mx = _mlx()
+    if mx is None:
+        return
+    try:
+        configured = settings.get("mlx_cache_limit_mb")
+        # Explicit 0 means "leave MLX at its own default"; unset means ours.
+        limit = _MLX_CACHE_LIMIT_MB if configured is None else int(configured)
+        if limit > 0:
+            mx.set_cache_limit(limit * 1024 * 1024)
+    except Exception:
+        _log.debug("Could not set MLX cache limit", exc_info=True)
+
+
+def trim_mlx_cache() -> float:
+    """Release cached MLX GPU buffers. Returns MB freed (0 if MLX unused)."""
+    mx = _mlx()
+    if mx is None:
+        return 0.0
+    try:
+        before = mx.get_cache_memory()
+        mx.clear_cache()
+        freed = (before - mx.get_cache_memory()) / 1e6
+        if freed > 1:
+            _log.debug("Released %.0f MB of MLX GPU cache", freed)
+        return freed
+    except Exception:
+        _log.debug("Could not clear MLX cache", exc_info=True)
+        return 0.0
+
+
 def preload(backend: str | None = None) -> None:
     """Warm the configured backend's models on the shared inference thread."""
     backend = backend or _backend()
@@ -369,6 +414,7 @@ def preload(backend: str | None = None) -> None:
 
     with _transcribe_lock:
         _inference_executor.submit(_load).result()
+        _inference_executor.submit(_bound_mlx_cache).result()
     _log.info("Transcription model preloaded (%s)", backend)
 
 
@@ -389,6 +435,9 @@ def transcribe(audio_path: Path) -> list[dict]:
     backend = _backend()
     with _transcribe_lock:
         segments = _inference_executor.submit(_transcribe_on_worker, audio_path, backend).result()
+        # Hand back the GPU buffers this pass allocated; the models themselves
+        # stay loaded (they are released by unload_models when idle).
+        _inference_executor.submit(trim_mlx_cache).result()
     _log.info("Transcription complete: %d segments", len(segments))
     return segments
 
@@ -449,4 +498,7 @@ def unload_models() -> None:
             _qwen3_aligner = None
             _qwen3_model_id = None
     gc.collect()
-    _log.info("Transcription models unloaded")
+    # Model weights live in MLX's GPU cache too — drop them after the Python
+    # references are gone, or the memory stays held despite the unload.
+    freed = trim_mlx_cache()
+    _log.info("Transcription models unloaded (%.0f MB GPU cache released)", freed)
