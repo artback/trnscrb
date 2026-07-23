@@ -339,25 +339,23 @@ class MicWatcher:
                         self._no_app_polls = 0
 
             elif self._state == "cooling":
-                if active:
-                    # Mic came back — resume recording
-                    _log.debug("state %s → %s", "cooling", "recording")
-                    self._state = "recording"
-                    self._since = now
-                    self._no_app_polls = 0
-                    _app_counter = APP_POLL_EVERY
-                else:
-                    # Mic still off — check if meeting app is still running
-                    _app_counter += 1
-                    if _app_counter >= APP_POLL_EVERY:
-                        _app_counter = 0
-                        _app_running = is_meeting_app_running()
-                        if _app_running:
-                            # Meeting still active — user is muted, resume recording
-                            _log.debug("state %s → %s", "cooling", "recording")
-                            self._state = "recording"
-                            self._since = now
-                            self._no_app_polls = 0
+                # We reached cooling *because the meeting app/tab is gone*, so
+                # only a genuinely-present meeting should resume recording —
+                # NOT bare mic activity. trnscrb's own recorder holds the
+                # microphone the whole time it records, so is_mic_in_use() (and
+                # therefore `active`) is permanently true during a recording:
+                # resuming on it would make cooling → recording → cooling
+                # oscillate forever and the meeting would never auto-stop.
+                _app_counter += 1
+                if _app_counter >= APP_POLL_EVERY:
+                    _app_counter = 0
+                    _app_running = is_meeting_app_running()
+                    if _app_running:
+                        # Meeting genuinely came back (un-muted, tab refocused).
+                        _log.debug("state %s → %s", "cooling", "recording")
+                        self._state = "recording"
+                        self._since = now
+                        self._no_app_polls = 0
 
                 # Only stop if still in cooling (app check may have moved us back)
                 # and the grace period has elapsed.

@@ -126,6 +126,24 @@ class WatcherStateMachineTest(unittest.TestCase):
         self.assertEqual(stopped, 1, "Should have stopped exactly once")
         self.assertEqual(state, "idle")
 
+    def test_stops_when_app_gone_even_though_mic_stays_on(self):
+        """The real ghost-recording bug: trnscrb's own recorder holds the mic,
+        so is_mic_in_use() stays True for the whole recording. The meeting
+        ending (app gone) must still stop it — cooling must not bounce back to
+        recording just because the mic looks active."""
+        steps = (
+            # Warmup + recording: mic on, app running
+            [(True, True)] * 10
+            # Meeting ends but the mic is still held by our recorder
+            + [(True, False)] * 30
+            # …then the recorder releases the mic
+            + [(False, False)] * 10
+        )
+        started, stopped, state = self._simulate(steps)
+        self.assertEqual(started, 1)
+        self.assertEqual(stopped, 1, "must stop when the meeting is gone despite mic held")
+        self.assertEqual(state, "idle")
+
     def test_mute_does_not_split_recording(self):
         """Mic off while meeting app is still running should NOT stop recording."""
         steps = (
