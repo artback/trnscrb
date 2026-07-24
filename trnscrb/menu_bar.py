@@ -14,7 +14,7 @@ from pathlib import Path
 
 import rumps
 
-from trnscrb import attribution, diarizer, enricher, storage, transcriber
+from trnscrb import analytics, attribution, diarizer, enricher, storage, transcriber
 from trnscrb import recorder as rec_module
 from trnscrb.calendar_integration import get_current_or_upcoming_event
 from trnscrb.enricher import enrich_transcript
@@ -176,6 +176,7 @@ class TrnscrbApp(rumps.App):
         self._live_path: Path | None = None  # transcript written during recording
         self._live_thread: threading.Thread | None = None
         self._meeting_name: str = ""
+        self._calendar_event: dict | None = None  # captured at recording start
 
         self._set_state("idle")
         self._install_signal_handlers()
@@ -588,13 +589,15 @@ class TrnscrbApp(rumps.App):
     # ── shared start / stop ───────────────────────────────────────────────────
 
     def _do_start(self, meeting_name: str = ""):
-        # Blocking calls outside the lock to avoid deadlock
+        # Blocking calls outside the lock to avoid deadlock. Always look the
+        # event up: attendee names are used later to label the other speaker,
+        # and by the end of the meeting the calendar no longer returns it.
+        try:
+            self._calendar_event = get_current_or_upcoming_event()
+        except Exception:
+            self._calendar_event = None
         if not meeting_name:
-            try:
-                evt = get_current_or_upcoming_event()
-                meeting_name = evt["title"] if evt else ""
-            except Exception:
-                meeting_name = ""
+            meeting_name = (self._calendar_event or {}).get("title") or ""
         # Kick the model load now so it's ready before the first live pass.
         self._cancel_model_unload()
         threading.Thread(target=self._preload_model, daemon=True).start()
@@ -778,12 +781,16 @@ class TrnscrbApp(rumps.App):
         audio_path = None
         transcript_saved = False
         try:
+            # Read before stopping — stop() clears the capture state.
+            system_audio_used = recorder.system_audio_active
             audio_path = recorder.stop()
             if not audio_path:
                 _notify("Trnscrb", "Error", "No audio captured.")
                 return
 
-            evt = None
+            # Captured when the meeting started; by now the event may be over
+            # and no longer returned by the calendar.
+            evt = self._calendar_event
             if not meeting_name:
                 try:
                     evt = get_current_or_upcoming_event()
@@ -812,9 +819,24 @@ class TrnscrbApp(rumps.App):
 
             if segments:
                 attribution.label_segments(segments, recorder.attribution_timeline())
+                # A 1:1 can be named from the calendar; larger meetings stay
+                # generic rather than risk attaching the wrong name.
+                attribution.name_from_calendar(segments, evt)
+
+            health = analytics.capture_health(
+                segments,
+                recorded_secs=(datetime.now() - started_at).total_seconds(),
+                system_audio=system_audio_used,
+            )
+            if health.get("mostly_silent"):
+                _log.warning(
+                    "%s looks mostly silent (%.0f%% speech) — likely an idle tab",
+                    meeting_name,
+                    health["speech_ratio"] * 100,
+                )
 
             text = storage.format_transcript(
-                segments, started_at, meeting_name, bookmarks=bookmarks
+                segments, started_at, meeting_name, bookmarks=bookmarks, health=health
             )
             path = live_path or storage.get_transcript_path(meeting_name, started_at)
             storage.save_transcript(path, text)

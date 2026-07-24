@@ -274,6 +274,7 @@ def format_transcript(
     started_at: datetime,
     meeting_name: str,
     bookmarks: list[dict] | None = None,
+    health: dict | None = None,
 ) -> str:
     from trnscrb import analytics
 
@@ -287,6 +288,10 @@ def format_transcript(
         f"Date:    {started_at.strftime('%Y-%m-%d %H:%M')}",
         f"Duration: {duration}",
     ]
+
+    capture = analytics.format_capture_health(health or {})
+    if capture:
+        lines += ["", capture]
 
     summary = analytics.format_talk_time(analytics.talk_time(segments))
     if summary:
