@@ -1,0 +1,176 @@
+// Trnscrb.app main executable — launcher AND system-audio capturer in one.
+//
+// Why one binary: macOS attributes the Screen Recording permission to a
+// specific code identity. Ad-hoc signatures (no Apple Developer account) can
+// only pin that identity by cdhash, so two separate binaries — a launcher and
+// a capture helper — are two distinct TCC subjects, and a grant given to one
+// never covers the other. By making the bundle's SINGLE main executable also
+// the capturer, the binary the user grants in System Settings is exactly the
+// one that touches ScreenCaptureKit. One grant, one cdhash, stable across
+// releases (the baked launch target is the version-independent opt path).
+//
+// Modes:
+//   (default)        launcher — spawn `TARGET start` (the Python app), forward
+//                    signals, propagate its exit code
+//   --sck-capture    stream raw 16 kHz mono float32 PCM from system audio to
+//                    stdout until SIGTERM/SIGINT
+//   --check          exit 0 if Screen Recording is permitted, else 1
+//   --request        prompt for Screen Recording (first time only)
+//
+// @LAUNCH_TARGET@ is substituted at build time with the trnscrb entrypoint.
+
+import AVFoundation
+import CoreGraphics
+import Foundation
+import ScreenCaptureKit
+
+let launchTarget = "@LAUNCH_TARGET@"
+let sampleRate = 16_000
+let channelCount = 1
+
+// MARK: - Launcher mode
+
+func runLauncher() -> Never {
+    var child: pid_t = 0
+    var argv: [UnsafeMutablePointer<CChar>?] = [
+        strdup(launchTarget), strdup("start"), nil,
+    ]
+    setenv("TRNSCRB_IN_BUNDLE", "1", 1)
+
+    // Forward termination to the child so a launchd stop / logout stops the
+    // Python app cleanly (its signal handler saves the recording).
+    forwardSignal(SIGTERM, to: &childHolder)
+    forwardSignal(SIGINT, to: &childHolder)
+
+    let rc = posix_spawn(&child, launchTarget, nil, nil, &argv, environ)
+    if rc != 0 { exit(1) }
+    childHolder.pid = child
+
+    var status: Int32 = 0
+    while waitpid(child, &status, 0) < 0 && errno == EINTR {}
+    if status & 0x7f == 0 { exit((status >> 8) & 0xff) }  // WIFEXITED → WEXITSTATUS
+    exit(128)
+}
+
+// A tiny box so the C signal handler can reach the child pid.
+final class ChildHolder { var pid: pid_t = 0 }
+var childHolder = ChildHolder()
+
+func forwardSignal(_ sig: Int32, to holder: inout ChildHolder) {
+    signal(sig) { s in
+        if childHolder.pid > 0 { kill(childHolder.pid, s) }
+    }
+}
+
+// MARK: - Capture mode
+
+@available(macOS 13.0, *)
+final class AudioCapture: NSObject, SCStreamDelegate, SCStreamOutput {
+    private var stream: SCStream?
+    private let stdout = FileHandle.standardOutput
+
+    func start() async throws {
+        guard CGPreflightScreenCaptureAccess() else {
+            throw NSError(
+                domain: "trnscrb", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Screen Recording permission not granted"])
+        }
+        let content = try await SCShareableContent.excludingDesktopWindows(
+            false, onScreenWindowsOnly: false)
+        guard let display = content.displays.first else {
+            throw NSError(
+                domain: "trnscrb", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "No display available"])
+        }
+
+        let config = SCStreamConfiguration()
+        config.capturesAudio = true
+        config.sampleRate = sampleRate
+        config.channelCount = channelCount
+        config.excludesCurrentProcessAudio = true
+        config.width = 2
+        config.height = 2
+        config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+        config.showsCursor = false
+
+        let filter = SCContentFilter(display: display, excludingWindows: [])
+        let newStream = SCStream(filter: filter, configuration: config, delegate: self)
+        try newStream.addStreamOutput(
+            self, type: .audio, sampleHandlerQueue: DispatchQueue(label: "trnscrb.sck"))
+        try await newStream.startCapture()
+        stream = newStream
+        FileHandle.standardError.write("READY\n".data(using: .utf8)!)
+    }
+
+    func stop() async {
+        guard let stream else { return }
+        self.stream = nil
+        try? await stream.stopCapture()
+    }
+
+    func stream(
+        _ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
+        of type: SCStreamOutputType
+    ) {
+        guard type == .audio, sampleBuffer.isValid else { return }
+        guard let block = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
+        var length = 0
+        var pointer: UnsafeMutablePointer<Int8>?
+        let status = CMBlockBufferGetDataPointer(
+            block, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &length,
+            dataPointerOut: &pointer)
+        guard status == kCMBlockBufferNoErr, let bytes = pointer, length > 0 else { return }
+        do {
+            try stdout.write(contentsOf: Data(bytes: bytes, count: length))
+        } catch {
+            exit(0)  // Python closed the pipe
+        }
+    }
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        FileHandle.standardError.write(
+            "ERROR: stream stopped: \(error.localizedDescription)\n".data(using: .utf8)!)
+        exit(3)
+    }
+}
+
+func runCapture() -> Never {
+    guard #available(macOS 13.0, *) else {
+        FileHandle.standardError.write("ERROR: requires macOS 13+\n".data(using: .utf8)!)
+        exit(2)
+    }
+    let capture = AudioCapture()
+    var sources: [DispatchSourceSignal] = []
+    for sig in [SIGTERM, SIGINT] {
+        signal(sig, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+        source.setEventHandler { Task { await capture.stop(); exit(0) } }
+        source.resume()
+        sources.append(source)
+    }
+    Task {
+        do {
+            try await capture.start()
+        } catch {
+            FileHandle.standardError.write(
+                "ERROR: \(error.localizedDescription)\n".data(using: .utf8)!)
+            exit(1)
+        }
+    }
+    RunLoop.main.run()
+    exit(0)
+}
+
+// MARK: - Entry point
+
+let args = CommandLine.arguments
+if args.contains("--check") {
+    exit(CGPreflightScreenCaptureAccess() ? 0 : 1)
+}
+if args.contains("--request") {
+    exit(CGRequestScreenCaptureAccess() ? 0 : 1)
+}
+if args.contains("--sck-capture") {
+    runCapture()
+}
+runLauncher()

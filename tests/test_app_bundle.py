@@ -24,11 +24,17 @@ class AppBundleTest(unittest.TestCase):
         icon_patch.start()
         self.addCleanup(icon_patch.stop)
 
-        # A fake trnscrb binary that records how it was invoked, then exits 7.
+        # A fake trnscrb entrypoint the main executable execs directly. It must
+        # be a Python-shebang script so _python_script passes it through
+        # unchanged (a shell shebang is treated as a brew wrapper and swapped).
         self.target = self.root / "trnscrb"
         self.record = self.root / "invoked.txt"
         self.target.write_text(
-            f'#!/bin/sh\necho "$1 bundle=$TRNSCRB_IN_BUNDLE" > "{self.record}"\nexit 7\n'
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            f"open({str(self.record)!r}, 'w').write("
+            "sys.argv[1] + ' bundle=' + os.environ.get('TRNSCRB_IN_BUNDLE', ''))\n"
+            "sys.exit(7)\n"
         )
         self.target.chmod(0o755)
 
@@ -44,12 +50,22 @@ class AppBundleTest(unittest.TestCase):
         self.assertIn("NSMicrophoneUsageDescription", info)
         self.assertIn("NSAppleEventsUsageDescription", info)
 
-    @unittest.skipUnless(shutil.which("cc") or shutil.which("clang"), "needs a C compiler")
-    def test_launcher_spawns_target_and_propagates_exit_code(self):
+    @unittest.skipUnless(shutil.which("swiftc") or shutil.which("cc"), "needs swiftc or cc")
+    def test_main_executable_launches_target_and_propagates_exit_code(self):
         executable = app_bundle.ensure_bundle(str(self.target))
-        result = subprocess.run([str(executable)], timeout=30)
+        result = subprocess.run([str(executable)], timeout=90)
         self.assertEqual(result.returncode, 7, "child exit code must propagate")
         self.assertEqual(self.record.read_text().strip(), "start bundle=1")
+
+    @unittest.skipUnless(shutil.which("swiftc"), "needs swiftc")
+    def test_main_executable_is_single_binary_with_capture_flag(self):
+        """The one binary handles both launching and --sck-capture, so the
+        granted cdhash is the capturing cdhash. --check must not launch Python."""
+        executable = app_bundle.ensure_bundle(str(self.target))
+        self.assertFalse((executable.parent / "sck-capture").exists(), "no separate helper binary")
+        result = subprocess.run([str(executable), "--check"], timeout=30)
+        self.assertIn(result.returncode, (0, 1), "--check exits 0/1, does not launch")
+        self.assertFalse(self.record.exists(), "--check must not run the launch target")
 
     @unittest.skipUnless(shutil.which("codesign"), "needs codesign")
     def test_bundle_signature_seal_is_valid(self):
@@ -67,7 +83,9 @@ class AppBundleTest(unittest.TestCase):
         )
         self.assertEqual(verify.returncode, 0, f"sealed resource invalid: {verify.stderr.strip()}")
 
-    def test_script_fallback_without_compiler(self):
+    def test_script_fallback_without_any_compiler(self):
+        """No swiftc and no cc → launch-only shell stub; the app still runs
+        (mic-only), it just can't capture system audio."""
         with patch.object(app_bundle.shutil, "which", return_value=None):
             executable = app_bundle.ensure_bundle(str(self.target))
         self.assertIsNotNone(executable)

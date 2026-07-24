@@ -19,73 +19,80 @@ from trnscrb import app_bundle, sck_helper
 class HelperSourceTest(unittest.TestCase):
     def test_swift_source_ships_with_the_package(self):
         self.assertTrue(
-            app_bundle._HELPER_SOURCE.exists(),
-            f"helper source missing at {app_bundle._HELPER_SOURCE}",
+            app_bundle._APP_SOURCE.exists(),
+            f"unified app source missing at {app_bundle._APP_SOURCE}",
         )
 
     def test_source_declares_the_modes_python_relies_on(self):
-        src = app_bundle._HELPER_SOURCE.read_text()
+        src = app_bundle._APP_SOURCE.read_text()
         self.assertIn("--check", src)
+        self.assertIn("--sck-capture", src, "capture mode the recorder spawns")
+        self.assertIn("@LAUNCH_TARGET@", src, "launch target placeholder")
         self.assertIn("READY", src, "start-up handshake the Python side waits for")
 
 
-class BuildHelperTest(unittest.TestCase):
+class BuildMainExecutableTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.dest = Path(self._tmp.name) / "sck-capture"
+        self.dest = Path(self._tmp.name) / "Trnscrb"
 
-    def test_returns_false_without_swift(self):
+    def test_shell_fallback_without_any_compiler(self):
         with patch.object(app_bundle.shutil, "which", return_value=None):
-            self.assertFalse(app_bundle.build_helper(self.dest))
-        self.assertFalse(self.dest.exists())
-
-    def test_returns_false_when_source_missing(self):
-        with patch.object(app_bundle, "_HELPER_SOURCE", Path("/nonexistent.swift")):
-            self.assertFalse(app_bundle.build_helper(self.dest))
+            kind = app_bundle._build_main_executable("/usr/bin/true", self.dest)
+        self.assertEqual(kind, "script")
+        self.assertTrue(self.dest.exists())
 
     @unittest.skipUnless(shutil.which("swiftc"), "needs the Swift toolchain")
-    def test_compiles_a_working_helper(self):
-        self.assertTrue(app_bundle.build_helper(self.dest))
+    def test_swift_build_produces_capture_capable_binary(self):
+        kind = app_bundle._build_main_executable("/usr/bin/true", self.dest)
+        self.assertEqual(kind, "swift")
         self.assertTrue(os.access(self.dest, os.X_OK))
-        # --check answers about permission and must never hang or crash.
+        # --check answers about permission and must never hang or launch.
         result = subprocess.run([str(self.dest), "--check"], timeout=60)
         self.assertIn(result.returncode, (0, 1))
 
+    @unittest.skipUnless(shutil.which("swiftc"), "needs the Swift toolchain")
+    def test_launch_target_is_baked_in(self):
+        app_bundle._build_main_executable("/opt/homebrew/opt/trnscrb/x", self.dest)
+        self.assertIn(b"/opt/homebrew/opt/trnscrb/x", self.dest.read_bytes())
+
 
 class BundleIncludesHelperTest(unittest.TestCase):
-    """A missing or wrongly-signed helper silently costs system audio."""
+    """The single main executable is also the capturer; a missing Swift
+    toolchain silently costs system audio but must not break the install."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
         self.target = self.root / "trnscrb"
-        self.target.write_text("#!/bin/sh\nexit 0\n")
+        self.target.write_text("#!/usr/bin/env python3\nimport sys; sys.exit(0)\n")
         self.target.chmod(0o755)
         icon_patch = patch("trnscrb.app_icon.build_icns", return_value=False)
         icon_patch.start()
         self.addCleanup(icon_patch.stop)
 
     @unittest.skipUnless(shutil.which("swiftc"), "needs the Swift toolchain")
-    def test_bundle_contains_helper(self):
+    def test_bundle_has_single_executable_no_separate_helper(self):
         bundle = self.root / "Trnscrb.app"
         app_bundle.build_bundle(bundle, str(self.target))
-        helper = bundle / "Contents" / "MacOS" / app_bundle.HELPER_NAME
-        self.assertTrue(helper.exists(), "helper missing from the built bundle")
+        macos = bundle / "Contents" / "MacOS"
+        self.assertTrue((macos / "Trnscrb").exists())
+        self.assertFalse((macos / "sck-capture").exists(), "no separate helper binary")
 
     @unittest.skipUnless(
         shutil.which("swiftc") and shutil.which("codesign"), "needs Swift and codesign"
     )
-    def test_helper_carries_the_app_identity_and_seal_holds(self):
-        """TCC identifies the helper by its signing identifier — if it is not
-        the app's, the grant lands on a separate subject and never applies."""
+    def test_executable_carries_app_identity_and_seal_holds(self):
+        """The one granted cdhash is the one that captures. It must be signed
+        with the app identifier and the seal must verify."""
         bundle = self.root / "Trnscrb.app"
         app_bundle.build_bundle(bundle, str(self.target))
-        helper = bundle / "Contents" / "MacOS" / app_bundle.HELPER_NAME
+        exe = bundle / "Contents" / "MacOS" / "Trnscrb"
 
         info = subprocess.run(
-            ["codesign", "-dv", str(helper)], capture_output=True, text=True, timeout=60
+            ["codesign", "-dv", str(exe)], capture_output=True, text=True, timeout=60
         )
         self.assertIn(f"Identifier={app_bundle.BUNDLE_ID}", info.stderr)
 
@@ -97,13 +104,15 @@ class BundleIncludesHelperTest(unittest.TestCase):
         )
         self.assertEqual(verify.returncode, 0, f"seal broken: {verify.stderr.strip()}")
 
-    def test_missing_swift_still_produces_a_usable_bundle(self):
-        """No Swift toolchain must degrade to mic-only, not fail the install."""
+    def test_no_toolchain_still_produces_a_usable_bundle(self):
+        """No swiftc and no cc must degrade to a launch-only shell stub, not
+        fail the install — recording still works, mic-only."""
         bundle = self.root / "Trnscrb.app"
-        with patch.object(app_bundle, "build_helper", return_value=False):
+        with patch.object(app_bundle.shutil, "which", return_value=None):
             executable = app_bundle.build_bundle(bundle, str(self.target))
         self.assertIsNotNone(executable)
         self.assertTrue(executable.exists())
+        self.assertIn("#!/bin/sh", executable.read_text())
         info = plistlib.loads((bundle / "Contents" / "Info.plist").read_bytes())
         self.assertEqual(info["CFBundleIdentifier"], app_bundle.BUNDLE_ID)
 
@@ -126,6 +135,7 @@ class HelperDiscoveryTest(unittest.TestCase):
         macos = bundle / "Contents" / "MacOS"
         macos.mkdir(parents=True)
         (macos / app_bundle.HELPER_NAME).write_text("#!/bin/sh\nexit 0\n")
+        (macos / app_bundle.HELPER_NAME).chmod(0o755)
         with patch("trnscrb.app_bundle.bundle_path", lambda: bundle):
             self.assertEqual(sck_helper.helper_path(), macos / app_bundle.HELPER_NAME)
 

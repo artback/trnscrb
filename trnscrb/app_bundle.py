@@ -14,6 +14,7 @@ we fall back to a shell-script launcher, which still works but macOS may
 attribute prompts less cleanly.
 """
 
+import os
 import plistlib
 import shutil
 import subprocess
@@ -29,13 +30,15 @@ BUNDLE_ID = "io.trnscrb.app"
 # bundles (launcher behavior, icon, plist capabilities). Each bump replaces
 # the installed bundle → new ad-hoc signature → the user must re-grant
 # Screen Recording once. Routine releases must NOT bump this.
-_LAUNCHER_VERSION = 6  # v6: bundled sck-capture helper (scoped Screen Recording)
+_LAUNCHER_VERSION = 7  # v7: unified launcher+capturer (one cdhash, one grant)
 
-# Swift capture helper — the only process that touches ScreenCaptureKit, so
-# the Screen Recording grant belongs to Trnscrb rather than to the Python
-# interpreter. See trnscrb/sck_helper.py for why this indirection exists.
-HELPER_NAME = "sck-capture"
-_HELPER_SOURCE = Path(__file__).parent / "helper" / "sck_capture.swift"
+# The bundle's single main executable is BOTH the launcher and the
+# ScreenCaptureKit capturer (invoked with --sck-capture). One binary means one
+# code identity, so the grant the user gives the app is the exact cdhash that
+# captures — the only way an ad-hoc-signed app can share a Screen Recording
+# grant between launching and capturing. See trnscrb/sck_helper.py.
+HELPER_NAME = "Trnscrb"  # the main executable doubles as the capture helper
+_APP_SOURCE = Path(__file__).parent / "helper" / "trnscrb_app.swift.in"
 
 _LAUNCHER_C = """\
 #include <signal.h>
@@ -128,8 +131,69 @@ def _info_plist(version: str, has_icon: bool = False) -> dict:
     return plist
 
 
-def _build_launcher(target: str, dest: Path) -> str:
-    """Create the bundle's main executable. Returns 'compiled' or 'script'."""
+def _python_script(target: str) -> str:
+    """Resolve the launch target to a path the bundle can exec directly.
+
+    Homebrew's ``bin/trnscrb`` is a shell wrapper that sets PATH and execs the
+    venv console script; the unified binary execs its target directly, so use
+    the venv script (at the version-stable opt path, so the baked value — and
+    thus the binary's cdhash — is constant across releases).
+    """
+    try:
+        first_line = Path(target).read_text(errors="replace").splitlines()[0]
+    except (OSError, IndexError):
+        first_line = ""
+    if first_line.startswith("#!") and "python" not in first_line:
+        derived = _stable_path(os.path.join(sys.prefix, "bin", "trnscrb"))
+        if Path(derived).exists():
+            return derived
+    return target
+
+
+def _stable_path(path: str) -> str:
+    """Rewrite a versioned Homebrew Cellar path to its stable opt equivalent."""
+    parts = Path(path).parts
+    try:
+        i = parts.index("Cellar")
+    except ValueError:
+        return path
+    if len(parts) < i + 3:
+        return path
+    candidate = Path(*parts[:i], "opt", parts[i + 1], *parts[i + 3 :])
+    return str(candidate) if candidate.exists() else path
+
+
+def _build_main_executable(target: str, dest: Path) -> str:
+    """Build the bundle's main executable. Returns 'swift', 'compiled', or 'script'.
+
+    Prefers the unified Swift binary (launcher + capturer) so system audio
+    works; falls back to a launch-only C/shell stub when swiftc is absent
+    (recording still works, mic-only).
+    """
+    swiftc = shutil.which("swiftc")
+    if swiftc and _APP_SOURCE.exists():
+        src = dest.parent / "trnscrb_app.swift"
+        src.write_text(_APP_SOURCE.read_text().replace("@LAUNCH_TARGET@", target))
+        try:
+            subprocess.run(
+                [swiftc, "-O", "-o", str(dest), str(src)],
+                check=True,
+                capture_output=True,
+                timeout=600,
+            )
+            dest.chmod(0o755)
+            return "swift"
+        except subprocess.CalledProcessError as e:
+            _log.warning(
+                "Unified binary build failed (%s); falling back to launch-only",
+                (e.stderr or b"").decode(errors="replace")[:300],
+            )
+        except Exception:
+            _log.warning("Unified binary build failed; falling back to launch-only", exc_info=True)
+        finally:
+            src.unlink(missing_ok=True)
+
+    # Launch-only fallback: no system audio, but the app still runs.
     cc = shutil.which("cc") or shutil.which("clang")
     if cc:
         src = dest.parent / "launcher.c"
@@ -151,38 +215,6 @@ def _build_launcher(target: str, dest: Path) -> str:
     return "script"
 
 
-def build_helper(dest: Path) -> bool:
-    """Compile the Swift capture helper into the bundle. False if unavailable.
-
-    Without it the app still records, just mic-only — so a missing Swift
-    toolchain degrades the feature rather than breaking the install.
-    """
-    swiftc = shutil.which("swiftc")
-    if swiftc is None:
-        _log.info("swiftc not available — system audio capture will be unavailable")
-        return False
-    if not _HELPER_SOURCE.exists():
-        _log.warning("Capture helper source missing at %s", _HELPER_SOURCE)
-        return False
-    try:
-        subprocess.run(
-            [swiftc, "-O", "-o", str(dest), str(_HELPER_SOURCE)],
-            check=True,
-            capture_output=True,
-            timeout=600,
-        )
-        dest.chmod(0o755)
-        _log.info("Built capture helper at %s", dest)
-        return True
-    except subprocess.CalledProcessError as e:
-        _log.warning(
-            "Capture helper build failed: %s", (e.stderr or b"").decode(errors="replace")[:400]
-        )
-    except Exception:
-        _log.warning("Capture helper build failed", exc_info=True)
-    return False
-
-
 def _codesign(bundle: Path) -> None:
     """Ad-hoc sign the finished bundle so TCC can persist grants for it.
 
@@ -195,20 +227,10 @@ def _codesign(bundle: Path) -> None:
     if not codesign:
         return
     try:
-        # Nested binaries must be signed before the bundle that seals them.
-        # --identifier is required for the helper: TCC identifies it by the
-        # signing identifier, and it must match the app or the Screen
-        # Recording grant would land on a separate, nameless subject.
-        helper = bundle / "Contents" / "MacOS" / HELPER_NAME
-        if helper.exists():
-            subprocess.run(
-                [codesign, "--force", "--identifier", BUNDLE_ID, "--sign", "-", str(helper)],
-                check=True,
-                capture_output=True,
-                timeout=60,
-            )
+        # One binary, signed with the app identifier — the same cdhash the user
+        # grants and the same one that captures. No nested helper to sign.
         subprocess.run(
-            [codesign, "--force", "--sign", "-", str(bundle)],
+            [codesign, "--force", "--identifier", BUNDLE_ID, "--sign", "-", str(bundle)],
             check=True,
             capture_output=True,
             timeout=60,
@@ -248,12 +270,9 @@ def build_bundle(dest: Path, trnscrb_binary: str) -> Path | None:
         with open(contents / "Info.plist", "wb") as f:
             plistlib.dump(_info_plist(__version__, has_icon=has_icon), f)
 
-        # Build the capture helper before signing so the seal covers it.
-        build_helper(macos_dir / HELPER_NAME)
-
         executable = macos_dir / "Trnscrb"
         executable.unlink(missing_ok=True)
-        kind = _build_launcher(trnscrb_binary, executable)
+        kind = _build_main_executable(_python_script(trnscrb_binary), executable)
         # Every file must be in place BEFORE signing — codesign seals the
         # bundle's resources, and adding a file afterward invalidates the seal
         # ("a sealed resource is missing or invalid"), which stops macOS from
