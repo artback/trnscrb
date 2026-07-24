@@ -145,7 +145,7 @@ class HelperCapture:
         out_r, out_w = os.pipe()
         err_r, err_w = os.pipe()
         try:
-            self._pid = _spawn_disclaimed([str(helper)], out_w, err_w)
+            self._pid = _spawn_disclaimed([str(helper), "--sck-capture"], out_w, err_w)
         finally:
             os.close(out_w)
             os.close(err_w)
