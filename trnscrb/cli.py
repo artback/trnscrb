@@ -210,8 +210,14 @@ def install(force: bool):
     # Claude Desktop MCP — only offer if Claude Desktop is installed
     if _CLAUDE_CONFIG.parent.exists():
         mcp_ok = _mcp_configured()
-        _row("Claude Desktop integration", mcp_ok)
-        if not mcp_ok:
+        healthy = mcp_ok and _mcp_config_healthy()
+        _row("Claude Desktop integration", healthy)
+        if mcp_ok and not healthy:
+            # Configured, but the command path is dead (typically a stale
+            # ~/.local/bin path after moving to Homebrew) — repair silently.
+            _write_mcp_config()
+            click.echo("  Fixed a stale command path. Restart Claude Desktop to apply.")
+        elif not mcp_ok:
             if click.confirm("  Register trnscrb with Claude Desktop?", default=True):
                 _write_mcp_config()
                 click.echo(click.style("  Done. Restart Claude Desktop to apply.", fg="green"))
@@ -980,6 +986,13 @@ def status():
     )
     _row("ffmpeg", bool(_sh.which("ffmpeg")), "audio decoding")
     _row("HF token", bool(read_hf_token()), "optional — pyannote speaker labels")
+    if _CLAUDE_CONFIG.parent.exists() and _mcp_configured():
+        detail = (
+            "Claude Desktop"
+            if _mcp_config_healthy()
+            else "stale command path — run `trnscrb install`"
+        )
+        _row("MCP server", _mcp_config_healthy(), detail)
     click.echo()
 
     # Sort by the filename's date prefix, not mtime — maintenance passes
@@ -1110,6 +1123,30 @@ def _mcp_configured() -> bool:
         return "trnscrb" in config.get("mcpServers", {})
     except Exception:
         return False
+
+
+def _mcp_command_path() -> str | None:
+    """The command Claude Desktop is configured to spawn for trnscrb, if any."""
+    try:
+        config = json.loads(_CLAUDE_CONFIG.read_text())
+        return config["mcpServers"]["trnscrb"].get("command")
+    except Exception:
+        return None
+
+
+def _mcp_config_healthy() -> bool:
+    """True if the configured MCP command exists and is runnable.
+
+    A stale command path (e.g. a ~/.local/bin binary left behind after moving
+    to Homebrew) makes Claude Desktop spawn a missing executable, which it
+    reports as the server "disconnecting".
+    """
+    cmd = _mcp_command_path()
+    if not cmd:
+        return False
+    import os
+
+    return os.path.isfile(cmd) and os.access(cmd, os.X_OK)
 
 
 def _write_mcp_config():
