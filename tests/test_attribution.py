@@ -25,7 +25,7 @@ def _timeline(spec):
 
 class LabelSegmentsTest(unittest.TestCase):
     def test_mic_dominant_is_me(self):
-        timeline = _timeline([(0, 0.01, 0.0001), (1, 0.01, 0.0001)])
+        timeline = _timeline([(0, 0.01, 0.000001), (1, 0.01, 0.000001)])
         segments = [{"start": 0.0, "end": 2.0, "text": "hi", "speaker": None}]
         attribution.label_segments(segments, timeline)
         self.assertEqual(segments[0]["speaker"], "Me")
@@ -38,7 +38,7 @@ class LabelSegmentsTest(unittest.TestCase):
 
     def test_mic_dominance_overrides_diarizer_label(self):
         """The diarizer can't know which voice is the user — Me wins."""
-        timeline = _timeline([(0, 0.01, 0.0001)])
+        timeline = _timeline([(0, 0.01, 0.000001)])
         segments = [{"start": 0.0, "end": 1.0, "text": "hi", "speaker": "SPEAKER_00"}]
         attribution.label_segments(segments, timeline)
         self.assertEqual(segments[0]["speaker"], "Me")
@@ -56,11 +56,50 @@ class LabelSegmentsTest(unittest.TestCase):
         attribution.label_segments(segments, timeline)
         self.assertIsNone(segments[0]["speaker"])
 
-    def test_ambiguous_crosstalk_falls_back_to_louder_stream(self):
-        timeline = _timeline([(0, 0.010, 0.008)])  # close, below dominance factor
+    def test_speaker_bleed_is_them_not_me(self):
+        """On laptop speakers the mic re-captures the other person, often
+        louder than the system stream. Their speech must still be "Them":
+        the system stream can't carry the user's own voice."""
+        timeline = _timeline([(0, 0.020, 0.006)])  # mic louder (bleed), system = real speech
+        segments = [{"start": 0.0, "end": 1.0, "text": "hi", "speaker": None}]
+        attribution.label_segments(segments, timeline)
+        self.assertEqual(segments[0]["speaker"], "Them")
+
+    def test_bleed_over_a_whole_call_stays_them(self):
+        """Regression for the 4-minute bogus 'Me' monologue: a long stretch of
+        the other participant on speakers must not collapse into 'Me'."""
+        timeline = _timeline([(s, 0.03, 0.008) for s in range(60)])  # mic > system throughout
+        segments = [{"start": 0.0, "end": 60.0, "text": "long turn", "speaker": None}]
+        attribution.label_segments(segments, timeline)
+        self.assertEqual(segments[0]["speaker"], "Them")
+
+    def test_me_wins_only_when_system_is_quiet(self):
+        """The mic being loud is not enough — 'Me' requires the system stream
+        below the speech floor (others actually silent)."""
+        timeline = _timeline([(0, 0.020, 0.000001)])  # loud mic, system silent
         segments = [{"start": 0.0, "end": 1.0, "text": "hi", "speaker": None}]
         attribution.label_segments(segments, timeline)
         self.assertEqual(segments[0]["speaker"], "Me")
+
+    def test_quietly_captured_system_still_them(self):
+        """Headphones, no bleed, but the system-audio path is captured much
+        quieter than the mic. The other person's speech (system) must still be
+        "Them" even though the mic is orders of magnitude hotter — each stream
+        is judged against its own level, not the other's."""
+        timeline = _timeline(
+            [
+                (0, 0.02, 0.000001),  # Me: hot mic, system silent
+                (1, 0.000001, 0.0002),  # Them: mic silent, system quiet but present
+                (2, 0.02, 0.000001),  # Me again
+            ]
+        )
+        segments = [
+            {"start": 0.0, "end": 1.0, "text": "me", "speaker": None},
+            {"start": 1.0, "end": 2.0, "text": "them", "speaker": None},
+            {"start": 2.0, "end": 3.0, "text": "me", "speaker": None},
+        ]
+        attribution.label_segments(segments, timeline)
+        self.assertEqual([s["speaker"] for s in segments], ["Me", "Them", "Me"])
 
     def test_empty_timeline_is_noop(self):
         empty = (np.array([], dtype=np.int64), np.array([]), np.array([]))
