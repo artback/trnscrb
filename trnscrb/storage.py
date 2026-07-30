@@ -329,7 +329,7 @@ def format_transcript(
                 lines.append("")
             lines.append(f"[{speaker}]")
             current_speaker = speaker
-        lines.append(f"  {_fmt_time(seg['start'])}  {clean_filler_words(seg['text'])}")
+        lines.append(f"  {_fmt_time(seg['start'])}  {readable_text(seg['text'])}")
 
     for mark in pending:  # marks after the last spoken segment
         label = str(mark.get("label") or "").strip()
@@ -419,6 +419,129 @@ def clean_filler_words(text: str) -> str:
     cleaned = re.sub(r"[,\s]+$", "", cleaned)  # trailing commas/space
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
     return cleaned
+
+
+# Short function words the recogniser stutters on ("you you", "it it", "the
+# the"). These almost never repeat on purpose, so a single duplicate is already
+# an artifact and gets collapsed. Content words need three in a row before we
+# touch them, so deliberate emphasis ("very very good") survives.
+_STUTTER_WORDS = {
+    "i",
+    "you",
+    "it",
+    "the",
+    "a",
+    "an",
+    "to",
+    "and",
+    "that",
+    "we",
+    "they",
+    "he",
+    "she",
+    "is",
+    "was",
+    "of",
+    "in",
+    "on",
+    "so",
+    "but",
+    "or",
+    "our",
+    "my",
+    "your",
+    "this",
+    "these",
+    "there",
+    "their",
+    "be",
+    "do",
+    "did",
+    "have",
+    "has",
+    "just",
+    "like",
+    "well",
+    # Function-word contractions stutter the same way as their bare forms.
+    "it's",
+    "i'm",
+    "i've",
+    "that's",
+    "you're",
+    "we're",
+    "they're",
+    "there's",
+    "he's",
+    "she's",
+    "don't",
+    "doesn't",
+    "didn't",
+}
+
+
+def _norm_word(token: str) -> str:
+    """Lowercased word with surrounding punctuation stripped, for comparison."""
+    return re.sub(r"^\W+|\W+$", "", token).casefold()
+
+
+def collapse_repeats(text: str) -> str:
+    """Collapse the recogniser's stutter repetitions to make text readable.
+
+    Removes immediate word repeats ("you you you" → "you") and repeated
+    two-word phrases ("I think I think" → "I think"). Function words collapse
+    from the first duplicate; other words are left alone until a third
+    consecutive repeat, so intentional doubling is preserved. Punctuation and
+    original casing of the surviving token are kept.
+    """
+    tokens = text.split()
+    if len(tokens) < 2:
+        return text
+
+    # Pass 1: collapse a run of the same word. A stutter word keeps one copy; a
+    # content word keeps two (deliberate emphasis) unless repeated three+ times.
+    deduped: list[str] = []
+    i = 0
+    n = len(tokens)
+    while i < n:
+        word = _norm_word(tokens[i])
+        if not word:  # punctuation-only token — never a repeat
+            deduped.append(tokens[i])
+            i += 1
+            continue
+        j = i + 1
+        while j < n and _norm_word(tokens[j]) == word:
+            j += 1
+        run = tokens[i:j]
+        if len(run) == 1:
+            deduped.append(run[0])
+        else:
+            keep = 1 if (word in _STUTTER_WORDS or len(run) >= 3) else 2
+            deduped.extend(run[:keep])
+            # Don't lose sentence punctuation carried by a dropped copy.
+            tail = ""
+            for dropped in run[keep:]:
+                match = re.search(r"[.,;:!?…]+$", dropped)
+                if match:
+                    tail = match.group()
+            if tail and not re.search(r"[.,;:!?…]+$", deduped[-1]):
+                deduped[-1] += tail
+        i = j
+
+    # Pass 2: collapse an immediately repeated two-word phrase (a b a b → a b).
+    i = 0
+    while i + 3 < len(deduped):
+        a, b, c, d = (_norm_word(t) for t in deduped[i : i + 4])
+        if a and b and a == c and b == d:
+            del deduped[i + 2 : i + 4]  # keep the first pair; drop the echo
+        else:
+            i += 1
+
+    return " ".join(deduped)
+
+
+def readable_text(text: str) -> str:
+    """Full readability pass: strip fillers, then collapse stutter repeats."""
+    return collapse_repeats(clean_filler_words(text))
 
 
 def _fmt_time(seconds: float) -> str:
