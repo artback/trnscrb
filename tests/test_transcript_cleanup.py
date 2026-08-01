@@ -65,5 +65,23 @@ class ReadableTextTest(unittest.TestCase):
         self.assertNotIn("I I", out)
 
 
+class FillerDialBackTest(unittest.TestCase):
+    def test_strips_hesitation_sounds(self):
+        self.assertEqual(storage.clean_filler_words("um so uh yeah"), "so yeah")
+        self.assertEqual(storage.clean_filler_words("erm okay"), "okay")
+
+    def test_keeps_meaning_bearing_words(self):
+        # These were previously stripped and corrupted meaning — must survive now.
+        self.assertEqual(storage.clean_filler_words("I like it"), "I like it")
+        self.assertEqual(storage.clean_filler_words("turn right here"), "turn right here")
+        self.assertEqual(storage.clean_filler_words("it actually works"), "it actually works")
+        self.assertEqual(storage.clean_filler_words("kind of blue"), "kind of blue")
+
+    def test_you_know_i_mean_no_longer_eaten(self):
+        # The reported bug: this used to collapse to "what".
+        out = storage.readable_text("you know you know what I mean")
+        self.assertEqual(out, "you know what I mean")
+
+
 if __name__ == "__main__":
     unittest.main()

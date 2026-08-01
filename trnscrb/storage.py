@@ -347,8 +347,14 @@ def format_transcript(
     return "\n".join(lines)
 
 
+# Only unambiguous hesitation sounds are stripped. Discourse markers and hedges
+# ("like", "you know", "I mean", "actually", "right", "kind of", the foreign
+# "also"/"genau"/"bueno"/"voilà"…) are deliberately NOT here: deleting them
+# silently rewrites what people said — "I like it" → "I it", "turn right" →
+# "turn", "you know what I mean" → "what". The de-stutter pass already collapses
+# their repeated forms ("you know you know" → "you know").
 _FILLER_WORDS = {
-    # Universal / cross-language hesitation sounds
+    # Universal hesitation sounds — safe to drop in any language.
     "um",
     "uh",
     "uhm",
@@ -360,53 +366,9 @@ _FILLER_WORDS = {
     "hm",
     "mm",
     "mhm",
-    # English
-    "like",
-    "you know",
-    "I mean",
-    "sort of",
-    "kind of",
-    "basically",
-    "actually",
-    "right",
-    "so yeah",
-    # Swedish
-    "liksom",
-    "typ",
-    "alltså",
-    "asså",
-    "ba",
+    # Non-English hesitation sounds (not real words in their languages).
     "öh",
     "äh",
-    "ju",
-    "va",
-    "såhär",
-    "eller hur",
-    "på nåt sätt",
-    # Spanish
-    "pues",
-    "bueno",
-    "o sea",
-    "este",
-    "la verdad",
-    "en plan",
-    "digamos",
-    # German
-    "halt",
-    "also",
-    "quasi",
-    "sozusagen",
-    "eigentlich",
-    "na ja",
-    "genau",
-    # French
-    "genre",
-    "en fait",
-    "du coup",
-    "voilà",
-    "quoi",
-    "bah",
-    "ben",
     "euh",
 }
 
@@ -415,9 +377,11 @@ _FILLER_PATTERN = re.compile(rf"\b(?:{_filler_alts})\b", re.IGNORECASE)
 
 
 def clean_filler_words(text: str) -> str:
-    """Remove common filler words/phrases that clutter transcripts.
+    """Remove hesitation sounds (um, uh, erm, …) that clutter transcripts.
 
-    Supports English, Swedish, Spanish, German, and French fillers.
+    Only true hesitation noises are removed — meaning-bearing discourse markers
+    like "like", "you know", or "actually" are left intact so the transcript
+    still reflects what was actually said.
     """
     cleaned = _FILLER_PATTERN.sub("", text)
     # Collapse leftover punctuation artifacts and whitespace

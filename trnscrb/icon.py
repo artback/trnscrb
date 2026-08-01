@@ -6,6 +6,8 @@ Run once after install:
 Saves a 44x44 template PNG to ~/.local/share/trnscrb/mic.png
 """
 
+import os
+import tempfile
 from pathlib import Path
 
 ICON_DIR = Path.home() / ".local" / "share" / "trnscrb"
@@ -49,7 +51,17 @@ def _make_mic(path: Path, fill: tuple) -> None:
         color = (r, g, b, int(a * op))
         d.rounded_rectangle([x, y0, x + bar_w, y1], radius=bar_w // 2, fill=color)
 
-    img.save(str(path))
+    # Atomic write: render to a temp file in the same dir, then rename into
+    # place. The menu bar reads this PNG at launch; a torn read of a
+    # half-written file makes ImageIO SIGBUS-crash the app in a loop.
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".png")
+    os.close(fd)
+    try:
+        img.save(tmp)
+        os.replace(tmp, path)  # atomic on the same filesystem
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def icon_path(recording: bool = False) -> str | None:
