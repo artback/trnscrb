@@ -1029,6 +1029,43 @@ def bookmark(label: str):
     click.echo(f"  ⭐ Bookmarked at {stamp}" + (f" — {label}" if label else ""))
 
 
+def _running_app_pid() -> int | None:
+    """PID of the running menu-bar app, or None if it isn't running."""
+    import os
+
+    from trnscrb.single_instance import SingleInstance
+
+    pid = SingleInstance().holder_pid()
+    if not pid:
+        return None
+    try:
+        os.kill(pid, 0)  # probe liveness without signalling
+    except OSError:
+        return None
+    return pid
+
+
+@cli.command()
+def toggle():
+    """Start or stop recording in the running app.
+
+    Sends the app a signal to flip recording on/off. Bind it to a hotkey via
+    macOS Shortcuts or Raycast for one-key start/stop — no Accessibility or
+    Input-Monitoring permission needed, unlike a built-in global hotkey.
+    """
+    import os
+    import signal
+
+    pid = _running_app_pid()
+    if pid is None:
+        raise click.ClickException("Trnscrb isn't running. Start it first.")
+    try:
+        os.kill(pid, signal.SIGUSR1)
+    except OSError as e:
+        raise click.ClickException(f"Could not signal the app: {e}") from e
+    click.echo("  ⏺  Toggled recording (start/stop).")
+
+
 @cli.command()
 def devices():
     """List available audio input devices."""

@@ -601,9 +601,34 @@ class TrnscrbApp(rumps.App):
                 )
                 libdispatch.dispatch_resume(source)
                 self._signal_sources.append(source)  # keep refs alive
-            _log.debug("Signal handlers installed (SIGTERM, SIGINT)")
+
+            # SIGUSR1 toggles recording. `trnscrb toggle` sends it, so a hotkey
+            # bound via Shortcuts/Raycast can start/stop with no permission.
+            signal.signal(signal.SIGUSR1, signal.SIG_IGN)
+            toggle_source = libdispatch.dispatch_source_create(
+                libdispatch.DISPATCH_SOURCE_TYPE_SIGNAL,
+                signal.SIGUSR1,
+                0,
+                libdispatch.dispatch_get_main_queue(),
+            )
+            libdispatch.dispatch_source_set_event_handler(toggle_source, self._on_toggle_signal)
+            libdispatch.dispatch_resume(toggle_source)
+            self._signal_sources.append(toggle_source)
+            _log.debug("Signal handlers installed (SIGTERM, SIGINT, SIGUSR1)")
         except Exception:
             _log.warning("Could not install signal handlers", exc_info=True)
+
+    def _on_toggle_signal(self) -> None:
+        """Start or stop recording — invoked on the main queue by SIGUSR1."""
+        try:
+            if self._recorder and self._recorder.is_recording:
+                _log.info("SIGUSR1: stopping recording")
+                self.stop_recording(None)
+            else:
+                _log.info("SIGUSR1: starting recording")
+                self.start_recording(None)
+        except Exception:
+            _log.warning("Toggle signal handler failed", exc_info=True)
 
     # ── shared start / stop ───────────────────────────────────────────────────
 
