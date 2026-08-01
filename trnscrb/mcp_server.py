@@ -22,7 +22,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from trnscrb import diarizer, storage, transcriber
+from trnscrb import diarizer, glossary, storage, transcriber
 from trnscrb import recorder as rec_module
 from trnscrb.calendar_integration import get_current_or_upcoming_event
 from trnscrb.log import get_logger
@@ -337,6 +337,93 @@ def enrich_transcript(transcript_id: str) -> str:
         storage.save_transcript(path, updated)
 
     return result["enrichment"]
+
+
+@mcp.tool()
+def list_glossary() -> str:
+    """
+    Show the custom work vocabulary the transcriber applies to every meeting.
+
+    Each entry is a canonical term plus any aliases (common mis-hearings that
+    get rewritten to it).
+    """
+    entries = glossary.load()
+    if not entries:
+        return (
+            "The glossary is empty. Add terms with add_glossary_terms or add_glossary_correction."
+        )
+    lines = []
+    for entry in entries:
+        aliases = ", ".join(entry["aliases"])
+        lines.append(f"{entry['term']}" + (f"  (aliases: {aliases})" if aliases else ""))
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def add_glossary_terms(terms: list[str]) -> str:
+    """
+    Add canonical terms to the work glossary so transcripts spell them right.
+
+    Use this for product names, project names, acronyms, and jargon
+    (e.g. ["Hivenet", "Kubernetes", "pyannote"]). For a specific mis-hearing,
+    use add_glossary_correction instead.
+
+    Args:
+        terms: Correctly-spelled terms to add.
+    """
+    if not terms:
+        return "No terms given."
+    updated = glossary.add_terms(list(terms))
+    return f"Glossary now has {len(updated)} term(s). Added: {', '.join(terms)}"
+
+
+@mcp.tool()
+def add_glossary_correction(misheard: str, correct: str) -> str:
+    """
+    Teach the transcriber that a mis-heard phrase should become a term.
+
+    Use this when you see the recogniser consistently mangle a term — e.g.
+    misheard="high vnet", correct="Hivenet". The correction is applied to every
+    future transcript (and the term is added if new).
+
+    Args:
+        misheard: The wrong text as it appears in transcripts.
+        correct: The canonical term it should be rewritten to.
+    """
+    misheard = str(misheard).strip()
+    correct = str(correct).strip()
+    if not misheard or not correct:
+        return "Both 'misheard' and 'correct' are required."
+    glossary.add_terms([{"term": correct, "aliases": [misheard]}])
+    return f'Will rewrite "{misheard}" → "{correct}" in future transcripts.'
+
+
+@mcp.tool()
+def remove_glossary_term(term: str) -> str:
+    """
+    Remove a term (and its aliases) from the glossary.
+
+    Args:
+        term: The canonical term to remove (case-insensitive).
+    """
+    removed = glossary.remove_term(term)
+    return f"Removed '{term}'." if removed else f"'{term}' was not in the glossary."
+
+
+@mcp.tool()
+def suggest_glossary_terms() -> str:
+    """
+    Propose candidate glossary terms found in recent transcripts.
+
+    Scans the latest transcripts for recurring capitalised words and acronyms
+    that aren't already in the glossary — likely domain jargon. Review the list
+    and add the real terms with add_glossary_terms.
+    """
+    suggestions = glossary.suggest_from_transcripts()
+    if not suggestions:
+        return "No new candidate terms found in recent transcripts."
+    lines = [f"{s['candidate']}  (seen {s['count']}×)" for s in suggestions]
+    return "Candidate terms (add the real ones with add_glossary_terms):\n" + "\n".join(lines)
 
 
 # ── Background processing ─────────────────────────────────────────────────────

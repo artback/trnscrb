@@ -1289,3 +1289,50 @@ def _setup_login_item(binary_path: str) -> bool:
         return True
     except Exception:
         return False
+
+
+@cli.group()
+def glossary():
+    """View and edit the custom vocabulary the transcriber applies."""
+
+
+@glossary.command(name="list")
+def glossary_list():
+    """Show all glossary terms and their aliases."""
+    from trnscrb import glossary as g
+
+    entries = g.load()
+    if not entries:
+        click.echo("Glossary is empty. Add a term with `trnscrb glossary add <term>`.")
+        return
+    for entry in entries:
+        aliases = ", ".join(entry["aliases"])
+        click.echo(entry["term"] + (f"  (aliases: {aliases})" if aliases else ""))
+
+
+@glossary.command(name="add")
+@click.argument("term")
+@click.option(
+    "--alias",
+    "aliases",
+    multiple=True,
+    help="A mis-heard spelling to rewrite to TERM (repeatable).",
+)
+def glossary_add(term, aliases):
+    """Add TERM (with optional --alias mishearings) to the glossary."""
+    from trnscrb import glossary as g
+
+    entries = g.add_terms([{"term": term, "aliases": list(aliases)}])
+    click.echo(f"Added '{term}'. Glossary now has {len(entries)} term(s).")
+
+
+@glossary.command(name="remove")
+@click.argument("term")
+def glossary_remove(term):
+    """Remove TERM from the glossary."""
+    from trnscrb import glossary as g
+
+    if g.remove_term(term):
+        click.echo(f"Removed '{term}'.")
+    else:
+        click.echo(f"'{term}' was not in the glossary.")

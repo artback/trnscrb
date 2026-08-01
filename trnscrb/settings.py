@@ -78,6 +78,9 @@ _DEFAULTS: dict = {
     "parakeet_model_id": "mlx-community/parakeet-tdt-0.6b-v3",
     "qwen3_model_id": "Qwen/Qwen3-ASR-0.6B",  # ~1.2 GB; Qwen3-ASR-1.7B for more accuracy
     "model_size": "small",  # whisper model size (used when backend=whisper)
+    # Also nudge near-spelling tokens onto a glossary term (in addition to exact
+    # alias replacement). Off leaves everything but explicit aliases untouched.
+    "glossary_fuzzy": True,
     # Diarization pipeline; falls back to pyannote/speaker-diarization-3.1
     "diarization_pipeline": "pyannote/speaker-diarization-community-1",
     "enrich": {
