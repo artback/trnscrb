@@ -84,6 +84,7 @@ def install(force: bool):
         "mlx_qwen3_asr": "mlx-qwen3-asr>=0.3.5",
         "faster_whisper": "faster-whisper>=1.0.0",
         "pyannote.audio": "pyannote.audio>=3.1",
+        "sentence_transformers": "sentence-transformers>=3.0",
         "mcp": "mcp>=1.0.0",
         "anthropic": "anthropic>=0.25",
         "openai": "openai>=2.24.0",
@@ -477,11 +478,21 @@ def list_cmd():
 @cli.command()
 @click.argument("query")
 @click.option("-n", "--context", default=1, help="Number of context lines around each match.")
-def search(query: str, context: int):
-    """Search across all transcripts for a keyword or phrase."""
+@click.option(
+    "-s",
+    "--semantic",
+    is_flag=True,
+    help="Search by meaning (on-device embeddings) instead of exact keywords.",
+)
+def search(query: str, context: int, semantic: bool):
+    """Search across all transcripts for a keyword or phrase (or by meaning)."""
     import re
 
     from trnscrb import storage
+
+    if semantic:
+        _semantic_search(query)
+        return
 
     files = sorted(storage.NOTES_DIR.glob("*.txt"), reverse=True)
     if not files:
@@ -527,6 +538,27 @@ def search(query: str, context: int):
         click.echo(f"\n{total_matches} match(es) across {len(files)} transcript(s).")
     else:
         click.echo(f"No matches for '{query}'.")
+
+
+def _semantic_search(query: str) -> None:
+    from trnscrb import semantic_search as sem
+
+    if not sem.available():
+        raise click.ClickException(
+            "Semantic search needs `sentence-transformers`. Reinstall/upgrade trnscrb, "
+            "or use plain keyword search (drop --semantic)."
+        )
+    click.echo("  Indexing (first run downloads a ~90 MB model)…")
+    hits = sem.search(query, k=8)
+    if not hits:
+        click.echo(f"No relevant passages for '{query}'.")
+        return
+    for h in hits:
+        loc = (
+            f"{h['transcript_id']} @ {h['timestamp']}" if h.get("timestamp") else h["transcript_id"]
+        )
+        click.echo(click.style(f"\n[{h['score']:.2f}]  {loc}", fg="cyan", bold=True))
+        click.echo(f"  {h['text']}")
 
 
 # ── show ──────────────────────────────────────────────────────────────────────
