@@ -20,8 +20,9 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 
+import trnscrb
 from trnscrb import diarizer, glossary, storage, transcriber
 from trnscrb import recorder as rec_module
 from trnscrb.calendar_integration import get_current_or_upcoming_event
@@ -29,7 +30,7 @@ from trnscrb.log import get_logger
 
 _log = get_logger("trnscrb.mcp_server")
 
-mcp = FastMCP("trnscrb")
+mcp = MCPServer("trnscrb", version=trnscrb.__version__)
 
 # ── Shared state ──────────────────────────────────────────────────────────────
 _recorder: rec_module.Recorder | None = None
