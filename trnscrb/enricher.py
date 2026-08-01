@@ -412,6 +412,49 @@ def enrich_transcript(
     }
 
 
+def summary_block(enrichment: str) -> str:
+    """The reader-facing part of an enrichment: SUMMARY + ACTION ITEMS.
+
+    Drops the SPEAKER MAPPING section (an internal instruction to the model,
+    not something to show at the top of a transcript).
+    """
+    lines = []
+    for line in enrichment.splitlines():
+        if line.strip().startswith("SPEAKER MAPPING:"):
+            break
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def summarize_for_auto(
+    transcript_text: str, calendar_event: Optional[dict] = None
+) -> Optional[dict]:
+    """Enrich for the automatic post-call summary, or return None if unavailable.
+
+    Tries the user's configured provider first. If that fails and the `claude`
+    CLI is on PATH, retries through it — so anyone with Claude Code installed
+    gets summaries with zero configuration. Never raises: a missing or
+    unreachable LLM simply means no summary, not a failed meeting.
+    """
+    import shutil
+
+    configured, _ = get_active_provider_config()
+    attempts = [configured]
+    if configured != "claude_code" and shutil.which("claude"):
+        attempts.append("claude_code")
+
+    last_error: Exception | None = None
+    for provider in attempts:
+        try:
+            return enrich_transcript(transcript_text, calendar_event, provider=provider)
+        except Exception as exc:  # noqa: BLE001 - any provider failure falls through
+            last_error = exc
+            _log.debug("Auto-summary via %s failed: %s", provider, exc)
+    if last_error is not None:
+        _log.info("Auto-summary skipped — no working provider (%s)", last_error)
+    return None
+
+
 def _parse_speaker_map(enrichment: str) -> dict:
     speaker_map = {}
     in_section = False

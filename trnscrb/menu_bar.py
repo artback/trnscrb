@@ -17,7 +17,6 @@ import rumps
 from trnscrb import analytics, attribution, diarizer, enricher, storage, transcriber
 from trnscrb import recorder as rec_module
 from trnscrb.calendar_integration import get_current_or_upcoming_event
-from trnscrb.enricher import enrich_transcript
 from trnscrb.icon import generate_icons, icon_path
 from trnscrb.log import get_logger
 from trnscrb.recorder import cleanup_stale_temp_files
@@ -131,6 +130,9 @@ class TrnscrbApp(rumps.App):
         self._start_item = rumps.MenuItem("Start Transcribing", callback=self.start_recording)
         self._stop_item = rumps.MenuItem("Stop Transcribing", callback=None)
         self._auto_item = rumps.MenuItem("Auto-transcribe: Off", callback=self.toggle_auto_record)
+        self._summary_item = rumps.MenuItem(
+            "Meeting summary: Off", callback=self.toggle_auto_summary
+        )
         self._integrate_item = rumps.MenuItem(
             "Auto-integrate notes: Off", callback=self.toggle_auto_integrate
         )
@@ -158,6 +160,7 @@ class TrnscrbApp(rumps.App):
             self._stop_item,
             None,
             self._auto_item,
+            self._summary_item,
             self._integrate_item,
             self._bookmark_item,
             self._open_latest_item,
@@ -184,6 +187,8 @@ class TrnscrbApp(rumps.App):
         if get_setting("auto_record"):
             self._start_watcher()
             self._auto_item.title = "Auto-transcribe: On ✓"
+        if get_setting("auto_enrich"):
+            self._summary_item.title = "Meeting summary: On ✓"
         if get_setting("auto_integrate"):
             self._integrate_item.title = "Auto-integrate notes: On ✓"
         self._refresh_enrich_settings_menu()
@@ -296,6 +301,20 @@ class TrnscrbApp(rumps.App):
             return
         stamp = f"{int(offset) // 60:02d}:{int(offset) % 60:02d}"
         _notify("Trnscrb", f"Bookmarked at {stamp}", self._meeting_name or "")
+
+    def toggle_auto_summary(self, sender):
+        if get_setting("auto_enrich"):
+            put_setting("auto_enrich", False)
+            sender.title = "Meeting summary: Off"
+            _notify("Trnscrb", "Meeting summary off", "")
+        else:
+            put_setting("auto_enrich", True)
+            sender.title = "Meeting summary: On ✓"
+            if _find_claude_cli():
+                msg = "Summary + action items added to each transcript"
+            else:
+                msg = "Needs the Claude CLI or a configured LLM provider"
+            _notify("Trnscrb", "Meeting summary on", msg)
 
     def toggle_auto_integrate(self, sender):
         if get_setting("auto_integrate"):
@@ -844,28 +863,33 @@ class TrnscrbApp(rumps.App):
             _log.info("Transcription complete: %s -> %s", meeting_name, path.name)
             _notify("Trnscrb", f"Saved: {meeting_name}", f"~/meeting-notes/{path.name}")
 
-            # Auto-enrich if enabled
-            if get_setting("auto_enrich"):
-                try:
-                    _log.info("Auto-enriching: %s", meeting_name)
-                    calendar_event = evt if evt else None
-                    result = enrich_transcript(text, calendar_event=calendar_event)
-                    enriched = result["enriched_transcript"]
-                    updated = enriched + "\n\n" + "=" * 60 + "\n\n" + result["enrichment"]
-                    storage.save_transcript(path, updated)
-                    _log.info(
-                        "Auto-enrich complete: %s (provider=%s)",
-                        meeting_name,
-                        result["provider"],
-                    )
-                    _notify(
-                        "Trnscrb",
-                        f"Enriched: {meeting_name}",
-                        "Summary + action items added",
-                    )
-                except Exception as e:
-                    _log.warning("Auto-enrich failed for %s: %s", meeting_name, e)
-                    _notify("Trnscrb", "Enrichment skipped", str(e)[:180])
+            # Auto-summary: prepend a summary + action items to the top of the
+            # transcript. Best-effort — a missing LLM just means no summary.
+            if get_setting("auto_enrich") and segments:
+                _log.info("Auto-summarizing: %s", meeting_name)
+                result = enricher.summarize_for_auto(text, calendar_event=evt or None)
+                if result:
+                    block = enricher.summary_block(result["enrichment"])
+                    if block:
+                        text = storage.format_transcript(
+                            segments,
+                            started_at,
+                            meeting_name,
+                            bookmarks=bookmarks,
+                            health=health,
+                            ai_summary=block,
+                        )
+                        storage.save_transcript(path, text)
+                        _log.info(
+                            "Auto-summary added: %s (provider=%s)",
+                            meeting_name,
+                            result["provider"],
+                        )
+                        _notify(
+                            "Trnscrb",
+                            f"Summary added: {meeting_name}",
+                            "Summary + action items at the top",
+                        )
 
             # Auto-integrate into notes via Claude Code (after enrich, so the
             # CLI sees the final transcript content)

@@ -275,6 +275,7 @@ def format_transcript(
     meeting_name: str,
     bookmarks: list[dict] | None = None,
     health: dict | None = None,
+    ai_summary: str | None = None,
 ) -> str:
     from trnscrb import analytics
 
@@ -288,6 +289,12 @@ def format_transcript(
         f"Date:    {started_at.strftime('%Y-%m-%d %H:%M')}",
         f"Duration: {duration}",
     ]
+
+    # The AI summary + action items go first — it's what you read before the
+    # blow-by-blow transcript.
+    block = (ai_summary or "").strip()
+    if block:
+        lines += ["", block]
 
     capture = analytics.format_capture_health(health or {})
     if capture:
