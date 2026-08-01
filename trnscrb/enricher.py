@@ -91,12 +91,16 @@ Transcript:
 {transcript}
 
 Provide:
-1. A brief summary (2-3 sentences)
-2. Action items with owner names if identifiable
-3. Inferred speaker names — if speakers appear as SPEAKER_00, SPEAKER_01 etc., \
+1. A short title (3-6 words, no quotes) naming what the meeting was about
+2. A brief summary (2-3 sentences)
+3. Action items with owner names if identifiable
+4. Inferred speaker names — if speakers appear as SPEAKER_00, SPEAKER_01 etc., \
 infer their names or roles from the conversation
 
 Respond in exactly this format:
+
+TITLE:
+<3-6 word title>
 
 SUMMARY:
 <summary here>
@@ -415,15 +419,33 @@ def enrich_transcript(
 def summary_block(enrichment: str) -> str:
     """The reader-facing part of an enrichment: SUMMARY + ACTION ITEMS.
 
-    Drops the SPEAKER MAPPING section (an internal instruction to the model,
-    not something to show at the top of a transcript).
+    Drops the leading TITLE line (it becomes the meeting name/filename) and the
+    trailing SPEAKER MAPPING section (an internal instruction to the model) —
+    neither belongs in the block shown at the top of a transcript.
     """
-    lines = []
-    for line in enrichment.splitlines():
-        if line.strip().startswith("SPEAKER MAPPING:"):
+    lines = enrichment.splitlines()
+    started = False
+    out = []
+    for line in lines:
+        stripped = line.strip()
+        if not started:
+            if stripped.startswith("SUMMARY:"):
+                started = True
+            else:
+                continue  # skip TITLE and any preamble before SUMMARY
+        if stripped.startswith("SPEAKER MAPPING:"):
             break
-        lines.append(line)
-    return "\n".join(lines).strip()
+        out.append(line)
+    result = "\n".join(out).strip()
+    # Fall back to the old behaviour if the model omitted the SUMMARY header.
+    if not result:
+        cut = []
+        for line in lines:
+            if line.strip().startswith("SPEAKER MAPPING:"):
+                break
+            cut.append(line)
+        result = "\n".join(cut).strip()
+    return result
 
 
 def summarize_for_auto(

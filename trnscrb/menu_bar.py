@@ -14,7 +14,7 @@ from pathlib import Path
 
 import rumps
 
-from trnscrb import analytics, attribution, diarizer, enricher, storage, transcriber
+from trnscrb import analytics, attribution, diarizer, enricher, storage, titles, transcriber
 from trnscrb import recorder as rec_module
 from trnscrb.calendar_integration import get_current_or_upcoming_event
 from trnscrb.icon import generate_icons, icon_path
@@ -865,31 +865,49 @@ class TrnscrbApp(rumps.App):
 
             # Auto-summary: prepend a summary + action items to the top of the
             # transcript. Best-effort — a missing LLM just means no summary.
+            summary_block = None
+            enrichment = None
             if get_setting("auto_enrich") and segments:
                 _log.info("Auto-summarizing: %s", meeting_name)
                 result = enricher.summarize_for_auto(text, calendar_event=evt or None)
                 if result:
-                    block = enricher.summary_block(result["enrichment"])
-                    if block:
-                        text = storage.format_transcript(
-                            segments,
-                            started_at,
-                            meeting_name,
-                            bookmarks=bookmarks,
-                            health=health,
-                            ai_summary=block,
-                        )
-                        storage.save_transcript(path, text)
+                    enrichment = result["enrichment"]
+                    summary_block = enricher.summary_block(enrichment) or None
+                    if summary_block:
                         _log.info(
-                            "Auto-summary added: %s (provider=%s)",
-                            meeting_name,
-                            result["provider"],
+                            "Auto-summary added: %s (provider=%s)", meeting_name, result["provider"]
                         )
-                        _notify(
-                            "Trnscrb",
-                            f"Summary added: {meeting_name}",
-                            "Summary + action items at the top",
-                        )
+
+            # Give generically-named (non-calendar) meetings a content title,
+            # from the summary model if it ran, else a keyword heuristic.
+            if titles.is_generic(meeting_name):
+                new_title = titles.from_enrichment(enrichment) or titles.local(segments)
+                if new_title:
+                    meeting_name = new_title
+                    _log.info("Derived meeting title: %s", new_title)
+
+            # Rewrite once if the summary or the new title changed anything,
+            # renaming the file when the title yields a new path.
+            final_path = storage.get_transcript_path(meeting_name, started_at)
+            if summary_block or final_path != path:
+                text = storage.format_transcript(
+                    segments,
+                    started_at,
+                    meeting_name,
+                    bookmarks=bookmarks,
+                    health=health,
+                    ai_summary=summary_block,
+                )
+                storage.save_transcript(final_path, text)
+                if final_path != path:
+                    path.unlink(missing_ok=True)  # drop the provisional file
+                    path = final_path
+                if summary_block:
+                    _notify(
+                        "Trnscrb",
+                        f"Summary added: {meeting_name}",
+                        "Summary + action items at the top",
+                    )
 
             # Auto-integrate into notes via Claude Code (after enrich, so the
             # CLI sees the final transcript content)
