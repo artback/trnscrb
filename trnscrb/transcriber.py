@@ -89,12 +89,15 @@ def _get_parakeet_model():
 
 
 def _transcribe_whisper(audio_path: Path) -> list[dict]:
+    from trnscrb import glossary
+
     model = _get_whisper_model()
     segments, _info = model.transcribe(
         str(audio_path),
         beam_size=5,
         vad_filter=True,  # skip silent gaps automatically
         language=None,  # auto-detect
+        hotwords=glossary.whisper_hotwords(),  # bias toward the work glossary
     )
     results = []
     for seg in segments:
@@ -438,8 +441,25 @@ def transcribe(audio_path: Path) -> list[dict]:
         # Hand back the GPU buffers this pass allocated; the models themselves
         # stay loaded (they are released by unload_models when idle).
         _inference_executor.submit(trim_mlx_cache).result()
+    _apply_glossary(segments)
     _log.info("Transcription complete: %d segments", len(segments))
     return segments
+
+
+def _apply_glossary(segments: list[dict]) -> None:
+    """Rewrite each segment in place to use the custom vocabulary, if any.
+
+    Runs for every backend so the saved transcript carries your terminology
+    directly. Whisper is additionally biased at decode time (see
+    _transcribe_whisper); Parakeet has no such hook, so this is its only path.
+    """
+    from trnscrb import glossary
+
+    entries = glossary.load()
+    if not entries:
+        return
+    for seg in segments:
+        seg["text"] = glossary.correct(seg.get("text", ""), entries)
 
 
 def _transcribe_on_worker(audio_path: Path, backend: str) -> list[dict]:
