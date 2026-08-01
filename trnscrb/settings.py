@@ -57,7 +57,10 @@ _DEFAULT_INTEGRATE_PROMPT = (
 
 _DEFAULTS: dict = {
     "auto_record": True,  # start watching for mic activity on launch
-    "auto_enrich": False,  # run LLM enrichment automatically after transcription
+    # Prepend an LLM summary + action items to each transcript. On by default;
+    # no-op (silently) unless the `claude` CLI or a configured provider is
+    # reachable, so it never nags users without an LLM.
+    "auto_enrich": True,
     "auto_integrate": False,  # push transcripts into notes via the Claude Code CLI
     # Prompt for note integration; {transcript_path} is replaced with the
     # absolute path of the saved transcript.
