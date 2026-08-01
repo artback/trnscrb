@@ -25,6 +25,7 @@ from mcp.server import MCPServer
 import trnscrb
 from trnscrb import diarizer, glossary, storage, transcriber
 from trnscrb import recorder as rec_module
+from trnscrb import semantic_search as _semsearch
 from trnscrb.calendar_integration import get_current_or_upcoming_event
 from trnscrb.log import get_logger
 
@@ -425,6 +426,36 @@ def suggest_glossary_terms() -> str:
         return "No new candidate terms found in recent transcripts."
     lines = [f"{s['candidate']}  (seen {s['count']}×)" for s in suggestions]
     return "Candidate terms (add the real ones with add_glossary_terms):\n" + "\n".join(lines)
+
+
+@mcp.tool()
+def semantic_search(query: str, limit: int = 8) -> str:
+    """
+    Search all meeting transcripts by meaning, not just keywords.
+
+    Answers questions like "what did we decide about the cloud POC?" even when
+    the transcript uses different words. Runs entirely on-device. Returns the
+    most relevant passages with their transcript, date, and timestamp.
+
+    Args:
+        query: What to look for, in natural language.
+        limit: Max passages to return (default 8).
+    """
+    if not _semsearch.available():
+        return (
+            "Semantic search needs the `sentence-transformers` package, which "
+            "isn't installed. Falling back — use search_transcripts for keyword search."
+        )
+    hits = _semsearch.search(query, k=max(1, min(limit, 25)))
+    if not hits:
+        return "No relevant passages found."
+    lines = []
+    for h in hits:
+        loc = (
+            f"{h['transcript_id']} @ {h['timestamp']}" if h.get("timestamp") else h["transcript_id"]
+        )
+        lines.append(f"[{h['score']:.2f}] {loc}\n    {h['text']}")
+    return "\n\n".join(lines)
 
 
 # ── Background processing ─────────────────────────────────────────────────────
