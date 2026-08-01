@@ -14,7 +14,17 @@ from pathlib import Path
 
 import rumps
 
-from trnscrb import analytics, attribution, diarizer, enricher, storage, titles, transcriber
+from trnscrb import (
+    action_items,
+    analytics,
+    attribution,
+    diarizer,
+    enricher,
+    obsidian,
+    storage,
+    titles,
+    transcriber,
+)
 from trnscrb import recorder as rec_module
 from trnscrb.calendar_integration import get_current_or_upcoming_event
 from trnscrb.icon import generate_icons, icon_path
@@ -892,9 +902,17 @@ class TrnscrbApp(rumps.App):
             # transcript. Best-effort — a missing LLM just means no summary.
             summary_block = None
             enrichment = None
+            # Snapshot the user's open action items so the model can say which
+            # this meeting resolved (indices map back to this list).
+            track_items = bool(get_setting("track_action_items"))
+            open_snapshot = action_items.open_items() if track_items else []
             if get_setting("auto_enrich") and segments:
                 _log.info("Auto-summarizing: %s", meeting_name)
-                result = enricher.summarize_for_auto(text, calendar_event=evt or None)
+                result = enricher.summarize_for_auto(
+                    text,
+                    calendar_event=evt or None,
+                    open_items=[i["text"] for i in open_snapshot] or None,
+                )
                 if result:
                     enrichment = result["enrichment"]
                     summary_block = enricher.summary_block(enrichment) or None
@@ -933,6 +951,29 @@ class TrnscrbApp(rumps.App):
                         f"Summary added: {meeting_name}",
                         "Summary + action items at the top",
                     )
+
+            # Mirror the transcript into Obsidian and track the user's own action
+            # items (best-effort — never fail the meeting over this).
+            if track_items:
+                try:
+                    note = obsidian.mirror_transcript(meeting_name, started_at, text)
+                    if enrichment:
+                        stats = action_items.record_meeting(
+                            enrichment,
+                            open_snapshot,
+                            meeting_id=path.stem,
+                            meeting_title=meeting_name,
+                            note_name=note,
+                            when=started_at.strftime("%Y-%m-%d"),
+                        )
+                        if stats["added"] or stats["resolved"]:
+                            _notify(
+                                "Trnscrb",
+                                f"Action items: +{stats['added']}, {stats['resolved']} done",
+                                "Updated in Obsidian",
+                            )
+                except Exception:
+                    _log.warning("Action-item / Obsidian update failed", exc_info=True)
 
             # Auto-integrate into notes via Claude Code (after enrich, so the
             # CLI sees the final transcript content)
