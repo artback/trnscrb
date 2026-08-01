@@ -349,7 +349,9 @@ def list_glossary() -> str:
     """
     entries = glossary.load()
     if not entries:
-        return "The glossary is empty. Add terms with add_glossary_terms or add_glossary_correction."
+        return (
+            "The glossary is empty. Add terms with add_glossary_terms or add_glossary_correction."
+        )
     lines = []
     for entry in entries:
         aliases = ", ".join(entry["aliases"])
