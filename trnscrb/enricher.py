@@ -89,11 +89,12 @@ _PROMPT_TEMPLATE = """You are analyzing a meeting transcript.{context}
 
 Transcript:
 {transcript}
-
+{reconcile}
 Provide:
 1. A short title (3-6 words, no quotes) naming what the meeting was about
 2. A brief summary (2-3 sentences)
-3. Action items with owner names if identifiable
+3. Action items that the user — the speaker labelled "Me" — personally committed \
+to. Do NOT include tasks owned by other participants.
 4. Inferred speaker names — if speakers appear as SPEAKER_00, SPEAKER_01 etc., \
 infer their names or roles from the conversation
 
@@ -106,12 +107,12 @@ SUMMARY:
 <summary here>
 
 ACTION ITEMS:
-- <item> (Owner: <name or Unknown>)
+- <item> (Owner: Me)
 
 SPEAKER MAPPING:
 - SPEAKER_00 → <inferred name or "Participant 1">
 - SPEAKER_01 → <inferred name or "Participant 2">
-"""
+{resolved_format}"""
 
 PROVIDER_ORDER = (
     "claude_code",
@@ -385,8 +386,13 @@ def enrich_transcript(
     calendar_event: Optional[dict] = None,
     model: str | None = None,
     provider: str | None = None,
+    open_items: Optional[list] = None,
 ) -> dict:
-    """Return {enrichment, speaker_map, enriched_transcript, provider, model}."""
+    """Return {enrichment, speaker_map, enriched_transcript, provider, model}.
+
+    ``open_items`` are the user's outstanding action items (plain strings); when
+    given, the model is asked which this meeting resolved (a RESOLVED section).
+    """
     active_provider, config, adapter = _prepare_adapter(provider, model)
 
     context = ""
@@ -395,7 +401,22 @@ def enrich_transcript(
         if calendar_event.get("attendees"):
             context += f"\nKnown attendees: {', '.join(calendar_event['attendees'])}"
 
-    prompt = _PROMPT_TEMPLATE.format(context=context, transcript=transcript_text)
+    reconcile = ""
+    resolved_format = ""
+    if open_items:
+        listing = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(open_items))
+        reconcile = f"\nYour open action items from earlier meetings:\n{listing}\n"
+        resolved_format = (
+            "\n\nRESOLVED:\n<comma-separated numbers of the open items above that "
+            'THIS meeting completed, or "none">'
+        )
+
+    prompt = _PROMPT_TEMPLATE.format(
+        context=context,
+        transcript=transcript_text,
+        reconcile=reconcile,
+        resolved_format=resolved_format,
+    )
     _log.info("Enriching transcript with provider=%s model=%s", active_provider, config["model"])
     try:
         enrichment = adapter.enrich(prompt, config)
@@ -449,7 +470,9 @@ def summary_block(enrichment: str) -> str:
 
 
 def summarize_for_auto(
-    transcript_text: str, calendar_event: Optional[dict] = None
+    transcript_text: str,
+    calendar_event: Optional[dict] = None,
+    open_items: Optional[list] = None,
 ) -> Optional[dict]:
     """Enrich for the automatic post-call summary, or return None if unavailable.
 
@@ -468,7 +491,9 @@ def summarize_for_auto(
     last_error: Exception | None = None
     for provider in attempts:
         try:
-            return enrich_transcript(transcript_text, calendar_event, provider=provider)
+            return enrich_transcript(
+                transcript_text, calendar_event, provider=provider, open_items=open_items
+            )
         except Exception as exc:  # noqa: BLE001 - any provider failure falls through
             last_error = exc
             _log.debug("Auto-summary via %s failed: %s", provider, exc)

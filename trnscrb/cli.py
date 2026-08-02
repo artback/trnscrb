@@ -1061,6 +1061,35 @@ def bookmark(label: str):
     click.echo(f"  ⭐ Bookmarked at {stamp}" + (f" — {label}" if label else ""))
 
 
+@cli.command()
+@click.option("--all", "show_all", is_flag=True, help="Include completed items.")
+def tasks(show_all: bool):
+    """List your tracked action items across all meetings."""
+    from trnscrb import action_items
+
+    action_items.sync_from_obsidian()
+    items = action_items.load()
+    if not show_all:
+        items = [i for i in items if i.get("status") == "open"]
+    if not items:
+        click.echo("No open action items." if not show_all else "No action items yet.")
+        return
+    for i in items:
+        box = "[x]" if i.get("status") == "done" else "[ ]"
+        refs = ""
+        if i.get("jira"):
+            refs += click.style(f"  {', '.join(i['jira'])}", fg="magenta")
+        if i.get("github"):
+            refs += click.style("  gh", fg="blue")
+        meeting = i.get("meeting_title", "")
+        click.echo(
+            f"  {box} {i['text']}"
+            + click.style(f"  ({i['id']})", dim=True)
+            + refs
+            + (click.style(f"  — {meeting}", dim=True) if meeting else "")
+        )
+
+
 def _running_app_pid() -> int | None:
     """PID of the running menu-bar app, or None if it isn't running."""
     import os

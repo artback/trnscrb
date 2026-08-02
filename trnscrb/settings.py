@@ -83,6 +83,14 @@ _DEFAULTS: dict = {
     "glossary_fuzzy": True,
     # Diarization pipeline; falls back to pyannote/speaker-diarization-3.1
     "diarization_pipeline": "pyannote/speaker-diarization-community-1",
+    # Track the user's own action items across meetings and mirror transcripts
+    # + an action-items note into Obsidian. Needs a vault (auto-detected).
+    "track_action_items": True,
+    "obsidian_vault": "",  # empty → auto-detect from Obsidian's own config
+    "obsidian_subdir": "Meetings",  # subfolder inside the vault for trnscrb notes
+    # Your display name in meetings (e.g. "Jonathan"), used to tell which action
+    # items are yours. Empty falls back to the macOS username.
+    "user_name": "",
     "enrich": {
         "provider": "llama_cpp",
         "profiles": _DEFAULT_ENRICH_PROFILES,

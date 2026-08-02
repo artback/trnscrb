@@ -38,7 +38,7 @@ class SummarizeForAutoTest(unittest.TestCase):
     def test_falls_back_to_claude_cli_when_configured_provider_fails(self):
         calls = []
 
-        def fake_enrich(text, event, provider=None):
+        def fake_enrich(text, event, provider=None, open_items=None):
             calls.append(provider)
             if provider == "llama_cpp":
                 raise RuntimeError("connection refused")

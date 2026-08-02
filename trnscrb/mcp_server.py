@@ -23,7 +23,7 @@ from pathlib import Path
 from mcp.server import MCPServer
 
 import trnscrb
-from trnscrb import diarizer, glossary, storage, transcriber
+from trnscrb import action_items, diarizer, glossary, storage, transcriber
 from trnscrb import recorder as rec_module
 from trnscrb import semantic_search as _semsearch
 from trnscrb.calendar_integration import get_current_or_upcoming_event
@@ -456,6 +456,85 @@ def semantic_search(query: str, limit: int = 8) -> str:
         )
         lines.append(f"[{h['score']:.2f}] {loc}\n    {h['text']}")
     return "\n\n".join(lines)
+
+
+@mcp.tool()
+def list_action_items(status: str = "open") -> str:
+    """
+    List the user's tracked action items across all meetings.
+
+    These are the user's *own* commitments (tasks assigned to other people are
+    not tracked). Each line shows the item, owner, source meeting, any linked
+    Jira keys / GitHub URLs, and a short id for resolve_action_item /
+    link_action_item.
+
+    Args:
+        status: "open" (default), "done", or "all".
+    """
+    action_items.sync_from_obsidian()
+    items = action_items.load()
+    if status != "all":
+        items = [i for i in items if i.get("status") == status]
+    if not items:
+        return f"No {status} action items."
+    lines = []
+    for i in items:
+        refs = ""
+        if i.get("jira"):
+            refs += f"  jira={','.join(i['jira'])}"
+        if i.get("github"):
+            refs += f"  github={','.join(i['github'])}"
+        mark = "x" if i.get("status") == "done" else " "
+        lines.append(
+            f"[{mark}] ({i['id']}) {i['text']}  — {i.get('owner', 'Me')}"
+            f", from {i.get('meeting_title', '?')}{refs}"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def resolve_action_item(item_id: str, reason: str = "") -> str:
+    """
+    Mark one of the user's action items done (e.g. after its Jira ticket closed).
+
+    Args:
+        item_id: The short id from list_action_items.
+        reason: Optional note on how it was resolved.
+    """
+    return (
+        f"Resolved {item_id}."
+        if action_items.resolve(item_id, reason)
+        else f"No open action item with id {item_id}."
+    )
+
+
+@mcp.tool()
+def link_action_item(item_id: str, jira: str = "", github: str = "") -> str:
+    """
+    Attach a Jira key or GitHub URL to an action item (call after you create one).
+
+    Args:
+        item_id: The short id from list_action_items.
+        jira: A Jira issue key, e.g. "PROJ-123".
+        github: A GitHub issue/PR URL.
+    """
+    if not jira and not github:
+        return "Provide a jira key or a github url."
+    ok = action_items.link(item_id, jira=jira, github=github)
+    return f"Linked {item_id}." if ok else f"No action item with id {item_id}."
+
+
+@mcp.tool()
+def add_action_item(text: str, owner: str = "Me") -> str:
+    """
+    Add an action item to the user's tracked list.
+
+    Args:
+        text: The task.
+        owner: Defaults to "Me".
+    """
+    record = action_items.add(text, owner)
+    return f"Added ({record['id']})." if record else "Already tracked (or empty)."
 
 
 # ── Background processing ─────────────────────────────────────────────────────
