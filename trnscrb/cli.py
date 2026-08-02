@@ -1090,6 +1090,63 @@ def tasks(show_all: bool):
         )
 
 
+@cli.group()
+def config():
+    """Get or set trnscrb settings (e.g. `trnscrb config set user_name Jonathan`)."""
+
+
+@config.command(name="list")
+def config_list():
+    """Show all settable settings and their current values."""
+    from trnscrb import settings
+
+    current = settings.load()
+    for key in settings.scalar_keys():
+        click.echo(f"  {key} = {json.dumps(current.get(key, settings.default_for(key)))}")
+
+
+@config.command(name="get")
+@click.argument("key")
+def config_get(key):
+    """Print the current value of KEY."""
+    from trnscrb import settings
+
+    if key not in settings.scalar_keys():
+        raise click.ClickException(f"Unknown setting '{key}'. See `trnscrb config list`.")
+    click.echo(json.dumps(settings.get(key)))
+
+
+@config.command(name="set")
+@click.argument("key")
+@click.argument("value")
+def config_set(key, value):
+    """Set KEY to VALUE (type inferred from the setting's default)."""
+    from trnscrb import settings
+
+    if key not in settings.scalar_keys():
+        raise click.ClickException(f"Unknown setting '{key}'. See `trnscrb config list`.")
+    coerced = _coerce_setting(value, settings.default_for(key))
+    settings.put(key, coerced)
+    click.echo(f"  {key} = {json.dumps(coerced)}")
+
+
+def _coerce_setting(value: str, default):
+    """Coerce a CLI string to the type of the setting's default."""
+    if isinstance(default, bool):
+        low = value.strip().lower()
+        if low in ("true", "1", "yes", "on"):
+            return True
+        if low in ("false", "0", "no", "off"):
+            return False
+        raise click.ClickException(f"Expected a boolean (true/false), got '{value}'.")
+    if isinstance(default, int):
+        try:
+            return int(value)
+        except ValueError as e:
+            raise click.ClickException(f"Expected an integer, got '{value}'.") from e
+    return value
+
+
 def _running_app_pid() -> int | None:
     """PID of the running menu-bar app, or None if it isn't running."""
     import os

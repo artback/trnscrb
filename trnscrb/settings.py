@@ -132,6 +132,16 @@ def put(key: str, value) -> None:
     save(s)
 
 
+def scalar_keys() -> list[str]:
+    """Top-level settings holding a simple (non-dict) value — the CLI-settable ones."""
+    return [k for k, v in _DEFAULTS.items() if not isinstance(v, dict)]
+
+
+def default_for(key: str):
+    """The default value for ``key`` (used to infer its type), or None if unknown."""
+    return _DEFAULTS.get(key)
+
+
 def read_hf_token() -> str | None:
     """Read HuggingFace token from env or ~/.cache/huggingface/token."""
     import os
