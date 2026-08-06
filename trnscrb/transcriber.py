@@ -463,34 +463,30 @@ def _apply_glossary(segments: list[dict]) -> None:
 
 
 def _transcribe_on_worker(audio_path: Path, backend: str) -> list[dict]:
-    auto_routed = False
     if backend == "auto":
-        auto_routed = True
         lang = _detect_language(audio_path)
-        if lang == "en":
-            backend = "parakeet"
-            _log.info("Auto-routing to Parakeet (English detected)")
-        else:
-            backend = "qwen3"
-            _log.info("Auto-routing to Qwen3-ASR (%s detected)", lang)
+        backend = "parakeet" if lang == "en" else "qwen3"
+        _log.info("Auto-routing to %s (%s detected)", backend, lang)
     else:
         _log.debug("Using backend: %s", backend)
 
-    if backend == "parakeet":
-        return _transcribe_parakeet(audio_path)
-    if backend == "voxtral":
-        return _transcribe_voxtral(audio_path)
-    if backend == "qwen3":
-        if auto_routed:
-            # Auto mode must always produce a transcript — fall back to
-            # Whisper if Qwen3 is unavailable (e.g. model never downloaded).
-            try:
-                return _transcribe_qwen3(audio_path)
-            except Exception as e:
-                _log.warning("Qwen3 backend failed (%s); falling back to Whisper", e)
-                return _transcribe_whisper(audio_path)
-        return _transcribe_qwen3(audio_path)
-    return _transcribe_whisper(audio_path)
+    if backend == "whisper":
+        return _transcribe_whisper(audio_path)
+
+    runners = {
+        "parakeet": _transcribe_parakeet,
+        "voxtral": _transcribe_voxtral,
+        "qwen3": _transcribe_qwen3,
+    }
+    try:
+        return runners[backend](audio_path)
+    except Exception as e:
+        # Any configured backend can be unavailable — an uninstalled
+        # dependency, a model that was never downloaded. Whisper is bundled,
+        # so it can always answer. A fallback transcript beats losing the
+        # meeting to a preserved WAV nobody ever revisits.
+        _log.warning("%s backend failed (%s); falling back to Whisper", backend, e)
+        return _transcribe_whisper(audio_path)
 
 
 def unload_models() -> None:

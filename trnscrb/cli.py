@@ -918,53 +918,31 @@ def mic_status():
 @click.option("--name", "meeting_name", default="", help="Meeting name (default: from filename).")
 def transcribe_cmd(audio_file: Path, meeting_name: str):
     """Transcribe a WAV file (e.g. audio preserved after a failed transcription)."""
-    import re as _re
-
-    from trnscrb import diarizer, storage, transcriber
-    from trnscrb.settings import read_hf_token
-
-    _finalize_wav_header(audio_file)
-
-    # Preserved-audio filenames carry the original meeting name and time:
-    # 2026-07-20_09-52-03_meeting-0952.wav
-    started_at = datetime.fromtimestamp(audio_file.stat().st_mtime)
-    match = _re.match(
-        r"(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2}(?:-\d{2})?)_(.+?)(?:-recovered)?$",
-        audio_file.stem,
-    )
-    if match:
-        date_part, time_part, name_part = match.groups()
-        fmt = "%Y-%m-%d %H-%M-%S" if time_part.count("-") == 2 else "%Y-%m-%d %H-%M"
-        started_at = datetime.strptime(f"{date_part} {time_part}", fmt)
-        meeting_name = meeting_name or name_part
-    meeting_name = meeting_name or audio_file.stem
+    from trnscrb import backlog
 
     click.echo(f"Transcribing {audio_file.name} …")
-    segments = transcriber.transcribe(audio_file)
+    out, count = backlog.transcribe_file(audio_file, meeting_name)
+    click.echo(f"  ✓ {count} segments → {out}")
 
-    hf_token = read_hf_token()
-    if hf_token and segments:
+
+@cli.command(name="retry")
+def retry_cmd():
+    """Transcribe every preserved recording that has no transcript yet."""
+    from trnscrb import backlog, storage
+
+    pending = storage.pending_audio()
+    if not pending:
+        click.echo("Nothing pending — every preserved recording has a transcript.")
+        return
+
+    click.echo(f"{len(pending)} recording(s) waiting to be transcribed.\n")
+    for audio_file in pending:
+        click.echo(f"Transcribing {audio_file.name} …")
         try:
-            segments = diarizer.merge(segments, diarizer.diarize(audio_file, hf_token))
+            out, count = backlog.transcribe_file(audio_file)
+            click.echo(f"  ✓ {count} segments → {out.name}")
         except Exception as e:
-            click.echo(f"  ⚠  Speaker diarization skipped: {e}")
-
-    text = storage.format_transcript(segments, started_at, meeting_name)
-    out = storage.get_transcript_path(meeting_name, started_at)
-    storage.save_transcript(out, text)
-    click.echo(f"  ✓ {len(segments)} segments → {out}")
-
-
-def _finalize_wav_header(path: Path) -> None:
-    """Write a proper WAV header if a killed recorder left the placeholder."""
-    from trnscrb.recorder import SAMPLE_RATE, _wav_header
-
-    with open(path, "r+b") as f:
-        if f.read(4) == b"RIFF":
-            return
-        f.seek(0)
-        f.write(_wav_header(SAMPLE_RATE, 1, path.stat().st_size - 44))
-    click.echo("  (finalized interrupted WAV header)")
+            click.echo(click.style(f"  ✗ {e}", fg="red"))
 
 
 @cli.command()
@@ -976,7 +954,6 @@ def status():
     from trnscrb import storage
     from trnscrb.app_bundle import is_installed
     from trnscrb.settings import load as load_settings
-    from trnscrb.settings import read_hf_token
     from trnscrb.single_instance import SingleInstance
     from trnscrb.storage import NOTES_DIR
 
@@ -1017,7 +994,8 @@ def status():
         "Screen Recording" + ("" if sa_source == "app" else " (this terminal — app not running)"),
     )
     _row("ffmpeg", bool(_sh.which("ffmpeg")), "audio decoding")
-    _row("HF token", bool(read_hf_token()), "optional — pyannote speaker labels")
+    diar_ok, diar_detail = _diarization_ready()
+    _row("Speaker labels", diar_ok, diar_detail)
     if _CLAUDE_CONFIG.parent.exists() and _mcp_configured():
         detail = (
             "Claude Desktop"
@@ -1041,6 +1019,14 @@ def status():
         days = int(settings.get("retention_audio_days") or 0)
         note = f"deleted after {days} days" if days else "kept forever"
         click.echo(f"  Preserved audio: {len(preserved)} file(s), {total_mb:.0f} MB ({note})")
+    pending = storage.pending_audio()
+    if pending:
+        click.echo(
+            click.style(
+                f"  ⚠  {len(pending)} recording(s) not transcribed — run `trnscrb retry`",
+                fg="yellow",
+            )
+        )
     click.echo()
 
 
@@ -1209,6 +1195,26 @@ def _row(label: str, ok: bool, detail: str = "", indent: int = 2):
 
 def _pkg_installed(import_name: str) -> bool:
     return importlib.util.find_spec(import_name.split(".")[0]) is not None
+
+
+def _diarization_ready() -> tuple[bool, str]:
+    """(ready, detail) for speaker labelling.
+
+    A token on its own proves nothing: pyannote's repos are gated, so
+    reporting "HF token ok" used to imply speaker labels worked while every
+    transcript silently came out unlabelled.
+    """
+    from trnscrb import diarizer
+    from trnscrb.settings import read_hf_token
+
+    if not read_hf_token():
+        return False, "optional — no HF token, transcripts have no speaker names"
+
+    candidates = diarizer.pipeline_candidates()
+    downloaded = next((m for m in candidates if diarizer.is_downloaded(m)), None)
+    if downloaded:
+        return True, downloaded
+    return False, f"accept the model terms at hf.co/{candidates[0]} — token alone is not enough"
 
 
 def _system_audio_ready() -> tuple[bool, str]:

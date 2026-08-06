@@ -5,13 +5,15 @@ import struct
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
 from click.testing import CliRunner
 
 from trnscrb import storage
-from trnscrb.cli import _finalize_wav_header, cli
+from trnscrb.backlog import finalize_wav_header as _finalize_wav_header
+from trnscrb.cli import cli
 
 
 def _wav_bytes(n_samples=1600):
@@ -158,13 +160,31 @@ class RetentionTest(unittest.TestCase):
         }
         return mock.patch("trnscrb.settings.get", side_effect=values.get)
 
+    def _transcribed(self, stem, age_days):
+        """A preserved recording that already has a real transcript."""
+        wav = self._write(f"{stem}.wav", age_days)
+        (self.notes / f"{stem}.txt").write_text(
+            storage.format_transcript(
+                [{"start": 0, "end": 1, "text": "hello"}], datetime.now(), stem
+            ),
+            encoding="utf-8",
+        )
+        return wav
+
     def test_old_audio_deleted_fresh_kept(self):
-        old = self._write("old.wav", 40)
-        fresh = self._write("fresh.wav", 5)
+        old = self._transcribed("old", 40)
+        fresh = self._transcribed("fresh", 5)
         with self._settings(30, 0):
             storage.apply_retention()
         self.assertFalse(old.exists())
         self.assertTrue(fresh.exists())
+
+    def test_old_audio_kept_while_it_has_no_transcript(self):
+        """Retention must never be the thing that loses an un-transcribed meeting."""
+        stuck = self._write("stuck.wav", 400)
+        with self._settings(30, 0):
+            storage.apply_retention()
+        self.assertTrue(stuck.exists())
 
     def test_transcripts_kept_forever_by_default(self):
         transcript = self._write("ancient.txt", 400)

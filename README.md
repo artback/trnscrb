@@ -50,9 +50,11 @@ trnscrb live        # tail the live transcript as it updates
 | Whisper | 99 languages | Fast | ~500 MB | Legacy / fallback |
 | Voxtral | Multilingual | Slower | ~6 GB | Experimental |
 
-Speaker labels use pyannote **community-1** (falls back to 3.1) — accept its terms once at [hf.co/pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1).
+Speaker labels use pyannote **community-1** (falls back to 3.1) — accept its terms once at [hf.co/pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1). The repo is gated, so an HF token on its own is not enough; `trnscrb status` reports whether labelling will actually work, not just whether a token is set.
 
 **Auto mode** detects the spoken language and routes English to Parakeet (best accuracy) and everything else to Whisper.
+
+If the chosen backend is unavailable — an uninstalled dependency, a model that was never downloaded — trnscrb falls back to Whisper rather than failing the transcription. Any recording that still ends up without a transcript keeps its audio, is retried the next time the app starts, and is never deleted by retention. `trnscrb status` shows the count, and `trnscrb retry` works through them on demand.
 
 ```json
 {
@@ -141,6 +143,8 @@ trnscrb list             # list saved transcripts
 trnscrb show <id>        # print a transcript
 trnscrb search <query>   # full-text search across all transcripts
 trnscrb enrich <id>      # add summary + action items
+trnscrb transcribe <wav> # transcribe a saved recording
+trnscrb retry            # transcribe every recording still missing a transcript
 trnscrb weekly           # weekly summary from transcripts
 trnscrb annual           # annual summary from weekly summaries
 trnscrb mic-status       # live mic activity monitor

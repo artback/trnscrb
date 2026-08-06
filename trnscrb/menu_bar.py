@@ -212,6 +212,32 @@ class TrnscrbApp(rumps.App):
         self._duration_timer = rumps.Timer(self._update_duration_title, 15)
         self._duration_timer.start()
 
+        self._start_backlog_retry()
+
+    def _start_backlog_retry(self):
+        """Transcribe any preserved audio left un-transcribed by an earlier run.
+
+        A backend that was broken during a meeting (missing dependency,
+        undownloaded model) otherwise leaves the WAV sitting there forever.
+        Runs off the main thread so the menu bar appears immediately.
+        """
+        from trnscrb import backlog
+
+        def _run():
+            try:
+                written = backlog.process_pending()
+            except Exception:
+                _log.warning("Backlog retry pass failed", exc_info=True)
+                return
+            if written:
+                _notify(
+                    "Trnscrb",
+                    f"Transcribed {len(written)} earlier recording(s)",
+                    written[-1].name,
+                )
+
+        threading.Thread(target=_run, daemon=True).start()
+
     _MODEL_IDLE_UNLOAD_SECS = 30 * 60
 
     def _cancel_model_unload(self):

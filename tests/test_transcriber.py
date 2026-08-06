@@ -130,16 +130,26 @@ class TranscriberTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "Unsupported transcription backend"):
                     transcriber.transcribe(Path("audio.wav"))
 
-    def test_fails_fast_when_parakeet_dependency_missing(self):
+    def test_missing_parakeet_dependency_falls_back_to_whisper(self):
+        """An uninstalled backend must not cost the meeting.
+
+        This used to raise, so every transcription failed and the audio was
+        only preserved as a WAV that nothing ever retried.
+        """
         with mock.patch("trnscrb.settings.get", side_effect=_settings_getter("parakeet")):
             with mock.patch.dict(sys.modules, {"parakeet_mlx": None}, clear=False):
                 transcriber = self._reload_transcriber()
                 with (
                     mock.patch.object(Path, "exists", return_value=True),
                     mock.patch.object(Path, "stat", return_value=_fake_stat()),
+                    mock.patch.object(
+                        transcriber, "_transcribe_whisper", return_value=[{"text": "rescued"}]
+                    ) as whisper,
                 ):
-                    with self.assertRaisesRegex(RuntimeError, "uv add parakeet-mlx"):
-                        transcriber.transcribe(Path("audio.wav"))
+                    segments = transcriber.transcribe(Path("audio.wav"))
+
+        whisper.assert_called_once()
+        self.assertEqual(segments, [{"text": "rescued"}])
 
     def test_uses_qwen3_backend_when_configured(self):
         words = [
@@ -203,6 +213,31 @@ class TranscriberTests(unittest.TestCase):
 
         whisper.assert_called_once()
         self.assertEqual(segments, [{"text": "hallo"}])
+
+    def test_explicit_backend_falls_back_to_whisper_when_unavailable(self):
+        """An explicitly configured backend must not cost the whole meeting.
+
+        A missing dependency used to fail the transcription outright, leaving
+        only a preserved WAV.
+        """
+        with mock.patch("trnscrb.settings.get", side_effect=_settings_getter("parakeet")):
+            transcriber = self._reload_transcriber()
+            with (
+                mock.patch.object(Path, "exists", return_value=True),
+                mock.patch.object(Path, "stat", return_value=_fake_stat()),
+                mock.patch.object(
+                    transcriber,
+                    "_transcribe_parakeet",
+                    side_effect=RuntimeError("parakeet-mlx is not installed"),
+                ),
+                mock.patch.object(
+                    transcriber, "_transcribe_whisper", return_value=[{"text": "rescued"}]
+                ) as whisper,
+            ):
+                segments = transcriber.transcribe(Path("audio.wav"))
+
+        whisper.assert_called_once()
+        self.assertEqual(segments, [{"text": "rescued"}])
 
 
 class InferenceThreadTests(unittest.TestCase):

@@ -66,6 +66,8 @@ LIVE_MARKERS = (
     "[Live — recording in progress",
 )
 _INTERRUPTED_NOTE = "[Recording was interrupted]"
+# Divides the transcript header from the spoken content.
+_SEPARATOR = "=" * 60
 
 
 def set_live_session(
@@ -157,12 +159,76 @@ def get_live_session() -> Path | None:
     return info["path"] if info else None
 
 
+# Preserved-audio filenames carry the original meeting name and start time:
+# 2026-08-05_10-02-56_Google-Meet.wav, 2026-07-20_09-52_standup-recovered.wav
+_AUDIO_STEM_RE = re.compile(r"(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2}(?:-\d{2})?)_(.+?)(?:-recovered)?$")
+
+
+def meeting_from_filename(audio_file: Path) -> tuple[str, datetime]:
+    """Recover the meeting name and start time encoded in a preserved WAV's name.
+
+    Falls back to the file's mtime and stem when the name does not follow the
+    saved-audio convention.
+    """
+    match = _AUDIO_STEM_RE.match(audio_file.stem)
+    if not match:
+        return audio_file.stem, datetime.fromtimestamp(audio_file.stat().st_mtime)
+
+    date_part, time_part, name_part = match.groups()
+    fmt = "%Y-%m-%d %H-%M-%S" if time_part.count("-") == 2 else "%Y-%m-%d %H-%M"
+    return name_part, datetime.strptime(f"{date_part} {time_part}", fmt)
+
+
+def _is_real_transcript(transcript: Path) -> bool:
+    """True when the file exists and is not a placeholder for a dead session."""
+    try:
+        text = transcript.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return _INTERRUPTED_NOTE not in text and not any(m in text for m in LIVE_MARKERS)
+
+
+def has_transcript(audio_path: Path) -> bool:
+    """True when a preserved recording has already been through transcription.
+
+    Checks both the audio's own stem and the path a transcript of it would be
+    written to — those differ whenever the filename needs normalising, as for
+    the minute-precision `-recovered` names left by older versions.
+
+    A placeholder left by an interrupted session does not count: the meeting
+    was never transcribed, so the audio is still the only copy of it.
+
+    An empty transcript does count. A silent recording genuinely produces no
+    segments, and re-running it would only produce no segments again — the
+    absence of text is the result, not a sign of missing work.
+    """
+    if _is_real_transcript(audio_path.with_suffix(".txt")):
+        return True
+    # Resolved next to the audio rather than in NOTES_DIR, so the answer is
+    # about this file and not about a same-named meeting elsewhere.
+    derived = get_transcript_path(*meeting_from_filename(audio_path)).name
+    return _is_real_transcript(audio_path.parent / derived)
+
+
+def pending_audio(notes_dir: Path | None = None) -> list[Path]:
+    """Preserved recordings still waiting to be transcribed, oldest first."""
+    directory = notes_dir or NOTES_DIR
+    try:
+        return sorted(w for w in directory.glob("*.wav") if not has_transcript(w))
+    except OSError:
+        return []
+
+
 def apply_retention() -> None:
     """Delete old files per the retention settings.
 
     Preserved audio is large (~230 MB/hour); default is to keep it 30 days.
     Transcripts are kept forever unless retention_transcript_days is set.
     A value of 0 disables deletion for that category.
+
+    Audio with no transcript is never deleted, whatever its age — it is the
+    only remaining copy of that meeting, and deleting it would turn a failed
+    transcription into permanent data loss.
     """
     import time
 
@@ -170,20 +236,28 @@ def apply_retention() -> None:
 
     now = time.time()
 
-    def _purge(pattern: str, days: int) -> None:
+    def _purge(pattern: str, days: int, keep=None) -> None:
         if days <= 0:
             return
         cutoff = now - days * 86400
         for f in NOTES_DIR.glob(pattern):
             try:
-                if f.stat().st_mtime < cutoff:
-                    f.unlink()
-                    _log.info("Retention: deleted %s (older than %d days)", f.name, days)
+                if f.stat().st_mtime >= cutoff:
+                    continue
+                if keep is not None and keep(f):
+                    _log.info("Retention: keeping %s — no transcript yet", f.name)
+                    continue
+                f.unlink()
+                _log.info("Retention: deleted %s (older than %d days)", f.name, days)
             except OSError:
                 pass
 
     try:
-        _purge("*.wav", int(settings.get("retention_audio_days") or 0))
+        _purge(
+            "*.wav",
+            int(settings.get("retention_audio_days") or 0),
+            keep=lambda f: not has_transcript(f),
+        )
         _purge("*.txt", int(settings.get("retention_transcript_days") or 0))
     except Exception:
         _log.debug("Retention pass failed", exc_info=True)
@@ -313,7 +387,7 @@ def format_transcript(
                 f"  ⭐ {_fmt_time(float(mark.get('at', 0)))}" + (f"  {label}" if label else "")
             )
 
-    lines += ["", "=" * 60, ""]
+    lines += ["", _SEPARATOR, ""]
 
     # Interleave bookmarks with the transcript so a marked moment is visible
     # in context, not just in the header.

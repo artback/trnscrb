@@ -31,19 +31,39 @@ def _load_pipeline(model_id: str, hf_token: str):
         return Pipeline.from_pretrained(model_id, use_auth_token=hf_token)  # 3.x
 
 
+def pipeline_candidates() -> list[str]:
+    """Pipelines tried in order, preferred first."""
+    preferred = str(
+        settings.get("diarization_pipeline") or "pyannote/speaker-diarization-community-1"
+    )
+    return [preferred] if preferred == _FALLBACK_PIPELINE else [preferred, _FALLBACK_PIPELINE]
+
+
+def is_downloaded(model_id: str) -> bool:
+    """True when this pipeline is already in the local HuggingFace cache.
+
+    pyannote's repos are gated: a valid token is not enough, the model
+    conditions have to be accepted on hf.co before anything downloads. This
+    answers the question offline, so `trnscrb status` can tell "token set" and
+    "speaker labels will actually work" apart.
+    """
+    import os
+
+    cache = os.environ.get("HF_HUB_CACHE") or os.environ.get("HF_HOME")
+    root = Path(cache) if cache else Path.home() / ".cache" / "huggingface"
+    if root.name != "hub":
+        root = root / "hub"
+    snapshots = root / f"models--{model_id.replace('/', '--')}" / "snapshots"
+    return snapshots.is_dir() and any(snapshots.iterdir())
+
+
 def _get_pipeline(hf_token: str):
     """Return the cached pyannote pipeline, loading it on first call."""
     global _pipeline
     if _pipeline is None:
         import torch
 
-        preferred = str(
-            settings.get("diarization_pipeline") or "pyannote/speaker-diarization-community-1"
-        )
-        candidates = [preferred]
-        if preferred != _FALLBACK_PIPELINE:
-            candidates.append(_FALLBACK_PIPELINE)
-
+        candidates = pipeline_candidates()
         last_error: Exception | None = None
         for model_id in candidates:
             log.info("Loading diarization pipeline %s …", model_id)
@@ -54,9 +74,13 @@ def _get_pipeline(hf_token: str):
                 last_error = e
                 log.warning("Could not load %s: %s", model_id, e)
         if _pipeline is None:
+            # These repos are gated, so the usual cause is unaccepted model
+            # conditions rather than a bad token — name the pages to visit.
+            pages = " and ".join(f"hf.co/{m}" for m in candidates)
             raise RuntimeError(
                 f"No diarization pipeline could be loaded (tried {', '.join(candidates)}). "
-                "Accept the model conditions on hf.co and check your HuggingFace token."
+                f"Accept the model conditions at {pages} with the same account as your "
+                "HuggingFace token, then retry."
             ) from last_error
 
         # Prefer Apple Silicon Metal, fallback to CPU
