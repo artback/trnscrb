@@ -102,6 +102,21 @@ def unload_pipeline() -> None:
     log.info("Diarization pipeline unloaded")
 
 
+def _speaker_timeline(result):
+    """The speaker timeline from a pipeline result, across pyannote versions.
+
+    pyannote.audio 4 returns a DiarizeOutput dataclass; 3.x returned the
+    Annotation itself. Prefer the exclusive timeline — it drops overlapping
+    speech turns, which is what assigning one speaker per transcript segment
+    wants.
+    """
+    for attr in ("exclusive_speaker_diarization", "speaker_diarization"):
+        annotation = getattr(result, attr, None)
+        if annotation is not None:
+            return annotation
+    return result
+
+
 def diarize(audio_path: Path, hf_token: str) -> list[dict]:
     """Return [{start, end, speaker}] segments.
 
@@ -113,7 +128,7 @@ def diarize(audio_path: Path, hf_token: str) -> list[dict]:
 
     return [
         {"start": turn.start, "end": turn.end, "speaker": speaker}
-        for turn, _, speaker in diarization.itertracks(yield_label=True)
+        for turn, _, speaker in _speaker_timeline(diarization).itertracks(yield_label=True)
     ]
 
 

@@ -1,5 +1,6 @@
 """Tests for diarization pipeline selection (community-1 with 3.1 fallback)."""
 
+import types
 import unittest
 from unittest.mock import patch
 
@@ -60,3 +61,22 @@ class PipelineSelectionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SpeakerTimelineTest(unittest.TestCase):
+    """pyannote 4 wraps the timeline in a DiarizeOutput; 3.x returned it bare."""
+
+    def test_prefers_the_exclusive_timeline(self):
+        result = types.SimpleNamespace(
+            exclusive_speaker_diarization="exclusive",
+            speaker_diarization="overlapping",
+        )
+        self.assertEqual(diarizer._speaker_timeline(result), "exclusive")
+
+    def test_falls_back_to_the_plain_timeline(self):
+        result = types.SimpleNamespace(speaker_diarization="overlapping")
+        self.assertEqual(diarizer._speaker_timeline(result), "overlapping")
+
+    def test_bare_annotation_is_returned_as_is(self):
+        annotation = object()
+        self.assertIs(diarizer._speaker_timeline(annotation), annotation)
