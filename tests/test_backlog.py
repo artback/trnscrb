@@ -109,23 +109,40 @@ class MeetingFromFilenameTest(unittest.TestCase):
         return f
 
     def test_seconds_precision_stem(self):
-        name, started = backlog.meeting_from_filename(
+        name, started = storage.meeting_from_filename(
             self._wav("2026-08-05_10-02-56_Google-Meet.wav")
         )
         self.assertEqual(name, "Google-Meet")
         self.assertEqual(started, datetime(2026, 8, 5, 10, 2, 56))
 
     def test_minute_precision_and_recovered_suffix(self):
-        name, started = backlog.meeting_from_filename(
+        name, started = storage.meeting_from_filename(
             self._wav("2026-07-20_09-52_meeting-0952-recovered.wav")
         )
         self.assertEqual(name, "meeting-0952")
         self.assertEqual(started, datetime(2026, 7, 20, 9, 52))
 
     def test_unrecognised_name_falls_back_to_mtime(self):
-        name, started = backlog.meeting_from_filename(self._wav("whatever.wav"))
+        name, started = storage.meeting_from_filename(self._wav("whatever.wav"))
         self.assertEqual(name, "whatever")
         self.assertIsInstance(started, datetime)
+
+    def test_normalised_transcript_name_is_found(self):
+        """A `-recovered` WAV's transcript is saved under a normalised stem.
+
+        Matching only on the audio's own stem missed it, so the recording was
+        re-transcribed on every startup forever.
+        """
+        wav = self._wav("2026-07-20_09-52_meeting-0952-recovered.wav")
+        with patch.object(storage, "NOTES_DIR", self.notes):
+            out = storage.get_transcript_path(*storage.meeting_from_filename(wav))
+        self.assertEqual(out.name, "2026-07-20_09-52-00_meeting-0952.txt")
+        self.assertFalse(storage.has_transcript(wav))
+
+        (self.notes / out.name).write_text(
+            _transcript([{"start": 0, "end": 1, "text": "hi"}]), encoding="utf-8"
+        )
+        self.assertTrue(storage.has_transcript(wav))
 
 
 class ProcessPendingTest(unittest.TestCase):

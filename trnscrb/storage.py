@@ -159,8 +159,41 @@ def get_live_session() -> Path | None:
     return info["path"] if info else None
 
 
+# Preserved-audio filenames carry the original meeting name and start time:
+# 2026-08-05_10-02-56_Google-Meet.wav, 2026-07-20_09-52_standup-recovered.wav
+_AUDIO_STEM_RE = re.compile(r"(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2}(?:-\d{2})?)_(.+?)(?:-recovered)?$")
+
+
+def meeting_from_filename(audio_file: Path) -> tuple[str, datetime]:
+    """Recover the meeting name and start time encoded in a preserved WAV's name.
+
+    Falls back to the file's mtime and stem when the name does not follow the
+    saved-audio convention.
+    """
+    match = _AUDIO_STEM_RE.match(audio_file.stem)
+    if not match:
+        return audio_file.stem, datetime.fromtimestamp(audio_file.stat().st_mtime)
+
+    date_part, time_part, name_part = match.groups()
+    fmt = "%Y-%m-%d %H-%M-%S" if time_part.count("-") == 2 else "%Y-%m-%d %H-%M"
+    return name_part, datetime.strptime(f"{date_part} {time_part}", fmt)
+
+
+def _is_real_transcript(transcript: Path) -> bool:
+    """True when the file exists and is not a placeholder for a dead session."""
+    try:
+        text = transcript.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return _INTERRUPTED_NOTE not in text and not any(m in text for m in LIVE_MARKERS)
+
+
 def has_transcript(audio_path: Path) -> bool:
     """True when a preserved recording has already been through transcription.
+
+    Checks both the audio's own stem and the path a transcript of it would be
+    written to — those differ whenever the filename needs normalising, as for
+    the minute-precision `-recovered` names left by older versions.
 
     A placeholder left by an interrupted session does not count: the meeting
     was never transcribed, so the audio is still the only copy of it.
@@ -169,12 +202,12 @@ def has_transcript(audio_path: Path) -> bool:
     segments, and re-running it would only produce no segments again — the
     absence of text is the result, not a sign of missing work.
     """
-    transcript = audio_path.with_suffix(".txt")
-    try:
-        text = transcript.read_text(encoding="utf-8")
-    except OSError:
-        return False
-    return _INTERRUPTED_NOTE not in text and not any(m in text for m in LIVE_MARKERS)
+    if _is_real_transcript(audio_path.with_suffix(".txt")):
+        return True
+    # Resolved next to the audio rather than in NOTES_DIR, so the answer is
+    # about this file and not about a same-named meeting elsewhere.
+    derived = get_transcript_path(*meeting_from_filename(audio_path)).name
+    return _is_real_transcript(audio_path.parent / derived)
 
 
 def pending_audio(notes_dir: Path | None = None) -> list[Path]:

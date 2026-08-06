@@ -11,17 +11,11 @@ dependency, a model that had not been downloaded yet) costs a delay rather
 than the meeting.
 """
 
-import re
-from datetime import datetime
 from pathlib import Path
 
 from trnscrb.log import get_logger
 
 _log = get_logger("trnscrb.backlog")
-
-# Preserved-audio filenames carry the original meeting name and start time:
-# 2026-07-20_09-52-03_meeting-0952.wav
-_STEM_RE = re.compile(r"(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2}(?:-\d{2})?)_(.+?)(?:-recovered)?$")
 
 
 def finalize_wav_header(path: Path) -> None:
@@ -40,32 +34,18 @@ def finalize_wav_header(path: Path) -> None:
     _log.info("Finalized interrupted WAV header: %s", path.name)
 
 
-def meeting_from_filename(audio_file: Path) -> tuple[str, datetime]:
-    """Recover the meeting name and start time encoded in a preserved WAV's name.
-
-    Falls back to the file's mtime and stem when the name does not match the
-    saved-audio convention.
-    """
-    match = _STEM_RE.match(audio_file.stem)
-    if not match:
-        return audio_file.stem, datetime.fromtimestamp(audio_file.stat().st_mtime)
-
-    date_part, time_part, name_part = match.groups()
-    fmt = "%Y-%m-%d %H-%M-%S" if time_part.count("-") == 2 else "%Y-%m-%d %H-%M"
-    return name_part, datetime.strptime(f"{date_part} {time_part}", fmt)
-
-
 def transcribe_file(audio_file: Path, meeting_name: str = "") -> tuple[Path, int]:
     """Transcribe one WAV and save the transcript. Returns (path, segment count).
 
     Shared by `trnscrb transcribe` and the startup retry pass so both produce
-    identical output.
+    identical output — and so the transcript lands where `has_transcript`
+    looks for it.
     """
     from trnscrb import diarizer, storage, transcriber
     from trnscrb.settings import read_hf_token
 
     finalize_wav_header(audio_file)
-    parsed_name, started_at = meeting_from_filename(audio_file)
+    parsed_name, started_at = storage.meeting_from_filename(audio_file)
     meeting_name = meeting_name or parsed_name
 
     segments = transcriber.transcribe(audio_file)
