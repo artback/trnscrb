@@ -954,7 +954,6 @@ def status():
     from trnscrb import storage
     from trnscrb.app_bundle import is_installed
     from trnscrb.settings import load as load_settings
-    from trnscrb.settings import read_hf_token
     from trnscrb.single_instance import SingleInstance
     from trnscrb.storage import NOTES_DIR
 
@@ -995,7 +994,8 @@ def status():
         "Screen Recording" + ("" if sa_source == "app" else " (this terminal — app not running)"),
     )
     _row("ffmpeg", bool(_sh.which("ffmpeg")), "audio decoding")
-    _row("HF token", bool(read_hf_token()), "optional — pyannote speaker labels")
+    diar_ok, diar_detail = _diarization_ready()
+    _row("Speaker labels", diar_ok, diar_detail)
     if _CLAUDE_CONFIG.parent.exists() and _mcp_configured():
         detail = (
             "Claude Desktop"
@@ -1195,6 +1195,26 @@ def _row(label: str, ok: bool, detail: str = "", indent: int = 2):
 
 def _pkg_installed(import_name: str) -> bool:
     return importlib.util.find_spec(import_name.split(".")[0]) is not None
+
+
+def _diarization_ready() -> tuple[bool, str]:
+    """(ready, detail) for speaker labelling.
+
+    A token on its own proves nothing: pyannote's repos are gated, so
+    reporting "HF token ok" used to imply speaker labels worked while every
+    transcript silently came out unlabelled.
+    """
+    from trnscrb import diarizer
+    from trnscrb.settings import read_hf_token
+
+    if not read_hf_token():
+        return False, "optional — no HF token, transcripts have no speaker names"
+
+    candidates = diarizer.pipeline_candidates()
+    downloaded = next((m for m in candidates if diarizer.is_downloaded(m)), None)
+    if downloaded:
+        return True, downloaded
+    return False, f"accept the model terms at hf.co/{candidates[0]} — token alone is not enough"
 
 
 def _system_audio_ready() -> tuple[bool, str]:

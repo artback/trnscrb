@@ -50,7 +50,7 @@ trnscrb live        # tail the live transcript as it updates
 | Whisper | 99 languages | Fast | ~500 MB | Legacy / fallback |
 | Voxtral | Multilingual | Slower | ~6 GB | Experimental |
 
-Speaker labels use pyannote **community-1** (falls back to 3.1) — accept its terms once at [hf.co/pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1).
+Speaker labels use pyannote **community-1** (falls back to 3.1) — accept its terms once at [hf.co/pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1). The repo is gated, so an HF token on its own is not enough; `trnscrb status` reports whether labelling will actually work, not just whether a token is set.
 
 **Auto mode** detects the spoken language and routes English to Parakeet (best accuracy) and everything else to Whisper.
 
