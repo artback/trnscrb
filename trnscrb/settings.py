@@ -69,6 +69,10 @@ _DEFAULTS: dict = {
     # Empty string omits the flag (all tools allowed).
     "integrate_allowed_tools": "Read,Write,Edit,Glob,Grep",
     "live_on_battery": False,  # keep the live-transcription loop running on battery
+    # Learn a fingerprint of the user's own voice from meetings they record.
+    # Only their own: the mic stream identifies them unambiguously, and it is
+    # their voice to keep. Inspect or delete with `trnscrb voiceprints`.
+    "learn_my_voice": True,
     # Cap on MLX's GPU buffer cache (MB). Unbounded it grows to several GB and
     # is never returned; 0 disables the cap.
     "mlx_cache_limit_mb": 512,

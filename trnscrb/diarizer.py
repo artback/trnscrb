@@ -18,6 +18,7 @@ log = get_logger(__name__)
 _FALLBACK_PIPELINE = "pyannote/speaker-diarization-3.1"
 
 _pipeline = None
+_loaded_pipeline_id = ""
 # Serializes MPS/GPU inference when transcription jobs overlap.
 _diarize_lock = threading.Lock()
 
@@ -59,7 +60,7 @@ def is_downloaded(model_id: str) -> bool:
 
 def _get_pipeline(hf_token: str):
     """Return the cached pyannote pipeline, loading it on first call."""
-    global _pipeline
+    global _pipeline, _loaded_pipeline_id
     if _pipeline is None:
         import torch
 
@@ -69,6 +70,7 @@ def _get_pipeline(hf_token: str):
             log.info("Loading diarization pipeline %s …", model_id)
             try:
                 _pipeline = _load_pipeline(model_id, hf_token)
+                _loaded_pipeline_id = model_id
                 break
             except Exception as e:
                 last_error = e
@@ -93,11 +95,12 @@ def _get_pipeline(hf_token: str):
 
 def unload_pipeline() -> None:
     """Release the diarization pipeline to free memory after a long idle period."""
-    global _pipeline
+    global _pipeline, _loaded_pipeline_id
     import gc
 
     with _diarize_lock:
         _pipeline = None
+        _loaded_pipeline_id = ""
     gc.collect()
     log.info("Diarization pipeline unloaded")
 
@@ -117,8 +120,27 @@ def _speaker_timeline(result):
     return result
 
 
-def diarize(audio_path: Path, hf_token: str) -> list[dict]:
-    """Return [{start, end, speaker}] segments.
+def _embeddings_by_speaker(result) -> dict:
+    """Map each speaker label to its centroid embedding, when available.
+
+    pyannote computes these as part of clustering and returns them ordered to
+    match `speaker_diarization.labels()` — note that is the plain timeline,
+    not the exclusive one we read turns from. Returns {} on any mismatch
+    rather than risking a fingerprint attached to the wrong voice.
+    """
+    vectors = getattr(result, "speaker_embeddings", None)
+    annotation = getattr(result, "speaker_diarization", None)
+    if vectors is None or annotation is None:
+        return {}
+    labels = list(annotation.labels())
+    if len(labels) != len(vectors):
+        log.debug("Embedding count %d != %d speakers; ignoring", len(vectors), len(labels))
+        return {}
+    return dict(zip(labels, vectors, strict=True))
+
+
+def diarize_with_embeddings(audio_path: Path, hf_token: str) -> tuple[list[dict], dict]:
+    """Speaker turns plus each speaker's centroid embedding.
 
     Serialized with a lock so concurrent jobs don't overlap on the GPU.
     """
@@ -126,10 +148,26 @@ def diarize(audio_path: Path, hf_token: str) -> list[dict]:
         pipeline = _get_pipeline(hf_token)
         diarization = pipeline(str(audio_path))
 
-    return [
+    turns = [
         {"start": turn.start, "end": turn.end, "speaker": speaker}
         for turn, _, speaker in _speaker_timeline(diarization).itertracks(yield_label=True)
     ]
+    return turns, _embeddings_by_speaker(diarization)
+
+
+def diarize(audio_path: Path, hf_token: str) -> list[dict]:
+    """Return [{start, end, speaker}] segments."""
+    turns, _ = diarize_with_embeddings(audio_path, hf_token)
+    return turns
+
+
+def pipeline_id() -> str:
+    """The pipeline that actually loaded — which may be the fallback.
+
+    Embeddings only compare within the model that produced them, so this is
+    what a stored fingerprint has to be tagged with.
+    """
+    return _loaded_pipeline_id
 
 
 def merge(transcript: list[dict], diarization: list[dict]) -> list[dict]:

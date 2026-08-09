@@ -70,6 +70,73 @@ def _speech_floor(energy: np.ndarray) -> float:
     return float(np.percentile(active, _ACTIVE_PCT)) * _ACTIVE_FRACTION
 
 
+# A speaker must be this dominantly mic-only before we call them the user.
+# Anything less means the diarizer's cluster mixes the user with someone else,
+# and enrolling it would poison the fingerprint.
+_SELF_PURITY = 0.8
+# The runner-up must have at most this share of the winner's mic-only time,
+# else which cluster is the user is genuinely ambiguous.
+_SELF_MARGIN = 0.5
+
+
+def self_speaker(turns: list[dict], timeline) -> tuple[str | None, float]:
+    """Which diarized speaker is the user, and how much they spoke.
+
+    The system stream cannot contain the user's own voice, so a speaker whose
+    turns are consistently mic-only is the user — the same signal
+    label_segments uses, aggregated per diarized speaker instead of per
+    transcript segment.
+
+    Returns (label, mic_only_secs), or (None, 0.0) when no speaker is clearly
+    and unambiguously the user. Deliberately conservative: a wrong answer
+    trains a fingerprint on someone else's voice.
+    """
+    offsets, mic_energy, sys_energy = timeline
+    if len(offsets) == 0 or not turns:
+        return None, 0.0
+
+    mic_floor = _speech_floor(mic_energy)
+    sys_floor = _speech_floor(sys_energy)
+    if not math.isfinite(mic_floor):
+        return None, 0.0  # the mic never spoke; nothing here is the user
+
+    times = offsets.astype(np.float64) / SAMPLE_RATE
+    mic_only: dict[str, float] = {}
+    total: dict[str, float] = {}
+    for turn in turns:
+        speaker = turn.get("speaker")
+        if not speaker:
+            continue
+        try:
+            start = float(turn["start"])
+            end = float(turn["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        window = (times >= start) & (times < max(end, start + 0.1))
+        if not window.any():
+            continue
+        duration = max(end - start, 0.0)
+        total[speaker] = total.get(speaker, 0.0) + duration
+        # An infinite system floor means that stream never spoke, so nothing
+        # here is "Them" — a mic-only recording is all user.
+        if float(sys_energy[window].mean()) < sys_floor:
+            if float(mic_energy[window].mean()) >= mic_floor:
+                mic_only[speaker] = mic_only.get(speaker, 0.0) + duration
+
+    if not mic_only:
+        return None, 0.0
+
+    ranked = sorted(mic_only.items(), key=lambda kv: kv[1], reverse=True)
+    best, best_secs = ranked[0]
+    if total.get(best, 0.0) <= 0 or best_secs / total[best] < _SELF_PURITY:
+        _log.debug("No self speaker: %s is not dominantly mic-only", best)
+        return None, 0.0
+    if len(ranked) > 1 and ranked[1][1] > best_secs * _SELF_MARGIN:
+        _log.debug("No self speaker: %s and %s both look mic-only", best, ranked[1][0])
+        return None, 0.0
+    return best, best_secs
+
+
 def name_from_calendar(segments: list[dict], event: dict | None) -> str | None:
     """Rename "Them" to the other attendee when the meeting has exactly one.
 

@@ -891,8 +891,10 @@ class TrnscrbApp(rumps.App):
             hf_token = read_hf_token()
             if hf_token and segments:
                 try:
-                    diar = diarizer.diarize(audio_path, hf_token)
+                    diar, embeddings = diarizer.diarize_with_embeddings(audio_path, hf_token)
                     segments = diarizer.merge(segments, diar)
+                    # system_audio_used was read before stop() cleared it.
+                    self._enroll_own_voice(diar, embeddings, recorder, system_audio_used)
                 except Exception as e:
                     _log.warning("Diarization skipped: %s", e)
                     _notify("Trnscrb", "Speaker labels skipped", str(e)[:180])
@@ -1023,6 +1025,37 @@ class TrnscrbApp(rumps.App):
                             f"Transcription failed — audio kept at {saved.name}",
                         )
             self._restore_idle()
+
+    def _enroll_own_voice(
+        self, diar: list[dict], embeddings: dict, recorder, system_audio: bool
+    ) -> None:
+        """Learn the user's voice from the diarized speaker that is mic-only.
+
+        "Mic-only means the user" holds only because the system stream was
+        genuinely captured: a conferencing app never plays your own mic back,
+        so anything absent from that stream is you. Without system audio the
+        premise collapses — on laptop speakers the other participant bleeds
+        into the mic, and the whole meeting looks mic-only. Refuse rather than
+        risk training "Me" on a colleague.
+
+        Never fails the transcription: a fingerprint is a nice-to-have, the
+        transcript is not.
+        """
+        if not get_setting("learn_my_voice") or not embeddings:
+            return
+        if not system_audio:
+            _log.debug("No system audio this session; skipping voiceprint enrolment")
+            return
+        try:
+            from trnscrb import voiceprints
+
+            label, secs = attribution.self_speaker(diar, recorder.attribution_timeline())
+            if label is None or label not in embeddings:
+                _log.debug("No unambiguous self speaker; skipping voiceprint enrolment")
+                return
+            voiceprints.enroll(voiceprints.SELF, embeddings[label], diarizer.pipeline_id(), secs)
+        except Exception:
+            _log.debug("Voiceprint enrolment failed", exc_info=True)
 
     def _restore_idle(self):
         """Called from background thread when transcription finishes."""

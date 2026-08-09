@@ -925,6 +925,38 @@ def transcribe_cmd(audio_file: Path, meeting_name: str):
     click.echo(f"  ✓ {count} segments → {out}")
 
 
+@cli.command(name="voiceprints")
+@click.option("--forget", "forget_name", default="", help="Delete the fingerprint for this name.")
+def voiceprints_cmd(forget_name: str):
+    """List the stored voice fingerprints, or delete one."""
+    from trnscrb import voiceprints
+
+    if forget_name:
+        if voiceprints.forget(forget_name):
+            click.echo(f"Forgot the voiceprint for {forget_name}.")
+        else:
+            click.echo(f"No voiceprint stored for {forget_name}.", err=True)
+            sys.exit(1)
+        return
+
+    rows = voiceprints.summary()
+    if not rows:
+        click.echo("No voiceprints yet — one is learned per meeting you record.")
+        click.echo(f"Stored at {voiceprints.STORE} once there is something to store.")
+        return
+
+    model = voiceprints.load().get("model") or "unknown"
+    click.echo(f"\n  Pipeline: {model}")
+    click.echo(f"  Stored at {voiceprints.STORE}\n")
+    for row in rows:
+        mins = row["speech_secs"] / 60
+        click.echo(
+            f"  {row['name']:<18} {row['enrollments']:>3} meeting(s)  "
+            f"{mins:>6.1f} min of speech  dim {row['dimension']}  {row['updated_at']}"
+        )
+    click.echo()
+
+
 @cli.command(name="retry")
 def retry_cmd():
     """Transcribe every preserved recording that has no transcript yet."""
