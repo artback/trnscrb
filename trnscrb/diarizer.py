@@ -10,6 +10,8 @@ overridden with the `diarization_pipeline` setting.
 import threading
 from pathlib import Path
 
+import numpy as np
+
 from trnscrb import settings
 from trnscrb.log import get_logger
 
@@ -120,7 +122,53 @@ def _speaker_timeline(result):
     return result
 
 
-def _embeddings_by_speaker(result) -> dict:
+RAW_SPACE = "embedding"
+PLDA_SPACE = "plda"
+
+_embedding_space = RAW_SPACE
+
+
+def embedding_space() -> str:
+    """Which space the embeddings last handed out live in.
+
+    Vectors are only comparable within one space, so a store has to record
+    this alongside the pipeline id.
+    """
+    return _embedding_space
+
+
+def _project(vectors, pipeline):
+    """Map raw embeddings into the pipeline's PLDA space when it has one.
+
+    community-1 ships a PLDA model beside its embedding model and clusters
+    with cosine *in that projected space*, not on the raw embeddings. Raw
+    cosine is measurably worse at telling speakers apart, so anything we
+    store for later comparison should live in the same space the pipeline
+    itself trusts.
+    """
+    global _embedding_space
+
+    plda = getattr(pipeline, "_plda", None)
+    if plda is None:
+        _embedding_space = RAW_SPACE
+        return vectors
+    try:
+        projected = np.asarray(plda(np.asarray(vectors)))
+    except Exception:
+        log.debug("PLDA projection failed; keeping raw embeddings", exc_info=True)
+        _embedding_space = RAW_SPACE
+        return vectors
+    if projected.shape[0] != len(vectors):
+        log.debug(
+            "PLDA returned %d rows for %d speakers; keeping raw", len(projected), len(vectors)
+        )
+        _embedding_space = RAW_SPACE
+        return vectors
+    _embedding_space = PLDA_SPACE
+    return projected
+
+
+def _embeddings_by_speaker(result, pipeline=None) -> dict:
     """Map each speaker label to its centroid embedding, when available.
 
     pyannote computes these as part of clustering and returns them ordered to
@@ -136,6 +184,8 @@ def _embeddings_by_speaker(result) -> dict:
     if len(labels) != len(vectors):
         log.debug("Embedding count %d != %d speakers; ignoring", len(vectors), len(labels))
         return {}
+    if pipeline is not None:
+        vectors = _project(vectors, pipeline)
     return dict(zip(labels, vectors, strict=True))
 
 
@@ -152,7 +202,7 @@ def diarize_with_embeddings(audio_path: Path, hf_token: str) -> tuple[list[dict]
         {"start": turn.start, "end": turn.end, "speaker": speaker}
         for turn, _, speaker in _speaker_timeline(diarization).itertracks(yield_label=True)
     ]
-    return turns, _embeddings_by_speaker(diarization)
+    return turns, _embeddings_by_speaker(diarization, pipeline)
 
 
 def diarize(audio_path: Path, hf_token: str) -> list[dict]:

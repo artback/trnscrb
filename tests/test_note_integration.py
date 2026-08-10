@@ -145,3 +145,64 @@ class ModelUnloadTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IntegrationConfinementTest(unittest.TestCase):
+    """The spawned agent runs with Trnscrb's macOS privacy identity.
+
+    Anything it reads is attributed to Trnscrb, so an agent searching from
+    $HOME made macOS ask whether *Trnscrb* could read the user's photos.
+    """
+
+    SETTINGS = {
+        "integrate_prompt": "Integrate {transcript_path} into {notes_dir}.",
+        "integrate_allowed_tools": "Read,Write,Edit",
+    }
+
+    def _launch(self, vault=None, settings=None):
+        with (
+            patch.object(menu_bar, "_find_claude_cli", return_value="/bin/claude"),
+            patch.object(menu_bar, "get_setting", _setting(settings or self.SETTINGS)),
+            patch("trnscrb.obsidian.vault_path", return_value=vault),
+            patch.object(menu_bar.storage, "ensure_notes_dir", return_value=Path("/notes")),
+            patch.object(menu_bar.subprocess, "Popen") as popen,
+        ):
+            menu_bar._integrate_notes(Path("/notes/x.md"))
+        return popen.call_args
+
+    def test_never_runs_from_the_home_directory(self):
+        self.assertNotEqual(self._launch().kwargs["cwd"], str(Path.home()))
+
+    def test_runs_inside_the_notes_folder_by_default(self):
+        self.assertEqual(self._launch().kwargs["cwd"], "/notes")
+
+    def test_prefers_the_obsidian_vault(self):
+        with patch.object(Path, "is_dir", return_value=True):
+            call = self._launch(vault=Path("/vault"))
+        self.assertEqual(call.kwargs["cwd"], "/vault")
+
+    def test_falls_back_when_the_vault_is_missing(self):
+        with patch.object(Path, "is_dir", return_value=False):
+            call = self._launch(vault=Path("/gone"))
+        self.assertEqual(call.kwargs["cwd"], "/notes")
+
+    def test_notes_dir_is_substituted_into_the_prompt(self):
+        self.assertIn("/notes", self._launch().args[0][2])
+
+    def test_prompt_predating_notes_dir_still_works(self):
+        """A customised prompt using only {transcript_path} must not break."""
+        settings = {**self.SETTINGS, "integrate_prompt": "Do {transcript_path}."}
+        self.assertEqual(self._launch(settings=settings).args[0][2], "Do /notes/x.md.")
+
+    def test_default_allowlist_excludes_filesystem_search(self):
+        from trnscrb.settings import _DEFAULTS
+
+        tools = _DEFAULTS["integrate_allowed_tools"].split(",")
+        self.assertNotIn("Glob", tools)
+        self.assertNotIn("Grep", tools)
+        self.assertIn("Read", tools)
+
+    def test_default_prompt_names_its_destination(self):
+        from trnscrb.settings import _DEFAULTS
+
+        self.assertIn("{notes_dir}", _DEFAULTS["integrate_prompt"])

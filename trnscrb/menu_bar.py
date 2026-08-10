@@ -97,11 +97,33 @@ def _speech_by_speaker(diar: list[dict]) -> dict[str, float]:
     return totals
 
 
+def _notes_root() -> Path:
+    """Where note integration is allowed to work — the vault, else the notes folder.
+
+    Never the home directory. A subprocess inherits this app's TCC identity, so
+    anything it reads is attributed to Trnscrb: an agent searching from $HOME
+    walks into ~/Pictures and macOS asks the user whether *Trnscrb* may read
+    their photos. Starting inside the notes root keeps that from being a
+    question anyone has to answer.
+    """
+    try:
+        from trnscrb import obsidian
+
+        vault = obsidian.vault_path()
+        if vault and vault.is_dir():
+            return vault
+    except Exception:
+        _log.debug("Could not resolve the Obsidian vault", exc_info=True)
+    return storage.ensure_notes_dir()
+
+
 def _integrate_notes(transcript_path: Path) -> None:
     """Fire-and-forget: ask Claude Code to fold the transcript into the user's notes.
 
     Prompt and tool allowlist come from the `integrate_prompt` and
-    `integrate_allowed_tools` settings.
+    `integrate_allowed_tools` settings. The subprocess runs as this app as far
+    as macOS privacy is concerned, so it is confined to the notes root and
+    given the narrowest useful toolset.
     """
     claude = _find_claude_cli()
     if not claude:
@@ -110,21 +132,28 @@ def _integrate_notes(transcript_path: Path) -> None:
         return
     template = str(get_setting("integrate_prompt") or "")
     allowed = str(get_setting("integrate_allowed_tools") or "")
+    notes_root = _notes_root()
     try:
-        prompt = template.format(transcript_path=transcript_path)
+        # Both placeholders are always supplied, so a prompt customised before
+        # {notes_dir} existed keeps working.
+        prompt = template.format(transcript_path=transcript_path, notes_dir=notes_root)
     except (KeyError, IndexError) as e:
         _log.error("Invalid integrate_prompt template (%s); skipping note integration", e)
         return
     cmd = [claude, "-p", prompt]
     if allowed:
         cmd += ["--allowedTools", allowed]
-    _log.info("Note integration via Claude Code started for %s", transcript_path.name)
+    _log.info(
+        "Note integration via Claude Code started for %s (cwd %s)",
+        transcript_path.name,
+        notes_root,
+    )
     try:
         subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            cwd=str(Path.home()),
+            cwd=str(notes_root),
         )
     except Exception as e:
         _log.error("Could not launch claude CLI for note integration: %s", e)
@@ -1076,6 +1105,7 @@ class TrnscrbApp(rumps.App):
             from trnscrb import voiceprints
 
             model = diarizer.pipeline_id()
+            space = diarizer.embedding_space()
             speech = _speech_by_speaker(diar)
 
             self_label = None
@@ -1083,7 +1113,7 @@ class TrnscrbApp(rumps.App):
                 self_label, secs = attribution.self_speaker(diar, recorder.attribution_timeline())
                 if self_label is not None and self_label in embeddings:
                     voice_id = voiceprints.observe(
-                        embeddings[self_label], model, secs, meeting, self_label
+                        embeddings[self_label], model, secs, meeting, self_label, space
                     )
                     # Naming is idempotent, and re-asserting it each meeting
                     # repairs the case where the user's voice was first seen
@@ -1097,7 +1127,9 @@ class TrnscrbApp(rumps.App):
                 for label, vector in embeddings.items():
                     if label == self_label:
                         continue
-                    voiceprints.observe(vector, model, speech.get(label, 0.0), meeting, label)
+                    voiceprints.observe(
+                        vector, model, speech.get(label, 0.0), meeting, label, space
+                    )
         except Exception:
             _log.debug("Voice identity update failed", exc_info=True)
 

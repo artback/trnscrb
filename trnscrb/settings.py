@@ -52,7 +52,8 @@ _DEFAULT_ENRICH_PROFILES = {
 
 _DEFAULT_INTEGRATE_PROMPT = (
     "Read the meeting transcript at {transcript_path} and integrate the key "
-    "decisions and action items into my notes."
+    "decisions and action items into the notes in {notes_dir}. "
+    "Work only inside {notes_dir}; do not read or search anywhere else."
 )
 
 _DEFAULTS: dict = {
@@ -62,12 +63,15 @@ _DEFAULTS: dict = {
     # reachable, so it never nags users without an LLM.
     "auto_enrich": True,
     "auto_integrate": False,  # push transcripts into notes via the Claude Code CLI
-    # Prompt for note integration; {transcript_path} is replaced with the
-    # absolute path of the saved transcript.
+    # Prompt for note integration. {transcript_path} is the saved transcript;
+    # {notes_dir} is the vault (or notes folder) the agent runs inside.
     "integrate_prompt": _DEFAULT_INTEGRATE_PROMPT,
     # Comma-separated list passed to `claude -p --allowedTools`.
-    # Empty string omits the flag (all tools allowed).
-    "integrate_allowed_tools": "Read,Write,Edit,Glob,Grep",
+    # Empty string omits the flag, which allows *every* tool — the agent runs
+    # with this app's macOS privacy identity, so keep this as narrow as the job
+    # needs. Glob and Grep are deliberately absent: the prompt is handed the
+    # transcript path outright, so nothing needs searching for.
+    "integrate_allowed_tools": "Read,Write,Edit",
     "live_on_battery": False,  # keep the live-transcription loop running on battery
     # Learn a fingerprint of the user's own voice from meetings they record.
     # The mic stream identifies them unambiguously, and it is their voice to

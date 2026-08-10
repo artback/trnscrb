@@ -49,8 +49,8 @@ MIN_ENROLL_SECS = 60.0
 _MAX_OBSERVATIONS = 100
 
 
-def _empty(model: str = "") -> dict:
-    return {"version": _VERSION, "model": model, "voices": {}, "next_id": 1}
+def _empty(model: str = "", space: str = "") -> dict:
+    return {"version": _VERSION, "model": model, "space": space, "voices": {}, "next_id": 1}
 
 
 def _unit(vector) -> np.ndarray:
@@ -150,7 +150,12 @@ def match(vector, data: dict | None = None) -> tuple[str | None, float]:
 
 
 def observe(
-    vector, model: str, speech_secs: float, meeting: str = "", label: str = ""
+    vector,
+    model: str,
+    speech_secs: float,
+    meeting: str = "",
+    label: str = "",
+    space: str = "",
 ) -> str | None:
     """Record one sighting of a voice, joining or creating an identity.
 
@@ -165,15 +170,24 @@ def observe(
         return None
 
     data = load()
-    if data.get("voices") and data.get("model") and data["model"] != model:
+    # Vectors compare only within the model *and* the space that produced
+    # them. A PLDA-projected vector and a raw one have different geometry and
+    # different length, so mixing them would score noise as similarity.
+    stored_model, stored_space = data.get("model"), data.get("space")
+    if data.get("voices") and (
+        (stored_model and stored_model != model) or (stored_space and stored_space != space)
+    ):
         _log.warning(
-            "Diarization pipeline changed (%s -> %s); discarding %d stored voice(s)",
-            data["model"],
+            "Voice representation changed (%s/%s -> %s/%s); discarding %d stored voice(s)",
+            stored_model,
+            stored_space or "unknown",
             model,
+            space or "unknown",
             len(data["voices"]),
         )
-        data = _empty(model)
+        data = _empty(model, space)
     data["model"] = model
+    data["space"] = space
 
     voice_id, score = match(vector, data)
     if voice_id is None:
