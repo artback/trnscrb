@@ -70,9 +70,20 @@ _DEFAULTS: dict = {
     "integrate_allowed_tools": "Read,Write,Edit,Glob,Grep",
     "live_on_battery": False,  # keep the live-transcription loop running on battery
     # Learn a fingerprint of the user's own voice from meetings they record.
-    # Only their own: the mic stream identifies them unambiguously, and it is
-    # their voice to keep. Inspect or delete with `trnscrb voiceprints`.
+    # The mic stream identifies them unambiguously, and it is their voice to
+    # keep. Inspect or delete with `trnscrb voices`.
     "learn_my_voice": True,
+    # Also cluster everyone else's voice across meetings, so a name given once
+    # applies to every meeting that voice appears in. Off by default: these are
+    # biometric fingerprints of people who have not consented to being
+    # enrolled, unlike the user's own voice.
+    "cluster_voices": False,
+    # Cosine similarity required to treat two recordings as the same person,
+    # and how far ahead of the runner-up that match must be. Raising either
+    # makes the system split one person into several identities; lowering them
+    # risks fusing two people, which puts one person's name on another's words.
+    "voice_match_threshold": 0.55,
+    "voice_match_margin": 0.10,
     # Cap on MLX's GPU buffer cache (MB). Unbounded it grows to several GB and
     # is never returned; 0 disables the cap.
     "mlx_cache_limit_mb": 512,

@@ -925,35 +925,60 @@ def transcribe_cmd(audio_file: Path, meeting_name: str):
     click.echo(f"  ✓ {count} segments → {out}")
 
 
-@cli.command(name="voiceprints")
-@click.option("--forget", "forget_name", default="", help="Delete the fingerprint for this name.")
-def voiceprints_cmd(forget_name: str):
-    """List the stored voice fingerprints, or delete one."""
-    from trnscrb import voiceprints
+@cli.command(name="voices")
+@click.option(
+    "--name", "naming", nargs=2, default=None, help="Name an identity: <voice-id> <name>."
+)
+@click.option("--forget", "forget_id", default="", help="Delete an identity by voice id.")
+@click.option("--verbose", is_flag=True, help="List the meetings each voice appeared in.")
+def voices_cmd(naming, forget_id: str, verbose: bool):
+    """List the voice identities learned across meetings, or name one.
 
-    if forget_name:
-        if voiceprints.forget(forget_name):
-            click.echo(f"Forgot the voiceprint for {forget_name}.")
+    Naming applies to every meeting that voice has appeared in, not just the
+    most recent one.
+    """
+    from trnscrb import voiceprints
+    from trnscrb.settings import get as get_setting
+
+    if forget_id:
+        if voiceprints.forget(forget_id):
+            click.echo(f"Forgot {forget_id}.")
         else:
-            click.echo(f"No voiceprint stored for {forget_name}.", err=True)
+            click.echo(f"No voice stored as {forget_id}.", err=True)
             sys.exit(1)
+        return
+
+    if naming:
+        voice_id, name = naming
+        if not voiceprints.name_voice(voice_id, name):
+            click.echo(f"No voice stored as {voice_id}.", err=True)
+            sys.exit(1)
+        seen = next((r for r in voiceprints.summary() if r["id"] == voice_id), None)
+        meetings = len(seen["meetings"]) if seen else 0
+        click.echo(f"{voice_id} is now {name} — applies to {meetings} past meeting(s).")
         return
 
     rows = voiceprints.summary()
     if not rows:
-        click.echo("No voiceprints yet — one is learned per meeting you record.")
+        click.echo("No voices learned yet — identities accumulate as you record meetings.")
         click.echo(f"Stored at {voiceprints.STORE} once there is something to store.")
+        if not get_setting("cluster_voices"):
+            click.echo("\nOnly your own voice is learned. To cluster other people's voices:")
+            click.echo("  trnscrb config set cluster_voices true")
         return
 
-    model = voiceprints.load().get("model") or "unknown"
-    click.echo(f"\n  Pipeline: {model}")
+    data = voiceprints.load()
+    click.echo(f"\n  Pipeline: {data.get('model') or 'unknown'}")
     click.echo(f"  Stored at {voiceprints.STORE}\n")
     for row in rows:
-        mins = row["speech_secs"] / 60
+        label = row["name"] or click.style("unnamed", dim=True)
         click.echo(
-            f"  {row['name']:<18} {row['enrollments']:>3} meeting(s)  "
-            f"{mins:>6.1f} min of speech  dim {row['dimension']}  {row['updated_at']}"
+            f"  {row['id']:<10} {label:<20} {row['observations']:>3} meeting(s)  "
+            f"{row['speech_secs'] / 60:>6.1f} min  dim {row['dimension']}"
         )
+        if verbose:
+            for meeting in dict.fromkeys(row["meetings"]):
+                click.echo(f"             ↳ {meeting}")
     click.echo()
 
 
