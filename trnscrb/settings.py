@@ -79,10 +79,19 @@ _DEFAULTS: dict = {
     # enrolled, unlike the user's own voice.
     "cluster_voices": False,
     # Cosine similarity required to treat two recordings as the same person,
-    # and how far ahead of the runner-up that match must be. Raising either
-    # makes the system split one person into several identities; lowering them
-    # risks fusing two people, which puts one person's name on another's words.
-    "voice_match_threshold": 0.55,
+    # and how far ahead of the runner-up that match must be.
+    #
+    # Calibrated against 44 enrollable speakers across 9 real meetings, using
+    # same-meeting pairs as known-different people. Different speakers sat at
+    # p95 0.50 and never passed 0.63 in the well-separated meetings; the only
+    # pairs above 0.70 were in small meetings, where they are far more likely
+    # to be one person the diarizer split in two. 0.55 would have merged 6.5%
+    # of known-different pairs.
+    #
+    # Erring high is deliberate: splitting one person into two identities is
+    # visible and cheap to merge later, while fusing two people is silent and
+    # puts one person's name on another's words.
+    "voice_match_threshold": 0.75,
     "voice_match_margin": 0.10,
     # Cap on MLX's GPU buffer cache (MB). Unbounded it grows to several GB and
     # is never returned; 0 disables the cap.

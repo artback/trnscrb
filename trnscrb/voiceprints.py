@@ -67,7 +67,7 @@ def _cosine(a, b) -> float:
 def _thresholds() -> tuple[float, float]:
     """(match, margin) — how similar, and how much clearer than the runner-up."""
     return (
-        float(settings.get("voice_match_threshold") or 0.55),
+        float(settings.get("voice_match_threshold") or 0.75),
         float(settings.get("voice_match_margin") or 0.10),
     )
 
