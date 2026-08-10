@@ -61,7 +61,16 @@ def _unit(vector) -> np.ndarray:
 
 
 def _cosine(a, b) -> float:
-    return float(np.dot(_unit(a), _unit(b)))
+    """Similarity, or -1 when the vectors are not comparable.
+
+    Two spaces (raw embedding vs PLDA projection) have different lengths, so a
+    store carried across a change would otherwise raise here — deep inside a
+    best-effort path that swallows exceptions, silently ending enrolment.
+    """
+    a, b = _unit(a), _unit(b)
+    if a.shape != b.shape:
+        return -1.0
+    return float(np.dot(a, b))
 
 
 def _thresholds() -> tuple[float, float]:
@@ -73,8 +82,15 @@ def _thresholds() -> tuple[float, float]:
 
 
 def _migrate(data: dict) -> dict:
-    """Carry a v1 store (named fingerprints, no clusters) into the v2 shape."""
-    migrated = _empty(data.get("model", ""))
+    """Carry a v1 store (named fingerprints, no clusters) into the v2 shape.
+
+    v1 predates PLDA projection, so its vectors are raw embeddings. Recording
+    that is what lets the space check retire them cleanly on the first
+    projected observation, instead of comparing 256 dimensions against 128.
+    """
+    # Matches diarizer.RAW_SPACE; not imported, to keep the store free of a
+    # dependency on the model stack.
+    migrated = _empty(data.get("model", ""), "embedding")
     for name, entry in (data.get("prints") or {}).items():
         vector = entry.get("vector") or []
         if not vector:

@@ -285,3 +285,53 @@ class EmbeddingsBySpeakerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SpaceMigrationTest(_StoreTest):
+    """A v1 store holds raw embeddings; the projected space has fewer dims.
+
+    Comparing the two raised ValueError deep inside a best-effort path that
+    swallows exceptions, so enrolment would have stopped silently forever.
+    """
+
+    def _write_v1(self, dim=256):
+        import json
+
+        voiceprints.STORE.parent.mkdir(parents=True, exist_ok=True)
+        voiceprints.STORE.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "model": _MODEL,
+                    "prints": {
+                        "Me": {
+                            "vector": list(np.ones(dim)),
+                            "enrollments": 3,
+                            "speech_secs": 477.5,
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_v1_is_marked_as_raw_embedding_space(self):
+        self._write_v1()
+        self.assertEqual(voiceprints.load()["space"], "embedding")
+
+    def test_mismatched_dimensions_never_raise(self):
+        self.assertEqual(voiceprints._cosine(np.ones(256), np.ones(128)), -1.0)
+
+    def test_projected_observation_retires_the_v1_store(self):
+        self._write_v1()
+        voice_id = voiceprints.observe(np.ones(128), _MODEL, 120, "mtg", "S0", "plda")
+        self.assertIsNotNone(voice_id)
+        data = voiceprints.load()
+        self.assertEqual(data["space"], "plda")
+        self.assertEqual(len(data["voices"]), 1)
+        self.assertEqual(len(data["voices"][voice_id]["vector"]), 128)
+
+    def test_same_space_keeps_accumulating(self):
+        voiceprints.observe(np.ones(128), _MODEL, 120, "m1", "S0", "plda")
+        voiceprints.observe(np.ones(128), _MODEL, 120, "m2", "S0", "plda")
+        self.assertEqual(voiceprints.summary()[0]["observations"], 2)
