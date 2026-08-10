@@ -1,20 +1,26 @@
-"""Persistent speaker fingerprints, learned from meetings you already record.
+"""Persistent voice identities, learned from meetings you already record.
 
 pyannote computes a centroid embedding per speaker as part of clustering and
-hands it back in `DiarizeOutput.speaker_embeddings`. That vector is a voice
-fingerprint; it was simply being discarded. This module keeps the ones we can
-attach a confident identity to, so a future call can recognise the voice.
+hands it back in `DiarizeOutput.speaker_embeddings`. Within one meeting those
+labels are arbitrary — SPEAKER_00 in March has nothing to do with SPEAKER_00
+in April. This module carries them across meetings: each observed speaker is
+matched against the voices already known, so the same person accumulates one
+stable identity over time.
 
-The first identity worth learning is the user's own. The recorder captures the
-microphone separately from the system audio, and a conferencing app never
-plays your own mic back to you — so a diarized speaker whose turns are
-consistently mic-only is you, in *every* meeting, with no calendar lookup and
-no guessing. That makes "Me" the fastest fingerprint to accumulate and the
-only one enrolled today.
+Two things follow from that. A voice can be recognised before anyone has said
+who it is, and when a name does arrive — from the mic/system split for the
+user, from a 1:1's calendar entry, or typed in — it applies to every past
+meeting that voice appeared in, not just the one that named it.
+
+Matching is deliberately reluctant. An unmatched voice becomes a new identity,
+which is cheap to merge later; a wrong match silently fuses two people and
+would put one person's name on another's words. So a match needs both a high
+absolute similarity and a clear margin over the runner-up.
 
 Fingerprints are local, tied to the pipeline that produced them, and
-inspectable with `trnscrb voiceprints`. They are biometric data, so anything
-beyond the user's own voice should stay a deliberate opt-in.
+inspectable with `trnscrb voices`. Identities other than the user's own are
+biometric data about people who have not consented, which is why clustering
+them is opt-in (`cluster_voices`).
 """
 
 import json
@@ -23,37 +29,98 @@ from pathlib import Path
 
 import numpy as np
 
+from trnscrb import settings
 from trnscrb.log import get_logger
 
 _log = get_logger("trnscrb.voiceprints")
 
 STORE = Path.home() / ".config" / "trnscrb" / "voiceprints.json"
-_VERSION = 1
+_VERSION = 2
 
-# The label used for the user's own voice.
+# The name given to the user's own voice.
 SELF = "Me"
 
-# Enrolments below this much attributed speech are too thin to characterise a
-# voice, and would drag the running average toward whatever the room sounded
-# like that day.
+# Observations below this much attributed speech are too thin to characterise
+# a voice, and would drag a centroid toward whatever the room sounded like.
 MIN_ENROLL_SECS = 60.0
 
+# Keep the most recent occurrences per voice; enough to explain a match
+# without growing without bound.
+_MAX_OBSERVATIONS = 100
 
-def _unit(vector: np.ndarray) -> np.ndarray:
-    """L2-normalise, so averaging compares directions rather than magnitudes."""
+
+def _empty(model: str = "", space: str = "") -> dict:
+    return {"version": _VERSION, "model": model, "space": space, "voices": {}, "next_id": 1}
+
+
+def _unit(vector) -> np.ndarray:
+    """L2-normalise, so similarity compares direction rather than magnitude."""
+    vector = np.asarray(vector, dtype=np.float64).ravel()
     norm = float(np.linalg.norm(vector))
     return vector if norm == 0 else vector / norm
 
 
+def _cosine(a, b) -> float:
+    """Similarity, or -1 when the vectors are not comparable.
+
+    Two spaces (raw embedding vs PLDA projection) have different lengths, so a
+    store carried across a change would otherwise raise here — deep inside a
+    best-effort path that swallows exceptions, silently ending enrolment.
+    """
+    a, b = _unit(a), _unit(b)
+    if a.shape != b.shape:
+        return -1.0
+    return float(np.dot(a, b))
+
+
+def _thresholds() -> tuple[float, float]:
+    """(match, margin) — how similar, and how much clearer than the runner-up."""
+    return (
+        float(settings.get("voice_match_threshold") or 0.75),
+        float(settings.get("voice_match_margin") or 0.10),
+    )
+
+
+def _migrate(data: dict) -> dict:
+    """Carry a v1 store (named fingerprints, no clusters) into the v2 shape.
+
+    v1 predates PLDA projection, so its vectors are raw embeddings. Recording
+    that is what lets the space check retire them cleanly on the first
+    projected observation, instead of comparing 256 dimensions against 128.
+    """
+    # Matches diarizer.RAW_SPACE; not imported, to keep the store free of a
+    # dependency on the model stack.
+    migrated = _empty(data.get("model", ""), "embedding")
+    for name, entry in (data.get("prints") or {}).items():
+        vector = entry.get("vector") or []
+        if not vector:
+            continue
+        migrated["voices"][f"voice-{migrated['next_id']}"] = {
+            "vector": vector,
+            "name": name,
+            "observations": int(entry.get("enrollments", 1)),
+            "speech_secs": float(entry.get("speech_secs", 0.0)),
+            "seen": [],
+            "updated_at": entry.get("updated_at", ""),
+        }
+        migrated["next_id"] += 1
+    if migrated["voices"]:
+        _log.info("Migrated %d voiceprint(s) to the clustered store", len(migrated["voices"]))
+    return migrated
+
+
 def load() -> dict:
-    """The store, or an empty one when absent or unreadable."""
+    """The store, or an empty one when absent, unreadable, or from the future."""
     try:
         data = json.loads(STORE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {"version": _VERSION, "model": "", "prints": {}}
-    if data.get("version") != _VERSION:
-        _log.info("Ignoring voiceprint store from a different version")
-        return {"version": _VERSION, "model": "", "prints": {}}
+        return _empty()
+    version = data.get("version")
+    if version == 1:
+        return _migrate(data)
+    if version != _VERSION:
+        _log.info("Ignoring voiceprint store from an unknown version (%s)", version)
+        return _empty()
     return data
 
 
@@ -65,83 +132,169 @@ def _save(data: dict) -> None:
         _log.warning("Could not write voiceprint store", exc_info=True)
 
 
-def enroll(name: str, vector: np.ndarray, model: str, speech_secs: float) -> bool:
-    """Fold one observation of `name`'s voice into the store.
+def match(vector, data: dict | None = None) -> tuple[str | None, float]:
+    """The known voice this embedding belongs to, and its similarity.
 
-    Returns True when the fingerprint was updated. Embeddings only mean
-    anything relative to the model that produced them, so a change of pipeline
-    discards the store rather than averaging vectors from different spaces.
+    Returns (None, best_score) when nothing is similar enough or when two
+    identities are too close to separate — an ambiguous match is refused
+    rather than guessed, since fusing two people is not self-correcting.
+    """
+    data = load() if data is None else data
+    voices = data.get("voices") or {}
+    if not voices:
+        return None, 0.0
+
+    threshold, margin = _thresholds()
+    scored = sorted(
+        ((vid, _cosine(entry["vector"], vector)) for vid, entry in voices.items()),
+        key=lambda kv: kv[1],
+        reverse=True,
+    )
+    best_id, best_score = scored[0]
+    if best_score < threshold:
+        return None, best_score
+    if len(scored) > 1 and scored[1][1] > best_score - margin:
+        _log.debug(
+            "Ambiguous voice match: %s (%.3f) vs %s (%.3f)",
+            best_id,
+            best_score,
+            scored[1][0],
+            scored[1][1],
+        )
+        return None, best_score
+    return best_id, best_score
+
+
+def observe(
+    vector,
+    model: str,
+    speech_secs: float,
+    meeting: str = "",
+    label: str = "",
+    space: str = "",
+) -> str | None:
+    """Record one sighting of a voice, joining or creating an identity.
+
+    Returns the voice id, or None when the observation was rejected.
     """
     if speech_secs < MIN_ENROLL_SECS:
-        _log.debug("Skipping %s enrolment: only %.0fs of speech", name, speech_secs)
-        return False
-
-    vector = _unit(np.asarray(vector, dtype=np.float64).ravel())
+        _log.debug("Ignoring voice observation: only %.0fs of speech", speech_secs)
+        return None
+    vector = _unit(vector)
     if vector.size == 0 or not np.isfinite(vector).all():
-        _log.debug("Skipping %s enrolment: unusable embedding", name)
-        return False
+        _log.debug("Ignoring voice observation: unusable embedding")
+        return None
 
     data = load()
-    if data.get("prints") and data.get("model") and data["model"] != model:
+    # Vectors compare only within the model *and* the space that produced
+    # them. A PLDA-projected vector and a raw one have different geometry and
+    # different length, so mixing them would score noise as similarity.
+    stored_model, stored_space = data.get("model"), data.get("space")
+    if data.get("voices") and (
+        (stored_model and stored_model != model) or (stored_space and stored_space != space)
+    ):
         _log.warning(
-            "Diarization pipeline changed (%s -> %s); discarding %d stored voiceprint(s)",
-            data["model"],
+            "Voice representation changed (%s/%s -> %s/%s); discarding %d stored voice(s)",
+            stored_model,
+            stored_space or "unknown",
             model,
-            len(data["prints"]),
+            space or "unknown",
+            len(data["voices"]),
         )
-        data = {"version": _VERSION, "model": model, "prints": {}}
+        data = _empty(model, space)
     data["model"] = model
+    data["space"] = space
 
-    entry = data["prints"].get(name)
-    if entry and len(entry.get("vector", [])) == vector.size:
-        # Running mean over unit vectors: every meeting counts once, so a
-        # single long call cannot dominate the fingerprint.
-        n = int(entry.get("enrollments", 1))
-        merged = _unit((np.asarray(entry["vector"], dtype=np.float64) * n + vector) / (n + 1))
-        entry = {
-            "vector": merged.tolist(),
-            "enrollments": n + 1,
-            "speech_secs": round(float(entry.get("speech_secs", 0.0)) + speech_secs, 1),
-        }
-    else:
+    voice_id, score = match(vector, data)
+    if voice_id is None:
+        voice_id = f"voice-{data['next_id']}"
+        data["next_id"] += 1
         entry = {
             "vector": vector.tolist(),
-            "enrollments": 1,
-            "speech_secs": round(speech_secs, 1),
+            "name": "",
+            "observations": 0,
+            "speech_secs": 0.0,
+            "seen": [],
         }
+        data["voices"][voice_id] = entry
+        _log.info("New voice %s (best existing match %.3f)", voice_id, score)
+    else:
+        entry = data["voices"][voice_id]
+        # Running mean per observation, so one long meeting cannot dominate.
+        n = int(entry.get("observations", 1))
+        entry["vector"] = _unit(
+            (np.asarray(entry["vector"], dtype=np.float64) * n + vector) / (n + 1)
+        ).tolist()
+        _log.info(
+            "Voice %s%s matched (%.3f)",
+            voice_id,
+            f" ({entry['name']})" if entry.get("name") else "",
+            score,
+        )
+
+    entry["observations"] = int(entry.get("observations", 0)) + 1
+    entry["speech_secs"] = round(float(entry.get("speech_secs", 0.0)) + speech_secs, 1)
     entry["updated_at"] = datetime.now().isoformat(timespec="seconds")
-    data["prints"][name] = entry
+    seen = list(entry.get("seen") or [])
+    seen.append(
+        {
+            "meeting": meeting,
+            "label": label,
+            "secs": round(speech_secs, 1),
+            "at": entry["updated_at"],
+        }
+    )
+    entry["seen"] = seen[-_MAX_OBSERVATIONS:]
+    _save(data)
+    return voice_id
+
+
+def name_voice(voice_id: str, name: str) -> bool:
+    """Attach a name to an identity — and so to every meeting it appears in."""
+    data = load()
+    entry = (data.get("voices") or {}).get(voice_id)
+    if entry is None:
+        return False
+    entry["name"] = name
     _save(data)
     _log.info(
-        "Voiceprint for %s updated (%d enrolment(s), %.0fs of speech total)",
-        name,
-        entry["enrollments"],
-        entry["speech_secs"],
+        "Voice %s named %s (%d past meeting(s))", voice_id, name, len(entry.get("seen") or [])
     )
     return True
 
 
-def forget(name: str) -> bool:
-    """Delete one fingerprint. Returns True when there was one to delete."""
+def find_by_name(name: str) -> str | None:
+    for voice_id, entry in (load().get("voices") or {}).items():
+        if entry.get("name") == name:
+            return voice_id
+    return None
+
+
+def forget(voice_id: str) -> bool:
+    """Delete one identity. Returns True when there was one to delete."""
     data = load()
-    if name not in data.get("prints", {}):
+    if voice_id not in (data.get("voices") or {}):
         return False
-    del data["prints"][name]
+    del data["voices"][voice_id]
     _save(data)
-    _log.info("Forgot voiceprint for %s", name)
+    _log.info("Forgot voice %s", voice_id)
     return True
 
 
 def summary() -> list[dict]:
-    """One row per stored fingerprint, without the vectors."""
+    """One row per identity, without the vectors."""
     data = load()
     return [
         {
-            "name": name,
-            "enrollments": entry.get("enrollments", 0),
+            "id": voice_id,
+            "name": entry.get("name", ""),
+            "observations": entry.get("observations", 0),
             "speech_secs": entry.get("speech_secs", 0.0),
             "updated_at": entry.get("updated_at", ""),
             "dimension": len(entry.get("vector", [])),
+            "meetings": [
+                s.get("meeting", "") for s in (entry.get("seen") or []) if s.get("meeting")
+            ],
         }
-        for name, entry in sorted(data.get("prints", {}).items())
+        for voice_id, entry in sorted((data.get("voices") or {}).items())
     ]

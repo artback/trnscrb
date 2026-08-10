@@ -52,7 +52,8 @@ _DEFAULT_ENRICH_PROFILES = {
 
 _DEFAULT_INTEGRATE_PROMPT = (
     "Read the meeting transcript at {transcript_path} and integrate the key "
-    "decisions and action items into my notes."
+    "decisions and action items into the notes in {notes_dir}. "
+    "Work only inside {notes_dir}; do not read or search anywhere else."
 )
 
 _DEFAULTS: dict = {
@@ -62,17 +63,40 @@ _DEFAULTS: dict = {
     # reachable, so it never nags users without an LLM.
     "auto_enrich": True,
     "auto_integrate": False,  # push transcripts into notes via the Claude Code CLI
-    # Prompt for note integration; {transcript_path} is replaced with the
-    # absolute path of the saved transcript.
+    # Prompt for note integration. {transcript_path} is the saved transcript;
+    # {notes_dir} is the vault (or notes folder) the agent runs inside.
     "integrate_prompt": _DEFAULT_INTEGRATE_PROMPT,
     # Comma-separated list passed to `claude -p --allowedTools`.
-    # Empty string omits the flag (all tools allowed).
-    "integrate_allowed_tools": "Read,Write,Edit,Glob,Grep",
+    # Empty string omits the flag, which allows *every* tool — the agent runs
+    # with this app's macOS privacy identity, so keep this as narrow as the job
+    # needs. Glob and Grep are deliberately absent: the prompt is handed the
+    # transcript path outright, so nothing needs searching for.
+    "integrate_allowed_tools": "Read,Write,Edit",
     "live_on_battery": False,  # keep the live-transcription loop running on battery
     # Learn a fingerprint of the user's own voice from meetings they record.
-    # Only their own: the mic stream identifies them unambiguously, and it is
-    # their voice to keep. Inspect or delete with `trnscrb voiceprints`.
+    # The mic stream identifies them unambiguously, and it is their voice to
+    # keep. Inspect or delete with `trnscrb voices`.
     "learn_my_voice": True,
+    # Also cluster everyone else's voice across meetings, so a name given once
+    # applies to every meeting that voice appears in. Off by default: these are
+    # biometric fingerprints of people who have not consented to being
+    # enrolled, unlike the user's own voice.
+    "cluster_voices": False,
+    # Cosine similarity required to treat two recordings as the same person,
+    # and how far ahead of the runner-up that match must be.
+    #
+    # Calibrated against 44 enrollable speakers across 9 real meetings, using
+    # same-meeting pairs as known-different people. Different speakers sat at
+    # p95 0.50 and never passed 0.63 in the well-separated meetings; the only
+    # pairs above 0.70 were in small meetings, where they are far more likely
+    # to be one person the diarizer split in two. 0.55 would have merged 6.5%
+    # of known-different pairs.
+    #
+    # Erring high is deliberate: splitting one person into two identities is
+    # visible and cheap to merge later, while fusing two people is silent and
+    # puts one person's name on another's words.
+    "voice_match_threshold": 0.75,
+    "voice_match_margin": 0.10,
     # Cap on MLX's GPU buffer cache (MB). Unbounded it grows to several GB and
     # is never returned; 0 disables the cap.
     "mlx_cache_limit_mb": 512,

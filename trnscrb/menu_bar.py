@@ -81,11 +81,49 @@ def _find_claude_cli() -> str | None:
     return None
 
 
+def _speech_by_speaker(diar: list[dict]) -> dict[str, float]:
+    """Total speaking time per diarized label, for enrolment quality gates."""
+    totals: dict[str, float] = {}
+    for turn in diar:
+        speaker = turn.get("speaker")
+        if not speaker:
+            continue
+        try:
+            duration = float(turn["end"]) - float(turn["start"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if duration > 0:
+            totals[speaker] = totals.get(speaker, 0.0) + duration
+    return totals
+
+
+def _notes_root() -> Path:
+    """Where note integration is allowed to work — the vault, else the notes folder.
+
+    Never the home directory. A subprocess inherits this app's TCC identity, so
+    anything it reads is attributed to Trnscrb: an agent searching from $HOME
+    walks into ~/Pictures and macOS asks the user whether *Trnscrb* may read
+    their photos. Starting inside the notes root keeps that from being a
+    question anyone has to answer.
+    """
+    try:
+        from trnscrb import obsidian
+
+        vault = obsidian.vault_path()
+        if vault and vault.is_dir():
+            return vault
+    except Exception:
+        _log.debug("Could not resolve the Obsidian vault", exc_info=True)
+    return storage.ensure_notes_dir()
+
+
 def _integrate_notes(transcript_path: Path) -> None:
     """Fire-and-forget: ask Claude Code to fold the transcript into the user's notes.
 
     Prompt and tool allowlist come from the `integrate_prompt` and
-    `integrate_allowed_tools` settings.
+    `integrate_allowed_tools` settings. The subprocess runs as this app as far
+    as macOS privacy is concerned, so it is confined to the notes root and
+    given the narrowest useful toolset.
     """
     claude = _find_claude_cli()
     if not claude:
@@ -94,21 +132,28 @@ def _integrate_notes(transcript_path: Path) -> None:
         return
     template = str(get_setting("integrate_prompt") or "")
     allowed = str(get_setting("integrate_allowed_tools") or "")
+    notes_root = _notes_root()
     try:
-        prompt = template.format(transcript_path=transcript_path)
+        # Both placeholders are always supplied, so a prompt customised before
+        # {notes_dir} existed keeps working.
+        prompt = template.format(transcript_path=transcript_path, notes_dir=notes_root)
     except (KeyError, IndexError) as e:
         _log.error("Invalid integrate_prompt template (%s); skipping note integration", e)
         return
     cmd = [claude, "-p", prompt]
     if allowed:
         cmd += ["--allowedTools", allowed]
-    _log.info("Note integration via Claude Code started for %s", transcript_path.name)
+    _log.info(
+        "Note integration via Claude Code started for %s (cwd %s)",
+        transcript_path.name,
+        notes_root,
+    )
     try:
         subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            cwd=str(Path.home()),
+            cwd=str(notes_root),
         )
     except Exception as e:
         _log.error("Could not launch claude CLI for note integration: %s", e)
@@ -894,7 +939,7 @@ class TrnscrbApp(rumps.App):
                     diar, embeddings = diarizer.diarize_with_embeddings(audio_path, hf_token)
                     segments = diarizer.merge(segments, diar)
                     # system_audio_used was read before stop() cleared it.
-                    self._enroll_own_voice(diar, embeddings, recorder, system_audio_used)
+                    self._learn_voices(diar, embeddings, recorder, system_audio_used, meeting_name)
                 except Exception as e:
                     _log.warning("Diarization skipped: %s", e)
                     _notify("Trnscrb", "Speaker labels skipped", str(e)[:180])
@@ -1026,36 +1071,67 @@ class TrnscrbApp(rumps.App):
                         )
             self._restore_idle()
 
-    def _enroll_own_voice(
-        self, diar: list[dict], embeddings: dict, recorder, system_audio: bool
+    def _learn_voices(
+        self,
+        diar: list[dict],
+        embeddings: dict,
+        recorder,
+        system_audio: bool,
+        meeting: str,
     ) -> None:
-        """Learn the user's voice from the diarized speaker that is mic-only.
+        """Carry this meeting's speakers into the persistent voice identities.
 
-        "Mic-only means the user" holds only because the system stream was
-        genuinely captured: a conferencing app never plays your own mic back,
-        so anything absent from that stream is you. Without system audio the
-        premise collapses — on laptop speakers the other participant bleeds
-        into the mic, and the whole meeting looks mic-only. Refuse rather than
-        risk training "Me" on a colleague.
+        The user's own voice comes from the mic/system split, which only holds
+        because the system stream was genuinely captured: a conferencing app
+        never plays your own mic back, so anything absent from that stream is
+        you. Without system audio the premise collapses — on laptop speakers
+        the other participant bleeds into the mic and the whole meeting looks
+        mic-only — so self-enrolment is skipped rather than risk training "Me"
+        on a colleague.
 
-        Never fails the transcription: a fingerprint is a nice-to-have, the
+        Everyone else is clustered only when `cluster_voices` is on: those are
+        fingerprints of people who did not consent to being enrolled.
+
+        Never fails the transcription: an identity is a nice-to-have, the
         transcript is not.
         """
-        if not get_setting("learn_my_voice") or not embeddings:
+        if not embeddings:
             return
-        if not system_audio:
-            _log.debug("No system audio this session; skipping voiceprint enrolment")
+        learn_self = bool(get_setting("learn_my_voice")) and system_audio
+        cluster_others = bool(get_setting("cluster_voices"))
+        if not learn_self and not cluster_others:
             return
         try:
             from trnscrb import voiceprints
 
-            label, secs = attribution.self_speaker(diar, recorder.attribution_timeline())
-            if label is None or label not in embeddings:
-                _log.debug("No unambiguous self speaker; skipping voiceprint enrolment")
-                return
-            voiceprints.enroll(voiceprints.SELF, embeddings[label], diarizer.pipeline_id(), secs)
+            model = diarizer.pipeline_id()
+            space = diarizer.embedding_space()
+            speech = _speech_by_speaker(diar)
+
+            self_label = None
+            if learn_self:
+                self_label, secs = attribution.self_speaker(diar, recorder.attribution_timeline())
+                if self_label is not None and self_label in embeddings:
+                    voice_id = voiceprints.observe(
+                        embeddings[self_label], model, secs, meeting, self_label, space
+                    )
+                    # Naming is idempotent, and re-asserting it each meeting
+                    # repairs the case where the user's voice was first seen
+                    # (unnamed) in a recording without system audio.
+                    if voice_id:
+                        voiceprints.name_voice(voice_id, voiceprints.SELF)
+                else:
+                    _log.debug("No unambiguous self speaker; skipping self enrolment")
+
+            if cluster_others:
+                for label, vector in embeddings.items():
+                    if label == self_label:
+                        continue
+                    voiceprints.observe(
+                        vector, model, speech.get(label, 0.0), meeting, label, space
+                    )
         except Exception:
-            _log.debug("Voiceprint enrolment failed", exc_info=True)
+            _log.debug("Voice identity update failed", exc_info=True)
 
     def _restore_idle(self):
         """Called from background thread when transcription finishes."""
