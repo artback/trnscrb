@@ -1,5 +1,6 @@
 """Transcription with configurable backend (Parakeet, Qwen3, Whisper, or Voxtral)."""
 
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -119,11 +120,48 @@ def _transcribe_whisper(audio_path: Path) -> list[dict]:
 # buffers over the whole file and a multi-hour meeting exceeds Metal's
 # maximum buffer size (observed: 43 GB requested for a 3.6 h recording).
 _PARAKEET_CHUNK_SECS = 120.0
+# Cap on one aligned "sentence". Long enough to keep a thought together,
+# short enough that a segment rarely spans a speaker change.
+_PARAKEET_SENTENCE_MAX_SECS = 30.0
+# A pause this long ends a sentence — usually a speaker handing over.
+_PARAKEET_SENTENCE_GAP_SECS = 0.8
+
+
+def _parakeet_decoding_config():
+    """Bound how long one "sentence" may run, or None if unsupported.
+
+    parakeet-mlx leaves max_words, silence_gap and max_duration unset, so a
+    speaker who is never interrupted becomes a single multi-minute sentence.
+    Diarization then has nothing to attach to: one segment gets one speaker
+    label, and everyone else who spoke inside it is silently relabelled as
+    that person. Capping duration and splitting on pauses keeps segments
+    close to speaker turns.
+    """
+    try:
+        from parakeet_mlx.alignment import SentenceConfig
+        from parakeet_mlx.parakeet import DecodingConfig
+    except ImportError:
+        _log.debug("parakeet-mlx has no DecodingConfig; using its defaults")
+        return None
+    try:
+        return DecodingConfig(
+            sentence=SentenceConfig(
+                max_duration=_PARAKEET_SENTENCE_MAX_SECS,
+                silence_gap=_PARAKEET_SENTENCE_GAP_SECS,
+            )
+        )
+    except TypeError:
+        _log.debug("Unexpected DecodingConfig signature; using parakeet defaults")
+        return None
 
 
 def _transcribe_parakeet(audio_path: Path) -> list[dict]:
     model = _get_parakeet_model()
-    result = model.transcribe(str(audio_path), chunk_duration=_PARAKEET_CHUNK_SECS)
+    kwargs = {"chunk_duration": _PARAKEET_CHUNK_SECS}
+    decoding = _parakeet_decoding_config()
+    if decoding is not None:
+        kwargs["decoding_config"] = decoding
+    result = model.transcribe(str(audio_path), **kwargs)
     sentences = getattr(result, "sentences", None)
     if sentences is None:
         raise RuntimeError("Parakeet transcription did not return aligned sentences output.")
@@ -149,15 +187,112 @@ def _transcribe_parakeet(audio_path: Path) -> list[dict]:
                 getattr(sentence, "end", None),
             )
             end = 0.0
+        words = _parakeet_words(sentence)
+        if words:
+            words = _drop_repeats(words)
+            text = words_to_text(words) or text
+            start, end = words[0]["start"], words[-1]["end"]
         normalized.append(
             {
                 "start": start,
                 "end": end,
                 "text": text,
                 "speaker": None,
+                # Word timings let the diarizer cut a segment where the
+                # speaker actually changes, instead of labelling it whole.
+                "words": words,
             }
         )
     return normalized
+
+
+def _parakeet_words(sentence) -> list[dict]:
+    """Per-word timings from an aligned sentence, or [] when unavailable.
+
+    Tokens are sub-word pieces carrying their own leading space — ' Pri',
+    'mar', 'y' — so they are concatenated, never joined with spaces, and a
+    leading space is what starts a new word. Each word keeps its raw form so
+    the sentence can be rebuilt with its original spacing and punctuation.
+    """
+    words: list[dict] = []
+    for token in getattr(sentence, "tokens", None) or []:
+        raw = str(getattr(token, "text", ""))
+        if not raw.strip():
+            continue
+        try:
+            start = float(getattr(token, "start", 0.0))
+            end = float(getattr(token, "end", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if words and not raw[:1].isspace():
+            word = words[-1]
+            word["raw"] += raw
+            word["text"] = word["raw"].strip()
+            word["end"] = end
+        else:
+            words.append({"raw": raw, "text": raw.strip(), "start": start, "end": end})
+    return words
+
+
+def words_to_text(words: list[dict]) -> str:
+    """Rebuild a passage from word dicts, preserving original spacing."""
+    return "".join(w.get("raw") or f" {w['text']}" for w in words).strip()
+
+
+# Words that people genuinely say twice in a row; never collapsed on their own.
+_NATURAL_REPEATS = frozenset(
+    "yeah yes no ok okay right sure sorry hi hey bye thanks well now so very"
+    " really please good come go run stop wait".split()
+)
+# Longest repeated run we try to collapse.
+_MAX_REPEAT_WORDS = 8
+
+
+def _norm(word: dict) -> str:
+    """Comparison form: lowercase, punctuation removed.
+
+    "area" and "area." are the same word said twice; only the second carries
+    the sentence's full stop.
+    """
+    return re.sub(r"[^\w']+", "", word["text"].lower())
+
+
+def _drop_repeats(words: list[dict]) -> list[dict]:
+    """Collapse a run of words immediately repeated verbatim.
+
+    The decoder emits words twice at the sub-word level — ' Pri','mar','y',
+    ' pri','mar','y' for a single "Primary" — which reads as stutter through
+    a whole transcript. A genuine stutter is nearly always one short word
+    ("yeah, yeah"), so single words are only collapsed when they carry
+    content, while longer runs are collapsed whenever they repeat.
+    """
+    out: list[dict] = []
+    i = 0
+    while i < len(words):
+        dropped = 0
+        for n in range(min(_MAX_REPEAT_WORDS, (len(words) - i) // 2), 0, -1):
+            first = [_norm(w) for w in words[i : i + n]]
+            second = [_norm(w) for w in words[i + n : i + 2 * n]]
+            if first != second or not all(first):
+                continue
+            if n == 1 and (first[0] in _NATURAL_REPEATS or len(first[0]) < 4):
+                continue
+            dropped = n
+            break
+
+        kept = [dict(w) for w in words[i : i + max(dropped, 1)]]
+        if dropped:
+            # The repeat usually carries the punctuation and the true end of
+            # the utterance; keep the first spelling but not at their cost.
+            last_dropped = words[i + 2 * dropped - 1]
+            tail = re.search(r"[^\w'\s]+$", last_dropped["text"])
+            if tail and not kept[-1]["text"].endswith(tail.group()):
+                kept[-1]["text"] += tail.group()
+                kept[-1]["raw"] = kept[-1].get("raw", "") + tail.group()
+            kept[-1]["end"] = last_dropped["end"]
+        out.extend(kept)
+        i += (2 * dropped) if dropped else 1
+    return out
 
 
 _qwen3_model = None

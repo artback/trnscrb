@@ -220,15 +220,79 @@ def pipeline_id() -> str:
     return _loaded_pipeline_id
 
 
+# A speaker run shorter than this is treated as noise in the diarization and
+# folded into its neighbour, rather than chopping a sentence into confetti.
+_MIN_RUN_SECS = 0.9
+
+
+def _best_speaker(start: float, end: float, diarization: list[dict]) -> str | None:
+    """The diarized speaker overlapping [start, end] the most."""
+    best_speaker = None
+    best_overlap = 0.0
+    for d in diarization:
+        overlap = min(end, d["end"]) - max(start, d["start"])
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_speaker = d["speaker"]
+    return best_speaker
+
+
+def _split_by_speaker(seg: dict, diarization: list[dict]) -> list[dict]:
+    """Cut one transcript segment where its words change speaker."""
+    runs: list[dict] = []
+    for word in seg["words"]:
+        speaker = _best_speaker(word["start"], word["end"], diarization) or "Unknown"
+        if runs and runs[-1]["speaker"] == speaker:
+            runs[-1]["words"].append(word)
+        else:
+            runs.append({"speaker": speaker, "words": [word]})
+
+    # Fold away runs too short to be a real turn — a single word landing on a
+    # neighbour's label is far more often a diarization boundary being a
+    # fraction of a second out than someone actually interjecting one word.
+    # Folding one away can leave its neighbours on the same speaker, so
+    # matching runs are coalesced in the same pass.
+    merged: list[dict] = []
+    for run in runs:
+        duration = run["words"][-1]["end"] - run["words"][0]["start"]
+        same_speaker = bool(merged) and merged[-1]["speaker"] == run["speaker"]
+        if merged and (same_speaker or duration < _MIN_RUN_SECS):
+            merged[-1]["words"].extend(run["words"])
+        else:
+            merged.append(run)
+
+    from trnscrb.transcriber import words_to_text
+
+    out = []
+    for run in merged:
+        words = run["words"]
+        out.append(
+            {
+                **seg,
+                "start": words[0]["start"],
+                "end": words[-1]["end"],
+                "text": words_to_text(words),
+                "speaker": run["speaker"],
+                "words": words,
+            }
+        )
+    return out
+
+
 def merge(transcript: list[dict], diarization: list[dict]) -> list[dict]:
-    """Assign the best-matching speaker label to each transcript segment."""
+    """Attach speaker labels, splitting segments where the speaker changes.
+
+    Labelling a segment as a whole is only correct while segments are short.
+    A multi-minute one takes a single label and silently reassigns everyone
+    who spoke inside it to that person — which then misattributes their
+    action items too. When word timings are available the segment is cut at
+    the speaker boundaries instead.
+    """
+    out: list[dict] = []
     for seg in transcript:
-        best_speaker = None
-        best_overlap = 0.0
-        for d in diarization:
-            overlap = min(seg["end"], d["end"]) - max(seg["start"], d["start"])
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best_speaker = d["speaker"]
-        seg["speaker"] = best_speaker or "Unknown"
-    return transcript
+        if seg.get("words"):
+            out.extend(_split_by_speaker(seg, diarization))
+        else:
+            seg["speaker"] = _best_speaker(seg["start"], seg["end"], diarization) or "Unknown"
+            out.append(seg)
+    return out
