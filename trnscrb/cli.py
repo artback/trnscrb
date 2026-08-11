@@ -12,6 +12,7 @@ trnscrb devices   — list audio input devices
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -923,6 +924,94 @@ def transcribe_cmd(audio_file: Path, meeting_name: str):
     click.echo(f"Transcribing {audio_file.name} …")
     out, count = backlog.transcribe_file(audio_file, meeting_name)
     click.echo(f"  ✓ {count} segments → {out}")
+
+
+@cli.command(name="import-meet")
+@click.argument("meet_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--transcript",
+    "transcript_id",
+    default="",
+    help="Transcript to name (default: newest matching).",
+)
+@click.option("--apply-glossary", is_flag=True, help="Also add the suggested vocabulary terms.")
+def import_meet_cmd(meet_file: Path, transcript_id: str, apply_glossary: bool):
+    """Name speakers in a transcript from an exported Google Meet transcript.
+
+    Export the Meet doc as plain text (Docs → File → Download → Plain text).
+    Names learned here also attach to the stored voiceprints, so they carry
+    into meetings Google never transcribed.
+    """
+    from trnscrb import glossary, meet, storage, voiceprints
+
+    theirs = meet.parse(meet_file)
+    if not theirs:
+        click.echo("No speaker turns found in that file.", err=True)
+        sys.exit(1)
+
+    path = _resolve_transcript(transcript_id, meet_file)
+    if path is None:
+        click.echo("Could not work out which transcript this belongs to.", err=True)
+        click.echo("Pass one explicitly with --transcript <id>.", err=True)
+        sys.exit(1)
+
+    text = path.read_text(encoding="utf-8")
+    ours = meet.parse_transcript(text)
+    mapping = meet.map_speakers(ours, theirs)
+    if not mapping:
+        click.echo(f"Matched {path.name}, but no speaker could be identified confidently.")
+        return
+
+    storage.save_transcript(path, meet.apply_names(text, mapping))
+    click.echo(f"\n  {path.name}\n")
+    for label, name in sorted(mapping.items()):
+        voice_id = _voice_for(label, path.stem)
+        named = voiceprints.name_voice(voice_id, name) if voice_id else False
+        extra = f"  → also named {voice_id}" if named else ""
+        click.echo(f"  {label:<12} → {name}{extra}")
+
+    suggestions = meet.glossary_candidates(ours, theirs)
+    if suggestions:
+        click.echo("\n  Vocabulary Meet heard differently:")
+        for heard, actual in suggestions[:12]:
+            click.echo(f"    {heard:<20} → {actual}")
+        if apply_glossary:
+            glossary.add_terms(
+                [{"term": actual, "aliases": [heard]} for heard, actual in suggestions]
+            )
+            click.echo(f"\n  Added {len(suggestions)} term(s) to the glossary.")
+        else:
+            click.echo("\n  Re-run with --apply-glossary to add them.")
+    click.echo()
+
+
+def _resolve_transcript(transcript_id: str, meet_file: Path) -> Path | None:
+    """The transcript this Meet export belongs to."""
+    from trnscrb.storage import NOTES_DIR
+
+    if transcript_id:
+        matches = sorted(NOTES_DIR.glob(f"*{transcript_id}*.txt"))
+        return matches[-1] if matches else None
+    # Meet names its export after the meeting and its date; both appear in
+    # our filename too, so the date is usually enough to pin it down.
+    dates = re.findall(r"(\d{4})[-/](\d{2})[-/](\d{2})", meet_file.stem)
+    candidates = sorted(NOTES_DIR.glob("*.txt"))
+    if dates:
+        stamp = "-".join(dates[0])
+        candidates = [c for c in candidates if c.name.startswith(stamp)] or candidates
+    return candidates[-1] if candidates else None
+
+
+def _voice_for(label: str, meeting_stem: str) -> str | None:
+    """The stored voice observed under this diarizer label in this meeting."""
+    from trnscrb import voiceprints
+
+    for voice in voiceprints.load().get("voices", {}).items():
+        voice_id, entry = voice
+        for seen in entry.get("seen") or []:
+            if seen.get("label") == label and seen.get("meeting", "") in meeting_stem:
+                return voice_id
+    return None
 
 
 @cli.command(name="voices")
