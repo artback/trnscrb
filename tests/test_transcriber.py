@@ -85,11 +85,13 @@ class TranscriberTests(unittest.TestCase):
                 ):
                     segments = transcriber.transcribe(Path("audio.wav"))
 
+        # Sentences without tokens carry no word timings, so the diarizer
+        # falls back to labelling the whole segment.
         self.assertEqual(
             segments,
             [
-                {"start": 0.0, "end": 1.5, "text": "hello", "speaker": None},
-                {"start": 2.0, "end": 3.0, "text": "world", "speaker": None},
+                {"start": 0.0, "end": 1.5, "text": "hello", "speaker": None, "words": []},
+                {"start": 2.0, "end": 3.0, "text": "world", "speaker": None, "words": []},
             ],
         )
         # Long recordings must be chunked or Metal OOMs on multi-hour meetings.
