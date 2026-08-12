@@ -249,6 +249,59 @@ def observe(
     return voice_id
 
 
+SAMPLES_DIR = STORE.parent / "voice-samples"
+# Long enough to recognise someone, short enough to be trivial to store.
+SAMPLE_SECS = 6.0
+# Skip the first moment of a turn: it often carries the tail of the previous
+# speaker or the click of an unmute.
+_SAMPLE_LEAD_IN = 0.5
+
+
+def sample_path(voice_id: str) -> Path:
+    """Where this voice's audio clip lives, whether or not it exists."""
+    return SAMPLES_DIR / f"{voice_id}.wav"
+
+
+def save_sample(voice_id: str, audio_path: Path, turns: list[dict]) -> Path | None:
+    """Keep a few seconds of this voice so a person can identify it by ear.
+
+    Captured during enrolment because that is the only moment the audio is
+    still on disk — a meeting's recording is deleted as soon as its transcript
+    is saved, so there is nothing to extract from afterwards.
+    """
+    import wave
+
+    dest = sample_path(voice_id)
+    if dest.exists():
+        return dest
+    longest = max(turns, key=lambda t: float(t["end"]) - float(t["start"]), default=None)
+    if longest is None:
+        return None
+    try:
+        with wave.open(str(audio_path), "rb") as src:
+            rate, channels, width = src.getframerate(), src.getnchannels(), src.getsampwidth()
+            begin = float(longest["start"]) + _SAMPLE_LEAD_IN
+            span = min(SAMPLE_SECS, float(longest["end"]) - begin)
+            if span <= 0.5:
+                return None
+            start_frame = min(int(begin * rate), max(src.getnframes() - 1, 0))
+            src.setpos(start_frame)
+            frames = src.readframes(int(span * rate))
+        if not frames:
+            return None
+        SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(dest), "wb") as out:
+            out.setnchannels(channels)
+            out.setsampwidth(width)
+            out.setframerate(rate)
+            out.writeframes(frames)
+    except (OSError, wave.Error, ValueError):
+        _log.debug("Could not save a voice sample for %s", voice_id, exc_info=True)
+        return None
+    _log.info("Saved a %.0fs sample for %s", span, voice_id)
+    return dest
+
+
 def name_voice(voice_id: str, name: str) -> bool:
     """Attach a name to an identity — and so to every meeting it appears in."""
     data = load()
@@ -277,6 +330,7 @@ def forget(voice_id: str) -> bool:
         return False
     del data["voices"][voice_id]
     _save(data)
+    sample_path(voice_id).unlink(missing_ok=True)  # forgetting includes the audio
     _log.info("Forgot voice %s", voice_id)
     return True
 

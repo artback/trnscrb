@@ -117,6 +117,23 @@ def _notes_root() -> Path:
     return storage.ensure_notes_dir()
 
 
+def _keep_voice_sample(voice_id: str, audio_path, diar: list[dict], label: str) -> None:
+    """Save a clip of this speaker while the recording still exists.
+
+    The meeting's audio is deleted as soon as its transcript is saved, so this
+    is the only chance — without it a voice can never be identified by ear.
+    """
+    if not audio_path:
+        return
+    try:
+        from trnscrb import voiceprints
+
+        turns = [t for t in diar if t.get("speaker") == label]
+        voiceprints.save_sample(voice_id, audio_path, turns)
+    except Exception:
+        _log.debug("Could not keep a sample for %s", voice_id, exc_info=True)
+
+
 def _integrate_notes(transcript_path: Path) -> None:
     """Fire-and-forget: ask Claude Code to fold the transcript into the user's notes.
 
@@ -209,6 +226,7 @@ class TrnscrbApp(rumps.App):
 
         self._open_latest_item = rumps.MenuItem("Open Latest", callback=self.open_latest)
         self._bookmark_item = rumps.MenuItem("Bookmark This Moment", callback=self.add_bookmark)
+        self._voices_item = rumps.MenuItem("Label Voices…", callback=self.label_voices)
 
         self.menu = [
             self._start_item,
@@ -218,6 +236,7 @@ class TrnscrbApp(rumps.App):
             self._summary_item,
             self._integrate_item,
             self._bookmark_item,
+            self._voices_item,
             self._open_latest_item,
             self._settings_item,
             None,
@@ -642,6 +661,60 @@ class TrnscrbApp(rumps.App):
         if getattr(menu_item, "_menu", None) is not None:
             menu_item.clear()
 
+    def label_voices(self, _):
+        """Play each unnamed voice and ask who it is.
+
+        Identification is a listening task, so the clip plays while the prompt
+        is up rather than before it — the answer arrives while the voice is
+        still in the user's ear.
+        """
+        from trnscrb import voiceprints
+
+        try:
+            unnamed = [r for r in voiceprints.summary() if not r["name"]]
+        except Exception:
+            _log.warning("Could not read voices", exc_info=True)
+            return
+        if not unnamed:
+            rumps.alert("Voices", "Every voice trnscrb has learned already has a name.")
+            return
+
+        named = 0
+        for row in unnamed:
+            clip = voiceprints.sample_path(row["id"])
+            if clip.is_file():
+                try:
+                    subprocess.Popen(
+                        ["afplay", str(clip)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except OSError:
+                    _log.debug("Could not play %s", clip, exc_info=True)
+
+            meetings = ", ".join(dict.fromkeys(row["meetings"])) or "unknown meeting"
+            detail = (
+                f"{row['observations']} meeting(s), {row['speech_secs'] / 60:.0f} min\n{meetings}"
+            )
+            if not clip.is_file():
+                detail += "\n\n(No audio clip — recorded before clips were kept.)"
+            result = rumps.Window(
+                message=detail,
+                title=f"Who is {row['id']}?",
+                default_text="",
+                ok="Name",
+                cancel="Skip",
+                dimensions=(320, 24),
+            ).run()
+            if not result.clicked:
+                continue
+            name = result.text.strip()
+            if name and voiceprints.name_voice(row["id"], name):
+                named += 1
+
+        if named:
+            _notify("Trnscrb", f"Named {named} voice(s)", "They apply to past and future meetings.")
+
     def open_latest(self, _):
         # During recording, open the live transcript; otherwise open the newest file
         target = self._live_path
@@ -985,7 +1058,9 @@ class TrnscrbApp(rumps.App):
                     diar, embeddings = diarizer.diarize_with_embeddings(audio_path, hf_token)
                     segments = diarizer.merge(segments, diar)
                     # system_audio_used was read before stop() cleared it.
-                    self._learn_voices(diar, embeddings, recorder, system_audio_used, meeting_name)
+                    self._learn_voices(
+                        diar, embeddings, recorder, system_audio_used, meeting_name, audio_path
+                    )
                 except Exception as e:
                     _log.warning("Diarization skipped: %s", e)
                     _notify("Trnscrb", "Speaker labels skipped", str(e)[:180])
@@ -1130,6 +1205,7 @@ class TrnscrbApp(rumps.App):
         recorder,
         system_audio: bool,
         meeting: str,
+        audio_path=None,
     ) -> None:
         """Carry this meeting's speakers into the persistent voice identities.
 
@@ -1172,6 +1248,7 @@ class TrnscrbApp(rumps.App):
                     # (unnamed) in a recording without system audio.
                     if voice_id:
                         voiceprints.name_voice(voice_id, voiceprints.SELF)
+                        _keep_voice_sample(voice_id, audio_path, diar, self_label)
                 else:
                     _log.debug("No unambiguous self speaker; skipping self enrolment")
 
@@ -1179,9 +1256,11 @@ class TrnscrbApp(rumps.App):
                 for label, vector in embeddings.items():
                     if label == self_label:
                         continue
-                    voiceprints.observe(
+                    other_id = voiceprints.observe(
                         vector, model, speech.get(label, 0.0), meeting, label, space
                     )
+                    if other_id:
+                        _keep_voice_sample(other_id, audio_path, diar, label)
         except Exception:
             _log.debug("Voice identity update failed", exc_info=True)
 

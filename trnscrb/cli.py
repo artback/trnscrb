@@ -1082,6 +1082,49 @@ def import_meet_cmd(meet_file: Path, transcript_id: str, apply_glossary: bool):
     click.echo()
 
 
+def _play_voice(voice_id: str) -> bool:
+    """Play a voice's saved clip through the system player."""
+    from trnscrb import voiceprints
+
+    path = voiceprints.sample_path(voice_id)
+    if not path.is_file():
+        return False
+    try:
+        subprocess.run(["afplay", str(path)], check=False, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        click.echo(f"Could not play it; the clip is at {path}", err=True)
+    return True
+
+
+def _label_voices() -> None:
+    """Play each unnamed voice and ask who it is."""
+    from trnscrb import voiceprints
+
+    unnamed = [r for r in voiceprints.summary() if not r["name"]]
+    if not unnamed:
+        click.echo("Every voice already has a name.")
+        return
+
+    click.echo(f"\n  {len(unnamed)} voice(s) to identify. Enter to skip, 'r' to replay.\n")
+    for row in unnamed:
+        meetings = ", ".join(dict.fromkeys(row["meetings"]))[:70] or "unknown"
+        click.echo(
+            f"  {row['id']}  {row['observations']} meeting(s), "
+            f"{row['speech_secs'] / 60:.1f} min — {meetings}"
+        )
+        if not voiceprints.sample_path(row["id"]).is_file():
+            click.echo("     (no clip saved — recorded before clips were kept)")
+        while True:
+            _play_voice(row["id"])
+            answer = click.prompt("     who is this?", default="", show_default=False).strip()
+            if answer.lower() != "r":
+                break
+        if answer:
+            voiceprints.name_voice(row["id"], answer)
+            click.echo(click.style(f"     ✓ named {answer}", fg="green"))
+        click.echo()
+
+
 def _resolve_transcript(transcript_id: str, meet_file: Path) -> Path | None:
     """The transcript this Meet export belongs to."""
     from trnscrb.storage import NOTES_DIR
@@ -1117,7 +1160,9 @@ def _voice_for(label: str, meeting_stem: str) -> str | None:
 )
 @click.option("--forget", "forget_id", default="", help="Delete an identity by voice id.")
 @click.option("--verbose", is_flag=True, help="List the meetings each voice appeared in.")
-def voices_cmd(naming, forget_id: str, verbose: bool):
+@click.option("--play", "play_id", default="", help="Play this voice's saved clip.")
+@click.option("--label", "interactive", is_flag=True, help="Play each unnamed voice and name it.")
+def voices_cmd(naming, forget_id: str, verbose: bool, play_id: str, interactive: bool):
     """List the voice identities learned across meetings, or name one.
 
     Naming applies to every meeting that voice has appeared in, not just the
@@ -1125,6 +1170,16 @@ def voices_cmd(naming, forget_id: str, verbose: bool):
     """
     from trnscrb import voiceprints
     from trnscrb.settings import get as get_setting
+
+    if play_id:
+        if not _play_voice(play_id):
+            click.echo(f"No saved clip for {play_id}.", err=True)
+            sys.exit(1)
+        return
+
+    if interactive:
+        _label_voices()
+        return
 
     if forget_id:
         if voiceprints.forget(forget_id):
