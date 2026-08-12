@@ -1211,6 +1211,17 @@ def status():
     else:
         _row("App running", True, f"pid {lock.holder_pid()}")
 
+    # A running app whose install was replaced looks healthy from the outside
+    # but has lost every module it had not yet imported.
+    app_state = storage.read_app_state() or {}
+    stale_root = str(app_state.get("install_root") or "")
+    if stale_root and not Path(stale_root).is_dir():
+        _row(
+            "App up to date",
+            False,
+            "running a deleted install — restart Trnscrb to finish the upgrade",
+        )
+
     info = storage.get_live_session_info()
     if info:
         detail = Path(str(info["path"])).name
