@@ -1029,7 +1029,13 @@ class TrnscrbApp(rumps.App):
             # items (best-effort — never fail the meeting over this).
             if track_items:
                 try:
-                    note = obsidian.mirror_transcript(meeting_name, started_at, text)
+                    spoken = segments[-1]["end"] if segments else 0
+                    note = obsidian.mirror_transcript(
+                        meeting_name,
+                        started_at,
+                        text,
+                        duration=f"{int(spoken) // 60:02d}:{int(spoken) % 60:02d}",
+                    )
                     if enrichment:
                         stats = action_items.record_meeting(
                             enrichment,

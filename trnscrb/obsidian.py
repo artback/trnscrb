@@ -52,7 +52,91 @@ def note_name(meeting_name: str, started_at: datetime) -> str:
     return f"{date} {safe}"
 
 
-def mirror_transcript(meeting_name: str, started_at: datetime, text: str) -> str | None:
+# Speaker labels that name no one: linking them would fill the graph with a
+# node per diarizer cluster, and one "Me" node joined to every meeting.
+_NOT_A_PERSON = re.compile(r"^(SPEAKER_\d+|Them|Me|Unknown|Participant \d+)$", re.IGNORECASE)
+# Trailing words that distinguish one occurrence of a recurring meeting from
+# the next; stripping them leaves the series name.
+_SERIES_NOISE = re.compile(
+    r"\s*[-–—]?\s*(\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}(/\d{2,4})?|week \d+|#\d+|\(\d+\))\s*$",
+    re.IGNORECASE,
+)
+
+
+def speakers_in(text: str) -> list[str]:
+    """Real names appearing as speaker headings, in order of first appearance."""
+    found: list[str] = []
+    for match in re.finditer(r"^\[([^\]\n]{1,60})\]\s*$", text, flags=re.MULTILINE):
+        name = match.group(1).strip()
+        if not name or _NOT_A_PERSON.match(name) or name in found:
+            continue
+        found.append(name)
+    return found
+
+
+def topics_in(text: str) -> list[str]:
+    """Glossary terms actually mentioned, which become shared topic nodes.
+
+    The glossary is already a curated list of what this person talks about,
+    so it needs no separate configuration to be useful here.
+    """
+    from trnscrb import glossary
+
+    body = text.lower()
+    found = []
+    for term in glossary.terms():
+        if not term or len(term) < 3:
+            continue
+        if re.search(rf"\b{re.escape(term.lower())}\b", body):
+            found.append(term)
+    return found
+
+
+def series_name(meeting_name: str) -> str:
+    """The recurring series a meeting belongs to, or its own name.
+
+    Daily standups are otherwise six unconnected islands in the graph.
+    """
+    return _SERIES_NOISE.sub("", meeting_name).strip() or meeting_name
+
+
+def _quote(value: str) -> str:
+    return '"' + value.replace('"', '\\"') + '"'
+
+
+def build_note(meeting_name: str, started_at: datetime, text: str, duration: str = "") -> str:
+    """The transcript wrapped in the properties Obsidian builds a graph from.
+
+    Links live in the frontmatter rather than sprinkled through the transcript:
+    they connect the note to people and topics in the graph without turning the
+    spoken text into link soup.
+    """
+    people = speakers_in(text)
+    topics = topics_in(text)
+    series = series_name(meeting_name)
+
+    lines = ["---", f"date: {started_at.strftime('%Y-%m-%d')}"]
+    lines.append(f"time: {_quote(started_at.strftime('%H:%M'))}")
+    if duration:
+        lines.append(f"duration: {_quote(duration)}")
+    lines.append("tags:")
+    lines.append("  - meeting")
+    if series and series != meeting_name:
+        lines.append(f"series: {_quote(f'[[{_UNSAFE.sub("-", series)}]]')}")
+    if people:
+        lines.append("attendees:")
+        lines += [f"  - {_quote(f'[[{_UNSAFE.sub("-", p)}]]')}" for p in people]
+    if topics:
+        lines.append("topics:")
+        lines += [f"  - {_quote(f'[[{_UNSAFE.sub("-", t)}]]')}" for t in topics]
+    lines.append("---")
+    lines.append("")
+    return "\n".join(lines) + "\n" + text
+
+
+def mirror_transcript(
+    meeting_name: str, started_at: datetime, text: str, duration: str = ""
+) -> str | None:
     """Write the transcript as a vault note. Returns its note name for backlinks."""
     directory = meetings_dir()
     if not directory:
@@ -60,7 +144,8 @@ def mirror_transcript(meeting_name: str, started_at: datetime, text: str) -> str
     try:
         directory.mkdir(parents=True, exist_ok=True)
         name = note_name(meeting_name, started_at)
-        _atomic_write(directory / f"{name}.md", text)
+        note = build_note(meeting_name, started_at, text, duration)
+        _atomic_write(directory / f"{name}.md", note)
         return name
     except OSError:
         _log.warning("Could not mirror transcript into the Obsidian vault", exc_info=True)
