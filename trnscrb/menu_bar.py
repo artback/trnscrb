@@ -259,6 +259,13 @@ class TrnscrbApp(rumps.App):
 
         self._start_backlog_retry()
 
+        # An upgrade deletes the tree this process runs from; watch for it so
+        # the app restarts itself instead of quietly losing lazily-imported
+        # features (see trnscrb/rollout.py).
+        self._stale_notified = False
+        self._rollout_timer = rumps.Timer(self._check_rollout, self._ROLLOUT_CHECK_SECS)
+        self._rollout_timer.start()
+
     def _start_backlog_retry(self):
         """Transcribe any preserved audio left un-transcribed by an earlier run.
 
@@ -284,6 +291,41 @@ class TrnscrbApp(rumps.App):
         threading.Thread(target=_run, daemon=True).start()
 
     _MODEL_IDLE_UNLOAD_SECS = 30 * 60
+    _ROLLOUT_CHECK_SECS = 60
+
+    def _check_rollout(self, _timer=None) -> None:
+        """Restart when an upgrade has replaced the tree we run from.
+
+        Deferred while anything is in flight: a restart mid-meeting would end
+        the recording, and the whole point is that an upgrade costs nothing.
+        The stale process keeps working for everything already imported, so
+        waiting is safe — it is only the *next* import that would fail.
+        """
+        from trnscrb import rollout
+
+        if not rollout.is_stale():
+            return
+        if not self._stale_notified:
+            self._stale_notified = True
+            _log.warning(
+                "Running from %s, which no longer exists — trnscrb was upgraded "
+                "underneath this process; restarting when idle",
+                rollout.install_root(),
+            )
+        busy = (self._recorder and self._recorder.is_recording) or (
+            self._process_thread and self._process_thread.is_alive()
+        )
+        if busy:
+            _log.debug("Upgrade restart deferred: recording or transcription in flight")
+            return
+
+        _notify("Trnscrb", "Updating", "Restarting to finish an update…")
+        self._rollout_timer.stop()
+        if rollout.restart():
+            self._shutdown("Upgrade")
+            rumps.quit_application()
+        else:
+            _notify("Trnscrb", "Update needs a restart", "Quit and start Trnscrb again.")
 
     def _cancel_model_unload(self):
         if self._unload_timer:
@@ -317,10 +359,14 @@ class TrnscrbApp(rumps.App):
         """
         try:
             import trnscrb
+            from trnscrb import rollout
 
             storage.write_app_state(
                 version=trnscrb.__version__,
                 system_audio_permission=rec_module.Recorder.system_audio_available(),
+                # Lets `trnscrb status` see that a running app was upgraded out
+                # from under itself, which is invisible from the files on disk.
+                install_root=str(rollout.install_root()),
                 **extra,
             )
         except Exception:
