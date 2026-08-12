@@ -133,8 +133,15 @@ class LabelVoicesMenuTest(unittest.TestCase):
         return name, popen, alert
 
     def _row(self, vid, name=""):
-        return {"id": vid, "name": name, "observations": 2, "speech_secs": 300.0,
-                "updated_at": "", "dimension": 128, "meetings": ["standup"]}
+        return {
+            "id": vid,
+            "name": name,
+            "observations": 2,
+            "speech_secs": 300.0,
+            "updated_at": "",
+            "dimension": 128,
+            "meetings": ["standup"],
+        }
 
     def test_named_voice_is_saved(self):
         name, _, _ = self._run([self._row("voice-2")], ["Justin Lee"])
