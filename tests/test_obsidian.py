@@ -46,9 +46,12 @@ class MirrorTest(unittest.TestCase):
     def test_written_file_is_complete(self):
         with tempfile.TemporaryDirectory() as d:
             with patch.object(obsidian, "meetings_dir", return_value=Path(d)):
-                obsidian.mirror_transcript("Sync", datetime(2026, 7, 30, 9, 0), "hello world")
+                with patch("trnscrb.glossary.terms", return_value=[]):
+                    obsidian.mirror_transcript("Sync", datetime(2026, 7, 30, 9, 0), "hello world")
                 written = (Path(d) / "2026-07-30 Sync.md").read_text()
-        self.assertEqual(written, "hello world")
+        # Graph properties are prepended; the transcript itself is untouched.
+        self.assertTrue(written.startswith("---\n"))
+        self.assertTrue(written.endswith("hello world"))
 
 
 if __name__ == "__main__":

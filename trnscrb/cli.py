@@ -12,6 +12,7 @@ trnscrb devices   — list audio input devices
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -923,6 +924,191 @@ def transcribe_cmd(audio_file: Path, meeting_name: str):
     click.echo(f"Transcribing {audio_file.name} …")
     out, count = backlog.transcribe_file(audio_file, meeting_name)
     click.echo(f"  ✓ {count} segments → {out}")
+
+
+@cli.command(name="vault-sync")
+@click.option("--dry-run", is_flag=True, help="Show what would be written, change nothing.")
+@click.option(
+    "--all", "include_all", is_flag=True, help="Also mirror transcripts with no note yet."
+)
+def vault_sync_cmd(dry_run: bool, include_all: bool):
+    """Refresh Obsidian notes with the current graph properties.
+
+    Only notes already in the vault are rewritten by default, so this cannot
+    quietly add a hundred notes to a personal vault; --all mirrors every
+    transcript. Worth re-running after the glossary changes, since topics are
+    derived from it.
+    """
+    from trnscrb import obsidian
+    from trnscrb.storage import NOTES_DIR
+
+    directory = obsidian.meetings_dir()
+    if obsidian.vault_path() is None or directory is None:
+        click.echo("No Obsidian vault found. Set `obsidian_vault` to its path.", err=True)
+        sys.exit(1)
+
+    transcripts = sorted(NOTES_DIR.glob("*.txt"))
+    if not transcripts:
+        click.echo("No transcripts to mirror.")
+        return
+
+    click.echo(f"\n  Vault: {directory}\n")
+    taken: set[str] = set()
+    written = skipped = 0
+    for path in transcripts:
+        header = _transcript_header(path)
+        name = header.get("Meeting") or path.stem
+        started = header.get("_started")
+        if started is None:
+            click.echo(click.style(f"  ?  {path.name} — unreadable date, skipped", fg="yellow"))
+            continue
+
+        note = obsidian.note_name(name, started)
+        # Two meetings can share a day and a title ("Google Meet"), which would
+        # silently overwrite one with the other. The first keeps the plain name
+        # so existing action-item backlinks stay valid.
+        if note in taken:
+            note = f"{note} {started.strftime('%H-%M')}"
+        taken.add(note)
+
+        exists = (directory / f"{note}.md").exists()
+        if not exists and not include_all:
+            skipped += 1
+            continue
+
+        text = path.read_text(encoding="utf-8")
+        people = obsidian.speakers_in(text)
+        topics = obsidian.topics_in(text)
+        click.echo(
+            f"  {'✓' if exists else '+'}  {note}  "
+            f"({len(people)} attendee(s), {len(topics)} topic(s))"
+        )
+        if not dry_run:
+            obsidian.write_note(
+                f"{note}.md",
+                obsidian.build_note(name, started, text, header.get("Duration", "")),
+            )
+        written += 1
+
+    click.echo(f"\n  {'Would refresh' if dry_run else 'Refreshed'} {written} note(s).")
+    if skipped:
+        click.echo(f"  {skipped} transcript(s) have no note yet — add them with --all.")
+    click.echo()
+
+
+def _transcript_header(path: Path) -> dict:
+    """Meeting/Date/Duration from a transcript's header block.
+
+    The name is read from the header rather than the filename: the filename
+    has had spaces replaced, and mirroring under a different name would
+    orphan the note that action items already link to.
+    """
+    out: dict = {}
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines()[:8]:
+            key, sep, value = line.partition(":")
+            if sep and key.strip() in ("Meeting", "Date", "Duration"):
+                out[key.strip()] = value.strip()
+    except OSError:
+        return out
+    try:
+        out["_started"] = datetime.strptime(out.get("Date", ""), "%Y-%m-%d %H:%M")
+    except ValueError:
+        from trnscrb import storage
+
+        try:
+            out["_started"] = storage.meeting_from_filename(path)[1]
+        except Exception:
+            out["_started"] = None
+    return out
+
+
+@cli.command(name="import-meet")
+@click.argument("meet_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--transcript",
+    "transcript_id",
+    default="",
+    help="Transcript to name (default: newest matching).",
+)
+@click.option("--apply-glossary", is_flag=True, help="Also add the suggested vocabulary terms.")
+def import_meet_cmd(meet_file: Path, transcript_id: str, apply_glossary: bool):
+    """Name speakers in a transcript from an exported Google Meet transcript.
+
+    Export the Meet doc as plain text (Docs → File → Download → Plain text).
+    Names learned here also attach to the stored voiceprints, so they carry
+    into meetings Google never transcribed.
+    """
+    from trnscrb import glossary, meet, storage, voiceprints
+
+    theirs = meet.parse(meet_file)
+    if not theirs:
+        click.echo("No speaker turns found in that file.", err=True)
+        sys.exit(1)
+
+    path = _resolve_transcript(transcript_id, meet_file)
+    if path is None:
+        click.echo("Could not work out which transcript this belongs to.", err=True)
+        click.echo("Pass one explicitly with --transcript <id>.", err=True)
+        sys.exit(1)
+
+    text = path.read_text(encoding="utf-8")
+    ours = meet.parse_transcript(text)
+    mapping = meet.map_speakers(ours, theirs)
+    if not mapping:
+        click.echo(f"Matched {path.name}, but no speaker could be identified confidently.")
+        return
+
+    storage.save_transcript(path, meet.apply_names(text, mapping))
+    click.echo(f"\n  {path.name}\n")
+    for label, name in sorted(mapping.items()):
+        voice_id = _voice_for(label, path.stem)
+        named = voiceprints.name_voice(voice_id, name) if voice_id else False
+        extra = f"  → also named {voice_id}" if named else ""
+        click.echo(f"  {label:<12} → {name}{extra}")
+
+    suggestions = meet.glossary_candidates(ours, theirs)
+    if suggestions:
+        click.echo("\n  Vocabulary Meet heard differently:")
+        for heard, actual in suggestions[:12]:
+            click.echo(f"    {heard:<20} → {actual}")
+        if apply_glossary:
+            glossary.add_terms(
+                [{"term": actual, "aliases": [heard]} for heard, actual in suggestions]
+            )
+            click.echo(f"\n  Added {len(suggestions)} term(s) to the glossary.")
+        else:
+            click.echo("\n  Re-run with --apply-glossary to add them.")
+    click.echo()
+
+
+def _resolve_transcript(transcript_id: str, meet_file: Path) -> Path | None:
+    """The transcript this Meet export belongs to."""
+    from trnscrb.storage import NOTES_DIR
+
+    if transcript_id:
+        matches = sorted(NOTES_DIR.glob(f"*{transcript_id}*.txt"))
+        return matches[-1] if matches else None
+    # Meet names its export after the meeting and its date; both appear in
+    # our filename too, so the date is usually enough to pin it down.
+    dates = re.findall(r"(\d{4})[-/](\d{2})[-/](\d{2})", meet_file.stem)
+    candidates = sorted(NOTES_DIR.glob("*.txt"))
+    if dates:
+        stamp = "-".join(dates[0])
+        candidates = [c for c in candidates if c.name.startswith(stamp)] or candidates
+    return candidates[-1] if candidates else None
+
+
+def _voice_for(label: str, meeting_stem: str) -> str | None:
+    """The stored voice observed under this diarizer label in this meeting."""
+    from trnscrb import voiceprints
+
+    for voice in voiceprints.load().get("voices", {}).items():
+        voice_id, entry = voice
+        for seen in entry.get("seen") or []:
+            if seen.get("label") == label and seen.get("meeting", "") in meeting_stem:
+                return voice_id
+    return None
 
 
 @cli.command(name="voices")
