@@ -400,6 +400,16 @@ class TrnscrbApp(rumps.App):
         except Exception as e:
             _log.debug("Model preload skipped: %s", e)
 
+        # Diarization is only needed at stop, but it is imported lazily: an
+        # upgrade during the meeting would delete the tree torch comes from
+        # and the recording would finish without speaker labels. Loading now
+        # closes that window (see diarizer.preload).
+        try:
+            if diarizer.preload(read_hf_token() or ""):
+                _log.info("Diarization pipeline preloaded for this recording")
+        except Exception as e:
+            _log.debug("Diarization preload skipped: %s", e)
+
     # ── watcher ───────────────────────────────────────────────────────────────
 
     def _start_watcher(self):
