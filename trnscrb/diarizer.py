@@ -95,6 +95,37 @@ def _get_pipeline(hf_token: str):
     return _pipeline
 
 
+def preload(hf_token: str) -> bool:
+    """Load the pipeline now rather than at the end of the meeting.
+
+    torch and pyannote are imported lazily, at stop. That leaves a window: a
+    `brew upgrade` during the meeting deletes the tree they would be imported
+    from, and the recording then finishes with
+
+        Diarization skipped: No module named 'torch'
+
+    — losing the speaker labels, voiceprints and voice clips for a meeting
+    that recorded perfectly. Loading at the start puts them in memory before
+    an upgrade can take them away, which is what makes deferring a restart
+    until the meeting ends actually sufficient.
+
+    Skipped when the pipeline is not already downloaded, so starting a
+    recording never waits on the network. Returns True when it is resident.
+    """
+    if not hf_token:
+        return False
+    if not any(is_downloaded(model_id) for model_id in pipeline_candidates()):
+        log.debug("Diarization preload skipped: no pipeline in the local cache")
+        return False
+    try:
+        with _diarize_lock:
+            _get_pipeline(hf_token)
+    except Exception as e:
+        log.debug("Diarization preload failed (%s); it will load on demand", e)
+        return False
+    return True
+
+
 def unload_pipeline() -> None:
     """Release the diarization pipeline to free memory after a long idle period."""
     global _pipeline, _loaded_pipeline_id
