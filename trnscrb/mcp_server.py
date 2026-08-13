@@ -23,7 +23,7 @@ from pathlib import Path
 from mcp.server import MCPServer
 
 import trnscrb
-from trnscrb import action_items, diarizer, glossary, storage, transcriber
+from trnscrb import action_items, diarizer, glossary, settings, storage, transcriber
 from trnscrb import recorder as rec_module
 from trnscrb import semantic_search as _semsearch
 from trnscrb.calendar_integration import get_current_or_upcoming_event
@@ -44,6 +44,46 @@ _last_result: str | None = None  # last stop_recording outcome (path + preview)
 _last_error: str | None = None  # last processing error if any
 
 
+def _stale_notice() -> str:
+    """A warning to prepend when this server's install has been replaced.
+
+    An MCP server is a stdio child of its client, so it cannot usefully
+    restart itself: exiting would drop the connection mid-conversation. What
+    it can do is say so, because the alternative is what actually happened —
+    an upgrade removed the tree torch is imported from and a recording
+    finished with "No module named 'torch'", silently losing its speaker
+    labels while every tool still reported success.
+    """
+    from trnscrb import rollout
+
+    if not rollout.is_stale():
+        return ""
+    return (
+        "⚠ trnscrb was upgraded since this server started, so parts of it are "
+        "no longer loadable. Restart Claude Desktop to pick up the new version.\n\n"
+    )
+
+
+def _preload_for_recording() -> None:
+    """Load transcription and diarization before they are needed.
+
+    Both are imported lazily, at stop. An upgrade during the meeting deletes
+    the tree they would come from, so loading now is what keeps a recording
+    that captured perfectly from finishing without speaker labels.
+    """
+    from trnscrb.settings import read_hf_token
+
+    try:
+        transcriber.preload(str(settings.get("transcription_backend") or "auto"))
+    except Exception as e:
+        _log.debug("Transcription preload skipped: %s", e)
+    try:
+        if diarizer.preload(read_hf_token() or ""):
+            _log.info("Diarization pipeline preloaded for this recording")
+    except Exception as e:
+        _log.debug("Diarization preload skipped: %s", e)
+
+
 # ── Tools ─────────────────────────────────────────────────────────────────────
 
 
@@ -59,7 +99,11 @@ def start_recording() -> str:
         _recording_started_at = datetime.now()
     source = "system audio + mic" if _recorder.system_audio_active else "built-in mic"
     _log.info("start_recording: device=%s", source)
-    return f"Recording started at {_recording_started_at.strftime('%H:%M')} using {source}."
+    threading.Thread(target=_preload_for_recording, daemon=True).start()
+    return (
+        _stale_notice()
+        + f"Recording started at {_recording_started_at.strftime('%H:%M')} using {source}."
+    )
 
 
 @mcp.tool()
@@ -120,7 +164,7 @@ def recording_status() -> str:
     if is_recording and started_at:
         elapsed = int((datetime.now() - started_at).total_seconds())
         m, s = divmod(elapsed, 60)
-        return f"Recording in progress — {m}m {s}s elapsed."
+        return _stale_notice() + f"Recording in progress — {m}m {s}s elapsed."
 
     with _state_lock:
         processing = _processing
