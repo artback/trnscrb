@@ -13,7 +13,7 @@ from unittest import mock
 
 import numpy as np
 
-from trnscrb import attribution, diarizer, voiceprints
+from trnscrb import attribution, diarizer, health, voiceprints
 from trnscrb.recorder import SAMPLE_RATE
 
 _MODEL = "pyannote/speaker-diarization-community-1"
@@ -36,7 +36,12 @@ def _vec(*values):
 
 
 class _StoreTest(unittest.TestCase):
-    """Isolates the on-disk store and pins the matching thresholds."""
+    """Isolates the on-disk stores and pins the matching thresholds.
+
+    Every file these tests can reach has to be redirected: enrolment now also
+    records component health, and a test run must not rewrite the diagnostics
+    the user reads.
+    """
 
     threshold = 0.55
     margin = 0.10
@@ -47,6 +52,9 @@ class _StoreTest(unittest.TestCase):
         patcher = mock.patch.object(voiceprints, "STORE", Path(self._tmp.name) / "vp.json")
         patcher.start()
         self.addCleanup(patcher.stop)
+        health_store = mock.patch.object(health, "STORE", Path(self._tmp.name) / "health.json")
+        health_store.start()
+        self.addCleanup(health_store.stop)
         thresholds = mock.patch.object(
             voiceprints, "_thresholds", return_value=(self.threshold, self.margin)
         )
@@ -256,6 +264,29 @@ class LearnVoicesTest(_StoreTest):
 
     def test_disabled_entirely_stores_nothing(self):
         self.assertEqual(self._call(learn_self=False, cluster=False), [])
+
+    # ── what the diagnostics record ───────────────────────────────────────
+
+    def test_a_successful_enrolment_is_recorded(self):
+        self._call()
+        entry = health.get(health.VOICE_ENROLMENT)
+        self.assertTrue(entry["ok"])
+        self.assertIn("1 voice(s)", entry["detail"])
+
+    def test_enrolling_nobody_despite_a_long_speaker_is_a_failure(self):
+        """The reported symptom: meetings go by and `trnscrb voices` never grows."""
+        self._call(self_label=None)
+        entry = health.get(health.VOICE_ENROLMENT)
+        self.assertFalse(entry["ok"])
+        self.assertIn("spoke long enough", entry["detail"])
+
+    def test_a_meeting_with_nobody_over_the_bar_is_not_a_failure(self):
+        """The enrolment bar doing its job must not read as a broken component."""
+        with mock.patch.object(voiceprints, "MIN_ENROLL_SECS", 10_000):
+            self._call(self_label=None)
+        entry = health.get(health.VOICE_ENROLMENT)
+        self.assertTrue(entry["ok"])
+        self.assertIn("needed to enrol", entry["detail"])
 
 
 class EmbeddingsBySpeakerTest(unittest.TestCase):

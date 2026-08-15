@@ -291,18 +291,25 @@ def finalize_orphaned_live_markers(max_age_secs: float = 24 * 3600) -> None:
         _log.debug("Orphan live-marker cleanup failed", exc_info=True)
 
 
-def preserve_audio(audio_path: Path, meeting_name: str, started_at: datetime) -> Path | None:
+def preserve_audio(
+    audio_path: Path,
+    meeting_name: str,
+    started_at: datetime,
+    reason: str = "Transcription failed",
+) -> Path | None:
     """Move a recording into the notes folder instead of deleting it.
 
-    Called when transcription fails — hours of meeting audio must never be
-    thrown away because of a transient error. Returns the saved path.
+    Called when a stage of the pipeline fails — hours of meeting audio must
+    never be thrown away because of a transient error, and everything the
+    pipeline produces can be recomputed from the audio while the audio itself
+    cannot be recomputed from anything. Returns the saved path.
     """
     import shutil
 
     try:
         dest = get_transcript_path(meeting_name, started_at).with_suffix(".wav")
         shutil.move(str(audio_path), dest)
-        _log.warning("Transcription failed — audio preserved at %s", dest)
+        _log.warning("%s — audio preserved at %s", reason, dest)
         return dest
     except Exception:
         _log.error("Could not preserve audio %s", audio_path, exc_info=True)
