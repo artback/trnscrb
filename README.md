@@ -151,7 +151,16 @@ trnscrb weekly           # weekly summary from transcripts
 trnscrb annual           # annual summary from weekly summaries
 trnscrb mic-status       # live mic activity monitor
 trnscrb devices          # list audio input devices
+trnscrb doctor           # run the speaker-labelling stack end to end
 ```
+
+### When speaker labels stop working
+
+A meeting that transcribes but fails to diarize looks like a success: the transcript saves, and the only trace is one line in a log. `trnscrb status` reports what actually happened the last time diarization ran — "failing since 2026-08-14 (9 meetings)" rather than a ✓ because the model file is on disk — and the menu bar carries the same standing state.
+
+`trnscrb doctor` is the one that tells you *where* it broke: it decodes audio, loads the pipeline and diarizes a clip, checking each stage in turn. `--quick` skips the model load. Once it passes, the recorded failure clears.
+
+When diarization fails, the recording is kept instead of deleted, so the speaker labels and voiceprints for that meeting are not lost — redo it with `trnscrb transcribe <wav>` once `doctor` is green.
 
 ---
 

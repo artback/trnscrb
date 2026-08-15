@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from trnscrb import diarizer
+from trnscrb import diarizer, health
 from trnscrb.cli import _diarization_ready
 
 
@@ -56,6 +56,13 @@ class IsDownloadedTest(unittest.TestCase):
 
 
 class DiarizationReadyTest(unittest.TestCase):
+    def setUp(self):
+        """Isolate the health store — status now reports what actually ran."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.addCleanup(setattr, health, "STORE", health.STORE)
+        health.STORE = Path(tmp.name) / "health.json"
+
     def test_no_token_is_reported_as_optional(self):
         with mock.patch("trnscrb.settings.read_hf_token", return_value=None):
             ok, detail = _diarization_ready()
@@ -89,7 +96,40 @@ class DiarizationReadyTest(unittest.TestCase):
         ):
             ok, detail = _diarization_ready()
         self.assertTrue(ok)
-        self.assertEqual(detail, "c/d")
+        self.assertIn("c/d", detail)
+
+    def test_a_failing_last_run_beats_an_installed_model(self):
+        """The six-day bug: everything on disk was correct and nothing worked."""
+        health.record_failure(health.DIARIZATION, "torchcodec is not available")
+        with (
+            mock.patch("trnscrb.settings.read_hf_token", return_value="hf_x"),
+            mock.patch.object(diarizer, "is_downloaded", return_value=True),
+        ):
+            ok, detail = _diarization_ready()
+        self.assertFalse(ok)
+        self.assertIn("torchcodec", detail)
+        self.assertIn("doctor", detail)
+
+    def test_a_successful_last_run_is_reported_with_the_model(self):
+        health.record_ok(health.DIARIZATION, "3 speaker(s)")
+        with (
+            mock.patch("trnscrb.settings.read_hf_token", return_value="hf_x"),
+            mock.patch.object(diarizer, "is_downloaded", side_effect=lambda m: "community" in m),
+        ):
+            ok, detail = _diarization_ready()
+        self.assertTrue(ok)
+        self.assertIn("community", detail)
+        self.assertIn("3 speaker(s)", detail)
+
+    def test_a_recovered_run_stops_being_reported_as_broken(self):
+        health.record_failure(health.DIARIZATION, "torchcodec is not available")
+        health.record_ok(health.DIARIZATION, "verified by `trnscrb doctor`")
+        with (
+            mock.patch("trnscrb.settings.read_hf_token", return_value="hf_x"),
+            mock.patch.object(diarizer, "is_downloaded", return_value=True),
+        ):
+            ok, _ = _diarization_ready()
+        self.assertTrue(ok)
 
 
 if __name__ == "__main__":

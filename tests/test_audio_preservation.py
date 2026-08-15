@@ -57,6 +57,14 @@ class PreserveAudioTest(unittest.TestCase):
         saved = storage.preserve_audio(missing, "x", datetime.now())
         self.assertIsNone(saved)
 
+    def test_the_reason_is_logged_so_the_two_cases_are_distinguishable(self):
+        """Kept because transcription failed, or because speaker labels did."""
+        audio = Path(self._tmp.name) / "tmpdef.wav"
+        audio.write_bytes(b"RIFF" + b"\x00" * 100)
+        with self.assertLogs("trnscrb.storage", level="WARNING") as logs:
+            storage.preserve_audio(audio, "standup", datetime.now(), "Speaker labels failed")
+        self.assertIn("Speaker labels failed", "\n".join(logs.output))
+
 
 class LiveSessionTest(unittest.TestCase):
     def setUp(self):

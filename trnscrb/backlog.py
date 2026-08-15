@@ -41,7 +41,7 @@ def transcribe_file(audio_file: Path, meeting_name: str = "") -> tuple[Path, int
     identical output — and so the transcript lands where `has_transcript`
     looks for it.
     """
-    from trnscrb import diarizer, storage, transcriber
+    from trnscrb import diarizer, health, storage, transcriber
     from trnscrb.settings import read_hf_token
 
     finalize_wav_header(audio_file)
@@ -53,9 +53,13 @@ def transcribe_file(audio_file: Path, meeting_name: str = "") -> tuple[Path, int
     hf_token = read_hf_token()
     if hf_token and segments:
         try:
-            segments = diarizer.merge(segments, diarizer.diarize(audio_file, hf_token))
+            diar = diarizer.diarize(audio_file, hf_token)
+            segments = diarizer.merge(segments, diar)
+            health.record_ok(
+                health.DIARIZATION, f"{len({t['speaker'] for t in diar})} speaker(s)", meeting_name
+            )
         except Exception as e:
-            _log.warning("Diarization skipped for %s: %s", audio_file.name, e)
+            health.record_failure(health.DIARIZATION, e, meeting_name)
 
     text = storage.format_transcript(segments, started_at, meeting_name)
     out = storage.get_transcript_path(meeting_name, started_at)
