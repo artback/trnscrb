@@ -80,3 +80,54 @@ class SpeakerTimelineTest(unittest.TestCase):
     def test_bare_annotation_is_returned_as_is(self):
         annotation = object()
         self.assertIs(diarizer._speaker_timeline(annotation), annotation)
+
+
+class AudioInputTest(unittest.TestCase):
+    """The pipeline is fed a waveform, so a broken torchcodec can't kill it."""
+
+    def _wav(self, seconds=1.0, rate=16_000):
+        import struct
+        import tempfile
+        import wave
+        from pathlib import Path
+
+        path = Path(tempfile.mkstemp(suffix=".wav")[1])
+        self.addCleanup(path.unlink, missing_ok=True)
+        frames = int(seconds * rate)
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(b"".join(struct.pack("<h", (i % 1000) - 500) for i in range(frames)))
+        return path
+
+    def test_decodes_a_wav_into_a_waveform(self):
+        audio = diarizer._audio_input(self._wav(seconds=0.5))
+        self.assertIsInstance(audio, dict)
+        self.assertEqual(audio["sample_rate"], 16_000)
+        channels, frames = audio["waveform"].shape
+        self.assertEqual(channels, 1)
+        self.assertEqual(frames, 8_000)
+
+    def test_unreadable_audio_falls_back_to_the_path(self):
+        import tempfile
+        from pathlib import Path
+
+        path = Path(tempfile.mkstemp(suffix=".wav")[1])
+        self.addCleanup(path.unlink, missing_ok=True)
+        path.write_bytes(b"not a wav")
+        self.assertEqual(diarizer._audio_input(path), str(path))
+
+    def test_diarize_hands_the_waveform_to_the_pipeline(self):
+        seen = {}
+
+        empty = types.SimpleNamespace(itertracks=lambda yield_label: iter(()))
+
+        def pipeline(audio):
+            seen["audio"] = audio
+            return types.SimpleNamespace(speaker_diarization=empty, speaker_embeddings=None)
+
+        with patch.object(diarizer, "_get_pipeline", return_value=pipeline):
+            diarizer.diarize_with_embeddings(self._wav(), "hf_token")
+        self.assertIsInstance(seen["audio"], dict)
+        self.assertIn("waveform", seen["audio"])

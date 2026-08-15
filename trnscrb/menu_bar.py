@@ -413,7 +413,11 @@ class TrnscrbApp(rumps.App):
     # ── watcher ───────────────────────────────────────────────────────────────
 
     def _start_watcher(self):
-        self._watcher = MicWatcher(on_start=self._auto_start, on_stop=self._auto_stop)
+        self._watcher = MicWatcher(
+            on_start=self._auto_start,
+            on_stop=self._auto_stop,
+            speech_ratio=lambda secs: attribution.live_speech_ratio(self._recorder, secs),
+        )
         self._watcher.start()
         if not (self._recorder and self._recorder.is_recording):
             self._set_icon_state("watching")

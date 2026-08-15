@@ -604,3 +604,90 @@ class MicActivityListenerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QuietStopTest(unittest.TestCase):
+    """A meeting tab left open must not hold a recording open for the day."""
+
+    def _watcher(self, ratio):
+        self.stopped = 0
+        return MicWatcher(
+            on_start=lambda name: None,
+            on_stop=lambda: setattr(self, "stopped", self.stopped + 1),
+            speech_ratio=ratio,
+        )
+
+    def test_silence_is_quiet(self):
+        self.assertTrue(self._watcher(lambda secs: 0.0)._call_went_quiet())
+
+    def test_speech_is_not_quiet(self):
+        self.assertFalse(self._watcher(lambda secs: 0.5)._call_went_quiet())
+
+    def test_unknown_is_not_quiet(self):
+        """Too early to tell is not the same as over."""
+        self.assertFalse(self._watcher(lambda secs: None)._call_went_quiet())
+
+    def test_no_provider_is_not_quiet(self):
+        self.assertFalse(self._watcher(None)._call_went_quiet())
+
+    def test_a_failing_provider_is_not_quiet(self):
+        def boom(secs):
+            raise RuntimeError("no recorder")
+
+        self.assertFalse(self._watcher(boom)._call_went_quiet())
+
+    def test_the_rule_can_be_switched_off(self):
+        w = self._watcher(lambda secs: 0.0)
+        with patch("trnscrb.settings.get", return_value=0):
+            self.assertFalse(w._call_went_quiet())
+
+    def test_the_window_comes_from_settings(self):
+        asked = []
+        w = self._watcher(lambda secs: asked.append(secs) or 1.0)
+        with patch("trnscrb.settings.get", return_value=3):
+            w._call_went_quiet()
+        self.assertEqual(asked, [180.0])
+
+    # ── the state machine ─────────────────────────────────────────────────
+
+    def _drive(self, ratio, seconds=0.6):
+        """Run the loop with a meeting app that never goes away.
+
+        Returns the state when the recording ended, or after `seconds` if it
+        never did. The mic stays busy throughout — that is what a recording
+        looks like from CoreAudio, since we hold the microphone ourselves.
+        """
+        import threading
+
+        ended = threading.Event()
+
+        def on_stop():
+            self.stopped += 1
+            ended.set()
+
+        self.stopped = 0
+        w = MicWatcher(on_start=lambda name: None, on_stop=on_stop, speech_ratio=ratio)
+        with (
+            patch.object(watcher, "is_mic_in_use", return_value=True),
+            patch.object(watcher, "is_meeting_app_running", return_value=True),
+            patch.object(watcher, "detect_meeting", return_value="Google Meet"),
+            patch.object(watcher._MicActivityListener, "start", return_value=False),
+            patch.object(watcher, "POLL_SECS", 0.01),
+            patch.object(watcher, "WARMUP_SECS", 0.02),
+            patch.object(watcher, "APP_POLL_EVERY", 1),
+            patch.object(watcher, "GRACE_SECS", 0.05),
+            patch.object(watcher, "MIN_SAVE_SECS", 0),
+        ):
+            w.start()
+            ended.wait(seconds)
+            state = w.state
+            w.stop()
+        return state
+
+    def test_a_silent_call_stops_even_with_the_tab_still_open(self):
+        self._drive(lambda secs: 0.0)
+        self.assertEqual(self.stopped, 1)
+
+    def test_a_call_being_spoken_on_keeps_recording(self):
+        self.assertEqual(self._drive(lambda secs: 0.5), "recording")
+        self.assertEqual(self.stopped, 0)

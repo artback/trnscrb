@@ -73,6 +73,12 @@ _DEFAULTS: dict = {
     # transcript path outright, so nothing needs searching for.
     "integrate_allowed_tools": "Read,Write,Edit",
     "live_on_battery": False,  # keep the live-transcription loop running on battery
+    # End a recording after this many minutes with nobody speaking, even while
+    # a meeting tab is still open. A tab left open after the call looks exactly
+    # like a live one, so without this a forgotten tab keeps recording until
+    # the browser closes and swallows the day's later calls into one file.
+    # 0 disables it, at the risk of exactly that.
+    "quiet_stop_minutes": 15,
     # Learn a fingerprint of the user's own voice from meetings they record.
     # The mic stream identifies them unambiguously, and it is their voice to
     # keep. Inspect or delete with `trnscrb voices`.

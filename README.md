@@ -32,6 +32,8 @@ trnscrb start       # launch the menu bar app
 
 With **Auto-transcribe** on (the default), trnscrb detects when a meeting starts and begins recording automatically. When the meeting ends, it transcribes and saves to `~/meeting-notes/`.
 
+A meeting ends when the app or tab closes, or after 15 minutes with nobody speaking — a Meet tab left open after the call looks exactly like a live one, and without the silence rule it would keep the recording running until the browser quits, folding the rest of the day's calls into the same file. Change the wait with `trnscrb config set quiet_stop_minutes 10`, or set it to `0` to rely on the tab alone.
+
 **During a call**, click **Open Latest** in the menu bar to read the live transcript — it updates every 60 seconds. Or stream it to your terminal:
 
 ```bash
