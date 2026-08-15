@@ -154,3 +154,38 @@ class RecorderTimelineTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RecentSpeechRatioTest(unittest.TestCase):
+    """The live "is anyone still talking?" read on the same energy timeline."""
+
+    def test_silence_after_speech_reads_as_silent(self):
+        timeline = _timeline(
+            [(s, 0.01, 0.0) for s in range(10)] + [(s, 0.0, 0.0) for s in range(10, 40)]
+        )
+        self.assertEqual(attribution.recent_speech_ratio(timeline, window_secs=20), 0.0)
+
+    def test_talking_reads_as_speech(self):
+        timeline = _timeline([(s, 0.01, 0.0) for s in range(40)])
+        self.assertEqual(attribution.recent_speech_ratio(timeline, window_secs=20), 1.0)
+
+    def test_only_the_other_side_talking_still_counts(self):
+        timeline = _timeline([(s, 0.0, 0.01) for s in range(40)])
+        self.assertEqual(attribution.recent_speech_ratio(timeline, window_secs=20), 1.0)
+
+    def test_room_tone_is_not_speech(self):
+        """Ambient noise measured against the call's own speech level, not its own."""
+        loud = [(s, 0.01, 0.0) for s in range(10)]
+        quiet = [(s, 4e-5, 0.0) for s in range(10, 40)]  # above the silence gate
+        self.assertEqual(attribution.recent_speech_ratio(_timeline(loud + quiet), 20), 0.0)
+
+    def test_a_recording_younger_than_the_window_is_unknown(self):
+        timeline = _timeline([(s, 0.01, 0.0) for s in range(5)])
+        self.assertIsNone(attribution.recent_speech_ratio(timeline, window_secs=20))
+
+    def test_a_recording_that_never_had_speech_is_unknown(self):
+        timeline = _timeline([(s, 0.0, 0.0) for s in range(40)])
+        self.assertIsNone(attribution.recent_speech_ratio(timeline, window_secs=20))
+
+    def test_no_recording_is_unknown(self):
+        self.assertIsNone(attribution.live_speech_ratio(None, 20))

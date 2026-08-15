@@ -220,6 +220,37 @@ def _embeddings_by_speaker(result, pipeline=None) -> dict:
     return dict(zip(labels, vectors, strict=True))
 
 
+def _audio_input(audio_path: Path):
+    """What to hand the pipeline: a decoded waveform when we can read one.
+
+    Given a path, pyannote 4 decodes it through torchcodec, which links
+    against one specific FFmpeg major version. A Homebrew ffmpeg that has
+    moved past it leaves torchcodec unable to load at all, and then every
+    meeting ends with
+
+        Diarization skipped: torchcodec is not available
+
+    — no speaker labels, no voiceprints, for a recording that captured
+    perfectly. Our own recordings are plain 16-bit PCM WAV, which soundfile
+    reads with no FFmpeg involved, so decode here and pass the waveform
+    through pyannote's in-memory form instead. Falls back to the path for
+    anything soundfile cannot open, leaving the pipeline to try its decoder.
+    """
+    import soundfile as sf
+    import torch
+
+    try:
+        samples, sample_rate = sf.read(str(audio_path), dtype="float32", always_2d=True)
+    except Exception:
+        log.debug("Could not decode %s here; leaving it to the pipeline", audio_path.name)
+        return str(audio_path)
+    # soundfile gives (frames, channels); pyannote wants (channels, frames).
+    return {
+        "waveform": torch.from_numpy(np.ascontiguousarray(samples.T)),
+        "sample_rate": int(sample_rate),
+    }
+
+
 def diarize_with_embeddings(audio_path: Path, hf_token: str) -> tuple[list[dict], dict]:
     """Speaker turns plus each speaker's centroid embedding.
 
@@ -227,7 +258,7 @@ def diarize_with_embeddings(audio_path: Path, hf_token: str) -> tuple[list[dict]
     """
     with _diarize_lock:
         pipeline = _get_pipeline(hf_token)
-        diarization = pipeline(str(audio_path))
+        diarization = pipeline(_audio_input(audio_path))
 
     turns = [
         {"start": turn.start, "end": turn.end, "speaker": speaker}

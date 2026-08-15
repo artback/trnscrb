@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trnscrb"
-version = "0.42.0"
+version = "0.43.0"
 description = "Offline meeting transcription for macOS — auto-detects meetings, transcribes locally with Parakeet or Whisper, saves to Claude Desktop via MCP"
 readme = "README.md"
 license = "MIT"
@@ -30,6 +30,10 @@ dependencies = [
     "numpy>=1.24",
     "faster-whisper>=1.0.0",
     "pyannote.audio>=3.1",
+    # Decodes recordings for the diarizer without FFmpeg, which is what keeps
+    # speaker labels working when pyannote's own torchcodec backend cannot
+    # load (was only transitive via librosa).
+    "soundfile>=0.12",
     # On-device text embeddings for semantic transcript search (reuses the torch
     # that pyannote already pulls in).
     "sentence-transformers>=3.0",

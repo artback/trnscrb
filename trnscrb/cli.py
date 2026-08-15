@@ -434,7 +434,13 @@ def watch():
                 _log.warning("Auto-enrich failed: %s", e)
                 click.echo(f"  ⚠  Enrichment skipped: {e}")
 
-    watcher = MicWatcher(on_start=on_start, on_stop=on_stop)
+    from trnscrb import attribution as _attribution
+
+    watcher = MicWatcher(
+        on_start=on_start,
+        on_stop=on_stop,
+        speech_ratio=lambda secs: _attribution.live_speech_ratio(_recorder_ref[0], secs),
+    )
     watcher.start()
 
     click.echo(f"Watching for mic activity (warmup={WARMUP_SECS}s, grace={GRACE_SECS}s).")

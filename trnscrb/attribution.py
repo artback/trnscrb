@@ -137,6 +137,49 @@ def self_speaker(turns: list[dict], timeline) -> tuple[str | None, float]:
     return best, best_secs
 
 
+def recent_speech_ratio(timeline, window_secs: float) -> float | None:
+    """How much of the last ``window_secs`` carried speech, or None if unknown.
+
+    The live counterpart of label_segments: same energy timeline, asked
+    "is anyone still talking?" while the recording is running.
+
+    Loudness is judged against the *whole* recording's speech level rather
+    than the window's own. A window normalised against itself promotes room
+    tone to speech as soon as the room goes quiet, so the answer would always
+    come back "still talking" — precisely when it matters that it doesn't.
+
+    None when the recording is younger than the window, or when neither
+    stream has ever reached speech level: nothing there is evidence that a
+    call has ended.
+    """
+    offsets, mic_energy, sys_energy = timeline
+    if len(offsets) == 0:
+        return None
+    window_frames = window_secs * SAMPLE_RATE
+    if offsets[-1] - offsets[0] < window_frames:
+        return None
+
+    mic_floor = _speech_floor(mic_energy)
+    sys_floor = _speech_floor(sys_energy)
+    if not math.isfinite(mic_floor) and not math.isfinite(sys_floor):
+        return None
+
+    window = offsets >= offsets[-1] - window_frames
+    speaking = (mic_energy[window] >= mic_floor) | (sys_energy[window] >= sys_floor)
+    return float(np.mean(speaking))
+
+
+def live_speech_ratio(recorder, window_secs: float) -> float | None:
+    """recent_speech_ratio for a recording in progress, None when there is none.
+
+    The form the watcher wants: it asks the question every few seconds
+    without knowing whether anything is recording at the time.
+    """
+    if recorder is None or not recorder.is_recording:
+        return None
+    return recent_speech_ratio(recorder.attribution_timeline(), window_secs)
+
+
 def name_from_calendar(segments: list[dict], event: dict | None) -> str | None:
     """Rename "Them" to the other attendee when the meeting has exactly one.
 

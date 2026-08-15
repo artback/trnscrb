@@ -3756,7 +3756,7 @@ wheels = [
 
 [[package]]
 name = "trnscrb"
-version = "0.35.0"
+version = "0.43.0"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
@@ -3778,6 +3778,7 @@ dependencies = [
     { name = "scipy" },
     { name = "sentence-transformers" },
     { name = "sounddevice" },
+    { name = "soundfile" },
 ]
 
 [package.metadata]
@@ -3801,6 +3802,7 @@ requires-dist = [
     { name = "scipy", specifier = ">=1.11" },
     { name = "sentence-transformers", specifier = ">=3.0" },
     { name = "sounddevice", specifier = ">=0.4.6" },
+    { name = "soundfile", specifier = ">=0.12" },
 ]
 
 [[package]]

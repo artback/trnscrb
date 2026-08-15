@@ -6,7 +6,7 @@ A muted call still records: when the mic is off but a browser/meeting app is
 producing audio output (the other participants talking) and a meeting app/tab
 is confirmed present, that counts as call activity too.
 
-Two stop conditions (whichever comes first):
+Three stop conditions (whichever comes first):
   1. Mic goes idle AND meeting app/tab is no longer detected for GRACE_SECS.
      When mic is off but the meeting app is still running (user is muted),
      recording continues to avoid splitting a single call into multiple files.
@@ -14,6 +14,11 @@ Two stop conditions (whichever comes first):
      even if mic is still technically active (handles Chrome keeping mic warm
      after leaving Google Meet).  App is checked every APP_POLL_EVERY mic
      polls so slow osascript doesn't block the mic-poll loop.
+  3. Nobody has said anything for QUIET_STOP_SECS, whatever the browser still
+     has open.  A meeting tab left open after the call looks exactly like a
+     live one, and while we record we hold the microphone ourselves — so
+     without this, one forgotten tab keeps a single recording running for the
+     rest of the day and swallows every later call into the same file.
 
 State machine:
   idle  ──(mic on 5s)──► warming ──(5s elapsed)──► recording
@@ -48,6 +53,19 @@ POLL_SECS = 1.0  # how often we check mic (fast CoreAudio call)
 APP_POLL_EVERY = 4  # run the slow meeting-app check every N mic polls (~4s)
 APP_GONE_POLLS = 3  # N consecutive app-gone checks → start cooling (~12s)
 IDLE_FALLBACK_SECS = 30.0  # safety re-poll while idle in event-driven mode
+# Silence this long ends the recording even with a meeting tab still open.
+#
+# Measured against 9 real recordings (35–219 min): a five-minute silence
+# happens *inside* two of them, and a ten-minute one inside one — meetings do
+# go quiet for a long time, and stopping there would cut a meeting in half.
+# Nothing went 15 minutes without speech until it was genuinely over, so that
+# is where the line sits. Erring long is deliberate: a late stop costs a few
+# minutes of silence at the end of the file, an early one costs half a meeting.
+QUIET_STOP_SECS = 900.0
+# Share of that window that has to carry speech for the call to count as
+# live. One block in fifty is plenty: a pause between sentences, or one
+# person reading a document, is not the end of a meeting — an empty room is.
+LIVE_SPEECH_RATIO = 0.02
 
 # ── Meeting app detection ─────────────────────────────────────────────────────
 # Used by detect_meeting() at recording START — can be broad because the mic
@@ -127,9 +145,13 @@ class MicWatcher:
         self,
         on_start: Callable[[str], None],
         on_stop: Callable[[], None],
+        speech_ratio: Callable[[float], float | None] | None = None,
     ):
         self.on_start = on_start
         self.on_stop = on_stop
+        # Optional: how much of the last N seconds of the live recording
+        # carried speech. Without it the quiet-stop rule is simply inactive.
+        self.speech_ratio = speech_ratio
 
         self._thread: threading.Thread | None = None
         self._running = False
@@ -147,6 +169,10 @@ class MicWatcher:
         self._suppressed = False
         self._last_output_app_check = 0.0  # throttles the muted-call osascript
         self._output_meeting_cached = False
+        # True when we started cooling because the room went silent rather
+        # than because the meeting app disappeared. The app check cannot end
+        # that state: the tab that kept the recording alive is still there.
+        self._cooling_on_silence = False
 
     def start(self) -> None:
         if self._running:
@@ -156,6 +182,7 @@ class MicWatcher:
         self._since = None
         self._no_app_polls = 0
         self._suppressed = False
+        self._cooling_on_silence = False
         # Event-driven idle: CoreAudio wakes us on mic/device changes so the
         # idle loop doesn't have to poll every second. Falls back to polling.
         self._listener = _MicActivityListener(self._wake)
@@ -212,6 +239,44 @@ class MicWatcher:
                 _log.debug("muted-call signal: meeting app playing audio, mic off")
         return self._output_meeting_cached
 
+    def _quiet_stop_secs(self) -> float:
+        """How long a silence has to run before it ends the recording.
+
+        Configurable because the right answer depends on how the user's
+        meetings go; 0 turns the rule off for anyone who would rather have
+        one long file than risk a split.
+        """
+        from trnscrb import settings
+
+        minutes = settings.get("quiet_stop_minutes")
+        if minutes is None:
+            return QUIET_STOP_SECS
+        try:
+            return max(float(minutes), 0.0) * 60.0
+        except (TypeError, ValueError):
+            return QUIET_STOP_SECS
+
+    def _call_went_quiet(self) -> bool:
+        """True when nobody has spoken for long enough that the call is over.
+
+        Both streams are read, so it takes the user *and* everyone else being
+        silent — being the only one talking keeps the recording going, and so
+        does listening to someone who is.
+        """
+        if self.speech_ratio is None:
+            return False
+        window = self._quiet_stop_secs()
+        if window <= 0:
+            return False
+        try:
+            ratio = self.speech_ratio(window)
+        except Exception:
+            _log.debug("Speech-activity check failed", exc_info=True)
+            return False
+        if ratio is None:
+            return False  # too early to tell, or this recording never had speech
+        return ratio < LIVE_SPEECH_RATIO
+
     # ── event loop ────────────────────────────────────────────────────────────
 
     def _loop(self) -> None:
@@ -239,6 +304,7 @@ class MicWatcher:
                 self._since = None
                 self._rec_started = None
                 self._no_app_polls = 0
+                self._cooling_on_silence = False
                 _app_counter = 0
                 _app_running = False
                 # Stopping mid-call is a deliberate act ("stop recording this
@@ -312,6 +378,23 @@ class MicWatcher:
                         _app_running,
                         self._no_app_polls,
                     )
+                    # Checked on the slow tick because it reads the whole
+                    # recording's energy timeline, and because a rule about
+                    # minutes of silence gains nothing from being asked
+                    # every second.
+                    if self._call_went_quiet():
+                        _log.info(
+                            "no speech for %.0fs — ending the recording "
+                            "(meeting app still detected: %s)",
+                            self._quiet_stop_secs(),
+                            _app_running,
+                        )
+                        _log.debug("state %s → %s", "recording", "cooling")
+                        self._state = "cooling"
+                        self._since = now
+                        self._no_app_polls = 0
+                        self._cooling_on_silence = True
+                        continue  # the rest of this branch is for a live call
 
                 if not active:
                     if _app_running:
@@ -350,12 +433,21 @@ class MicWatcher:
                 if _app_counter >= APP_POLL_EVERY:
                     _app_counter = 0
                     _app_running = is_meeting_app_running()
-                    if _app_running:
+                    # After a silence stop the meeting app is still there —
+                    # that is the whole point — so only somebody actually
+                    # speaking counts as the meeting coming back. Resuming on
+                    # the app check alone would bounce cooling → recording →
+                    # cooling forever and the file would never close.
+                    resume = _app_running and not (
+                        self._cooling_on_silence and self._call_went_quiet()
+                    )
+                    if resume:
                         # Meeting genuinely came back (un-muted, tab refocused).
                         _log.debug("state %s → %s", "cooling", "recording")
                         self._state = "recording"
                         self._since = now
                         self._no_app_polls = 0
+                        self._cooling_on_silence = False
 
                 # Only stop if still in cooling (app check may have moved us back)
                 # and the grace period has elapsed.
@@ -366,6 +458,7 @@ class MicWatcher:
                     self._since = None
                     self._rec_started = None
                     self._no_app_polls = 0
+                    self._cooling_on_silence = False
                     if duration >= MIN_SAVE_SECS:
                         _log.info("on_stop firing — recording duration=%.1fs", duration)
                         self.on_stop()
