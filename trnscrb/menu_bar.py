@@ -20,6 +20,7 @@ from trnscrb import (
     attribution,
     diarizer,
     enricher,
+    health,
     obsidian,
     storage,
     titles,
@@ -227,6 +228,10 @@ class TrnscrbApp(rumps.App):
         self._open_latest_item = rumps.MenuItem("Open Latest", callback=self.open_latest)
         self._bookmark_item = rumps.MenuItem("Bookmark This Moment", callback=self.add_bookmark)
         self._voices_item = rumps.MenuItem("Label Voices…", callback=self.label_voices)
+        # Standing state, not a notification: a component that has been broken
+        # all week should be readable from the menu at any moment, rather than
+        # having announced itself once, days ago, in a banner that vanished.
+        self._health_item = rumps.MenuItem("Diagnostics…", callback=self.show_health)
 
         self.menu = [
             self._start_item,
@@ -238,6 +243,7 @@ class TrnscrbApp(rumps.App):
             self._bookmark_item,
             self._voices_item,
             self._open_latest_item,
+            self._health_item,
             self._settings_item,
             None,
             rumps.MenuItem("Open Notes Folder", callback=self.open_folder),
@@ -266,6 +272,7 @@ class TrnscrbApp(rumps.App):
         if get_setting("auto_integrate"):
             self._integrate_item.title = "Auto-integrate notes: On ✓"
         self._refresh_enrich_settings_menu()
+        self._update_health_item()
 
         # Models load lazily when a recording starts (see _do_start) and are
         # released again after a long idle period to free ~1 GB of memory.
@@ -675,6 +682,42 @@ class TrnscrbApp(rumps.App):
         if getattr(menu_item, "_menu", None) is not None:
             menu_item.clear()
 
+    def _update_health_item(self):
+        """Put any standing failure in the menu title itself.
+
+        A menu entry that always reads "Diagnostics…" is one nobody opens.
+        The whole point is that a component which quietly stopped working is
+        visible without being looked for.
+        """
+        try:
+            broken = health.unhealthy()
+            if not broken:
+                self._health_item.title = "Diagnostics: all clear"
+                return
+            name, entry = broken[0]
+            label = health.LABELS.get(name, name)
+            failures = int(entry.get("failures", 1))
+            suffix = f" ({failures}×)" if failures > 1 else ""
+            more = f" +{len(broken) - 1} more" if len(broken) > 1 else ""
+            self._health_item.title = f"⚠ {label} failing{suffix}{more}"
+        except Exception:
+            _log.debug("Could not refresh the diagnostics item", exc_info=True)
+
+    def show_health(self, _):
+        """What each component did the last time it ran, and for how long."""
+        broken = health.unhealthy()
+        lines = [
+            f"{health.LABELS.get(name, name)}: {health.describe(name)}"
+            for name in sorted(health.LABELS)
+            if health.get(name)
+        ]
+        if not lines:
+            lines = ["Nothing has run yet."]
+        if broken:
+            lines.append("")
+            lines.append("Run `trnscrb doctor` in a terminal to test the stack end to end.")
+        rumps.alert("Trnscrb diagnostics", "\n".join(lines))
+
     def label_voices(self, _):
         """Play each unnamed voice and ask who it is.
 
@@ -1038,6 +1081,11 @@ class TrnscrbApp(rumps.App):
     ):
         audio_path = None
         transcript_saved = False
+        # Speaker labels and voiceprints can only ever be derived from the
+        # audio, and the audio is deleted the moment the transcript saves.
+        # When diarization fails, that deletion turns a recoverable error into
+        # a permanent one, so the recording is kept instead.
+        speakers_lost = False
         try:
             # Read before stopping — stop() clears the capture state.
             system_audio_used = recorder.system_audio_active
@@ -1071,13 +1119,26 @@ class TrnscrbApp(rumps.App):
                 try:
                     diar, embeddings = diarizer.diarize_with_embeddings(audio_path, hf_token)
                     segments = diarizer.merge(segments, diar)
+                    health.record_ok(
+                        health.DIARIZATION,
+                        f"{len({t['speaker'] for t in diar})} speaker(s)",
+                        meeting_name,
+                    )
                     # system_audio_used was read before stop() cleared it.
                     self._learn_voices(
                         diar, embeddings, recorder, system_audio_used, meeting_name, audio_path
                     )
                 except Exception as e:
-                    _log.warning("Diarization skipped: %s", e)
-                    _notify("Trnscrb", "Speaker labels skipped", str(e)[:180])
+                    # The transcript still saves, so nothing about this meeting
+                    # looks wrong — which is exactly why it gets written down.
+                    entry = health.record_failure(health.DIARIZATION, e, meeting_name)
+                    speakers_lost = True
+                    if health.should_notify(entry):
+                        _notify(
+                            "Trnscrb",
+                            f"Speaker labels failing ({entry.get('failures', 1)}×)",
+                            f"{str(e)[:120]} — run `trnscrb doctor`",
+                        )
 
             if segments:
                 attribution.label_segments(segments, recorder.attribution_timeline())
@@ -1085,20 +1146,20 @@ class TrnscrbApp(rumps.App):
                 # generic rather than risk attaching the wrong name.
                 attribution.name_from_calendar(segments, evt)
 
-            health = analytics.capture_health(
+            capture = analytics.capture_health(
                 segments,
                 recorded_secs=(datetime.now() - started_at).total_seconds(),
                 system_audio=system_audio_used,
             )
-            if health.get("mostly_silent"):
+            if capture.get("mostly_silent"):
                 _log.warning(
                     "%s looks mostly silent (%.0f%% speech) — likely an idle tab",
                     meeting_name,
-                    health["speech_ratio"] * 100,
+                    capture["speech_ratio"] * 100,
                 )
 
             text = storage.format_transcript(
-                segments, started_at, meeting_name, bookmarks=bookmarks, health=health
+                segments, started_at, meeting_name, bookmarks=bookmarks, health=capture
             )
             path = live_path or storage.get_transcript_path(meeting_name, started_at)
             storage.save_transcript(path, text)
@@ -1198,18 +1259,22 @@ class TrnscrbApp(rumps.App):
             _notify("Trnscrb", "Error", str(e)[:180])
         finally:
             if audio_path:
-                if transcript_saved:
+                if transcript_saved and not speakers_lost:
                     audio_path.unlink(missing_ok=True)
                 else:
-                    # Never discard the meeting because transcription failed.
+                    # Never discard the meeting because a stage failed: the
+                    # transcript can be redone from the audio, and nothing can
+                    # redo the audio.
+                    reason = "Speaker labels failed" if transcript_saved else "Transcription failed"
                     name = meeting_name or f"meeting-{started_at.strftime('%H%M')}"
-                    saved = storage.preserve_audio(audio_path, name, started_at)
+                    saved = storage.preserve_audio(audio_path, name, started_at, reason)
                     if saved:
                         _notify(
                             "Trnscrb",
-                            "Audio saved for retry",
-                            f"Transcription failed — audio kept at {saved.name}",
+                            "Audio kept for retry",
+                            f"{reason} — redo with `trnscrb transcribe {saved.name}`",
                         )
+            self._update_health_item()
             self._restore_idle()
 
     def _learn_voices(
@@ -1251,6 +1316,7 @@ class TrnscrbApp(rumps.App):
             speech = _speech_by_speaker(diar)
 
             self_label = None
+            voice_id = None
             if learn_self:
                 self_label, secs = attribution.self_speaker(diar, recorder.attribution_timeline())
                 if self_label is not None and self_label in embeddings:
@@ -1266,6 +1332,7 @@ class TrnscrbApp(rumps.App):
                 else:
                     _log.debug("No unambiguous self speaker; skipping self enrolment")
 
+            learned = [voice_id] if voice_id else []
             if cluster_others:
                 for label, vector in embeddings.items():
                     if label == self_label:
@@ -1274,9 +1341,34 @@ class TrnscrbApp(rumps.App):
                         vector, model, speech.get(label, 0.0), meeting, label, space
                     )
                     if other_id:
+                        learned.append(other_id)
                         _keep_voice_sample(other_id, audio_path, diar, label)
-        except Exception:
+
+            # "Ran and enrolled nobody" is the shape this failure takes: every
+            # meeting looks fine and `trnscrb voices` quietly never grows.
+            # A meeting where nobody spoke for long enough is not that — it is
+            # the enrolment bar doing its job, and flagging it would train the
+            # user to ignore the warning that matters.
+            enrollable = [
+                label for label, secs in speech.items() if secs >= voiceprints.MIN_ENROLL_SECS
+            ]
+            if learned:
+                health.record_ok(health.VOICE_ENROLMENT, f"{len(learned)} voice(s)", meeting)
+            elif not enrollable:
+                health.record_ok(
+                    health.VOICE_ENROLMENT,
+                    f"nobody spoke the {voiceprints.MIN_ENROLL_SECS:.0f}s needed to enrol",
+                    meeting,
+                )
+            else:
+                health.record_failure(
+                    health.VOICE_ENROLMENT,
+                    f"{len(enrollable)} speaker(s) spoke long enough but none was enrolled",
+                    meeting,
+                )
+        except Exception as e:
             _log.debug("Voice identity update failed", exc_info=True)
+            health.record_failure(health.VOICE_ENROLMENT, e, meeting)
 
     def _restore_idle(self):
         """Called from background thread when transcription finishes."""

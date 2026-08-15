@@ -396,6 +396,7 @@ def watch():
                 click.echo(f"  ⚠  Audio preserved for retry: {saved}")
             return
 
+        from trnscrb import health as _health
         from trnscrb.settings import read_hf_token
 
         hf_token = read_hf_token()
@@ -403,8 +404,13 @@ def watch():
             try:
                 diar = diarizer.diarize(audio_path, hf_token)
                 segments = diarizer.merge(segments, diar)
+                _health.record_ok(
+                    _health.DIARIZATION,
+                    f"{len({t['speaker'] for t in diar})} speaker(s)",
+                    meeting_name,
+                )
             except Exception as e:
-                _log.warning("Diarization skipped: %s", e)
+                _health.record_failure(_health.DIARIZATION, e, meeting_name)
                 click.echo(f"  ⚠  Speaker diarization skipped: {e}")
 
         if segments:
@@ -1345,6 +1351,190 @@ def status():
     click.echo()
 
 
+def _synthetic_clip(seconds: float = 12.0) -> Path:
+    """A throwaway WAV to push through the real pipeline.
+
+    Two alternating tone patterns, not speech: the probe is asking whether
+    the machinery turns over end to end — decode, model load, inference,
+    embeddings — not how well it separates voices. Real audio would make the
+    speaker count meaningful and the check non-deterministic, and the count
+    is not what has ever broken.
+    """
+    import math
+    import struct
+    import tempfile
+    import wave
+
+    rate = 16_000
+    frames = []
+    for i in range(int(seconds * rate)):
+        t = i / rate
+        base = 120 if int(t / 3) % 2 == 0 else 210
+        value = sum(math.sin(2 * math.pi * base * h * t) / h for h in (1, 2, 3, 4, 5))
+        frames.append(struct.pack("<h", int(max(-1.0, min(1.0, value / 2.3)) * 9000)))
+
+    path = Path(tempfile.mkstemp(suffix=".wav")[1])
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(b"".join(frames))
+    return path
+
+
+@cli.command()
+@click.option("--quick", is_flag=True, help="Skip the model load and inference (seconds, not ~2m).")
+def doctor(quick: bool):
+    """Run the speaker-labelling stack end to end and report where it breaks.
+
+    `trnscrb status` can only tell you the parts are present. This actually
+    decodes audio, loads the pipeline and diarizes a clip, which is the only
+    way to catch the failures that leave every transcript looking fine.
+    """
+    from trnscrb import diarizer, health
+    from trnscrb.settings import read_hf_token
+
+    click.echo("\n  Diagnosing speaker labels\n")
+    failures: list[str] = []
+
+    def _check(label: str, fn, fix: str = ""):
+        try:
+            detail = fn() or "ok"
+        except Exception as e:
+            _row(label, False, click.style(str(e)[:120], fg="red"))
+            if fix:
+                click.echo(f"    → {fix}")
+            failures.append(label)
+            return False
+        _row(label, True, detail)
+        return True
+
+    def _torch():
+        import torch
+
+        device = "mps" if torch.backends.mps.is_available() else "cpu"
+        return f"{torch.__version__} on {device}"
+
+    def _decode():
+        clip = _synthetic_clip(1.0)
+        try:
+            audio = diarizer._audio_input(clip)
+            if not isinstance(audio, dict):
+                raise RuntimeError("fell back to the pipeline's own decoder")
+            return f"soundfile, {audio['waveform'].shape[1]} frames @ {audio['sample_rate']} Hz"
+        finally:
+            clip.unlink(missing_ok=True)
+
+    token = read_hf_token()
+    ok = _check(
+        "HuggingFace token",
+        lambda: "found" if token else _fail("no token in HF_TOKEN or ~/.cache/huggingface/token"),
+        "https://hf.co/settings/tokens, then `huggingface-cli login`",
+    )
+    _check("torch", _torch, "reinstall trnscrb — the upgrade may have replaced its tree")
+    _check(
+        "audio decoding",
+        _decode,
+        "install soundfile; without it pyannote falls back to torchcodec/FFmpeg",
+    )
+
+    candidates = diarizer.pipeline_candidates()
+    downloaded = next((m for m in candidates if diarizer.is_downloaded(m)), None)
+    _check(
+        "pipeline downloaded",
+        lambda: downloaded or _fail(f"none of {', '.join(candidates)} is in the local cache"),
+        f"accept the model terms at hf.co/{candidates[0]}",
+    )
+
+    if quick or not ok or not downloaded:
+        if quick:
+            click.echo("\n  (--quick: model load and inference not tested)")
+    else:
+        clip = _synthetic_clip()
+        try:
+            loaded = _check(
+                "pipeline loads",
+                lambda: diarizer._get_pipeline(token) and diarizer.pipeline_id(),
+                "delete ~/.cache/huggingface/hub/models--pyannote--* and let it re-download",
+            )
+            if loaded:
+                result: dict = {}
+
+                def _run():
+                    turns, embeddings = diarizer.diarize_with_embeddings(clip, token)
+                    result["turns"], result["embeddings"] = turns, embeddings
+                    return f"{len(turns)} turn(s), {len({t['speaker'] for t in turns})} speaker(s)"
+
+                if _check("diarizes a clip", _run):
+                    dims = ", ".join(
+                        str(d) for d in sorted({len(v) for v in result["embeddings"].values()})
+                    )
+                    _check(
+                        "voice embeddings",
+                        lambda: (
+                            f"{len(result['embeddings'])} × dim {dims or '—'} "
+                            f"in {diarizer.embedding_space()} space"
+                        ),
+                    )
+                    state, comparable = _voiceprint_store_state(diarizer.embedding_space())
+                    if comparable:
+                        _row("voiceprint store", True, state)
+                    else:
+                        # Not a broken stack — the next enrolment will work.
+                        # It is the stored voices that are about to go.
+                        click.echo(
+                            f"  {click.style('!', fg='yellow')} {'voiceprint store':<30} "
+                            f"{click.style('warning', fg='yellow')}  {state}"
+                        )
+        finally:
+            clip.unlink(missing_ok=True)
+
+    click.echo()
+    for component in sorted(health.LABELS):
+        if health.get(component):
+            entry = health.get(component) or {}
+            _row(health.LABELS[component], bool(entry.get("ok")), health.describe(component))
+
+    if not failures and not quick and downloaded and token:
+        # A green probe is evidence the stack works now, so a stale failure
+        # from last week should stop being reported as the current state.
+        health.record_ok(health.DIARIZATION, "verified by `trnscrb doctor`")
+        click.echo(click.style("\n  Speaker labels work end to end.\n", fg="green"))
+    elif failures:
+        click.echo(click.style(f"\n  Broken: {', '.join(failures)}\n", fg="red"))
+    else:
+        click.echo()
+
+
+def _fail(message: str):
+    raise RuntimeError(message)
+
+
+def _voiceprint_store_state(space: str) -> tuple[str, bool]:
+    """(description, still comparable) for the stored voices.
+
+    A pipeline or projection change makes every stored vector incomparable
+    with new ones, and the store is silently discarded on the next enrolment.
+    Worth knowing the meeting before it happens rather than the meeting after.
+    """
+    from trnscrb import voiceprints
+
+    data = voiceprints.load()
+    voices = data.get("voices") or {}
+    if not voices:
+        return "empty — voices accumulate as you record", True
+    stored = data.get("space") or "unknown"
+    named = sum(1 for v in voices.values() if v.get("name"))
+    state = f"{len(voices)} voice(s), {named} named"
+    if stored != space:
+        return (
+            f"{state} — stored in {stored} space, pipeline now produces {space}; "
+            "they will be discarded on the next enrolment",
+            False,
+        )
+    return state, True
+
+
 @cli.command()
 @click.argument("label", required=False, default="")
 def bookmark(label: str):
@@ -1515,21 +1705,28 @@ def _pkg_installed(import_name: str) -> bool:
 def _diarization_ready() -> tuple[bool, str]:
     """(ready, detail) for speaker labelling.
 
-    A token on its own proves nothing: pyannote's repos are gated, so
-    reporting "HF token ok" used to imply speaker labels worked while every
-    transcript silently came out unlabelled.
+    Prefers what happened the last time diarization actually ran. A token and
+    a model file on disk are what it takes to *try*; they were both present
+    and correct for the six days this reported ✓ while every meeting failed
+    on a decoder it could not load. Installed is not working.
     """
-    from trnscrb import diarizer
+    from trnscrb import diarizer, health
     from trnscrb.settings import read_hf_token
 
     if not read_hf_token():
         return False, "optional — no HF token, transcripts have no speaker names"
 
+    last = health.get(health.DIARIZATION)
+    if last and not last.get("ok"):
+        return False, health.describe(health.DIARIZATION) + " — run `trnscrb doctor`"
+
     candidates = diarizer.pipeline_candidates()
     downloaded = next((m for m in candidates if diarizer.is_downloaded(m)), None)
-    if downloaded:
-        return True, downloaded
-    return False, f"accept the model terms at hf.co/{candidates[0]} — token alone is not enough"
+    if not downloaded:
+        return False, f"accept the model terms at hf.co/{candidates[0]} — token alone is not enough"
+    if last:
+        return True, f"{downloaded} — {health.describe(health.DIARIZATION)}"
+    return True, f"{downloaded} — never run, `trnscrb doctor` tests it"
 
 
 def _system_audio_ready() -> tuple[bool, str]:
