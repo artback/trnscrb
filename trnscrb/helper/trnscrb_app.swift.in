@@ -49,7 +49,12 @@ func runLauncher() -> Never {
     var status: Int32 = 0
     while waitpid(child, &status, 0) < 0 && errno == EINTR {}
     if status & 0x7f == 0 { exit((status >> 8) & 0xff) }  // WIFEXITED → WEXITSTATUS
-    exit(128)
+    // Killed by a signal. Report 128+signal, the shell convention, so the
+    // status carries *which* one: `launchctl print` showing 138 says SIGBUS
+    // and 137 says the app was killed outright. A bare 128 says only "it
+    // died", which is what four days of restart-looping reported before
+    // anyone could tell the two apart.
+    exit(128 + (status & 0x7f))
 }
 
 // A tiny box so the C signal handler can reach the child pid.

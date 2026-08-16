@@ -1420,6 +1420,44 @@ class TrnscrbApp(rumps.App):
             self._set_icon_state(getattr(self, "_current_state", "idle"))
 
 
+def _startup_is_sane() -> bool:
+    """False when the app is being restarted in a loop rather than started.
+
+    Whatever kills the app during startup — a bad icon file, a broken
+    dependency after an upgrade, a native crash in a model load — launchd's
+    answer is the same: start it again in ten seconds, forever. The process
+    that has to break that cycle is this one, because it is the only party
+    that can tell "started" from "started for the fifth time in two minutes".
+
+    Stopping is the useful behaviour even though the app then isn't running:
+    a loop is not a degraded app, it is a machine burning CPU and a user who
+    finds out days later. What it leaves behind — the health record, the log
+    line, the notification — is how they find out today.
+    """
+    starts = health.note_start()
+    if starts < health.CRASH_LOOP_STARTS:
+        return True
+
+    detail = (
+        f"{starts} starts in under {health.CRASH_LOOP_WINDOW_SECS // 60} minutes — "
+        "something is killing the app during startup"
+    )
+    health.record_failure(health.APP_START, detail)
+    # Let the next launch run: the guard has done its job, and the user
+    # restarting by hand should get a real attempt, not this message again.
+    health.clear_starts()
+    _log.error(
+        "Restart loop detected (%s). Not starting again — see `trnscrb doctor`. "
+        "Check ~/Library/Logs/DiagnosticReports for a crash report, and "
+        "`launchctl print gui/$(id -u)/io.trnscrb.app` for the exit status "
+        "(128+signal).",
+        detail,
+    )
+    print(f"trnscrb: restart loop detected ({detail}). Not starting again.")
+    _notify("Trnscrb", "Stopped: restart loop", f"{detail}. Run `trnscrb doctor`.")
+    return False
+
+
 def main():
     import AppKit
 
@@ -1434,6 +1472,9 @@ def main():
         _log.warning("%s Exiting.", msg)
         print(msg)
         return
+
+    if not _startup_is_sane():
+        return  # exit 0 — the one status KeepAlive-on-failure will not restart
 
     app = TrnscrbApp()
     AppKit.NSApplication.sharedApplication().setActivationPolicy_(

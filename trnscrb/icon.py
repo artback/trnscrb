@@ -64,10 +64,42 @@ def _make_mic(path: Path, fill: tuple) -> None:
         raise
 
 
+def _is_readable_png(path: Path) -> bool:
+    """True when this file parses as a PNG all the way through.
+
+    Handing a damaged one to the menu bar is not a cosmetic problem: AppKit
+    reads it through ImageIO, which faults on a torn or truncated file and
+    takes the whole process down with SIGBUS — no traceback, no Python error,
+    just a dead app that launchd starts again ten seconds later. Parsing it
+    here first costs microseconds on a 250-byte file and turns the worst case
+    into a plain emoji icon.
+    """
+    try:
+        from PIL import Image
+
+        with Image.open(path) as img:
+            img.verify()  # checks CRCs and that every chunk is complete
+        return True
+    except Exception:
+        return False
+
+
 def icon_path(recording: bool = False) -> str | None:
-    """Return path to icon PNG if it exists, else None (falls back to emoji)."""
+    """Path to the icon PNG, or None to fall back to the emoji title.
+
+    A file that will not parse is regenerated once — the usual cause is a
+    write interrupted by a crash or a full disk — and skipped if that fails.
+    """
     p = ICON_RECORDING if recording else ICON_IDLE
-    return str(p) if p.exists() else None
+    if not p.exists():
+        return None
+    if _is_readable_png(p):
+        return str(p)
+    try:
+        generate_icons()
+    except Exception:
+        return None
+    return str(p) if _is_readable_png(p) else None
 
 
 if __name__ == "__main__":

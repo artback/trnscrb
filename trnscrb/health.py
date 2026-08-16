@@ -32,12 +32,30 @@ _VERSION = 1
 DIARIZATION = "diarization"
 VOICE_ENROLMENT = "voice_enrolment"
 TRANSCRIPTION = "transcription"
+APP_START = "app_start"
 
 LABELS = {
     DIARIZATION: "Speaker labels",
     VOICE_ENROLMENT: "Voice identities",
     TRANSCRIPTION: "Transcription",
+    APP_START: "App startup",
 }
+
+# Starts this close together mean the app is not running, it is looping.
+#
+# launchd's KeepAlive has no backoff. A job that dies during startup is
+# restarted on the throttle interval — 10 seconds — for as long as it keeps
+# dying, which in practice means until somebody notices. One such loop ran
+# ~6,900 times over four days: the menu bar icon flickered, the machine
+# stayed warm, and every backlog pass died before it could finish, so two
+# recordings sat untranscribed the whole time. Nothing reported it, because
+# from launchd's point of view the policy was working.
+#
+# Five starts inside two minutes is not a user restarting the app; nothing
+# healthy does that. The app exits 0 on the fifth, which is the one status
+# KeepAlive-on-failure will not restart, and the loop ends.
+CRASH_LOOP_STARTS = 5
+CRASH_LOOP_WINDOW_SECS = 120
 
 # Failure text is for a human reading a status line, not a stack trace.
 _MAX_DETAIL = 300
@@ -163,6 +181,48 @@ def should_notify(entry: dict) -> bool:
     """
     failures = int(entry.get("failures", 0))
     return failures == 1 or (failures > 0 and failures % 5 == 0)
+
+
+def note_start() -> int:
+    """Record that the app started; return how many starts fall in the window.
+
+    Called once the instance lock is held, so only starts that actually got
+    as far as running are counted — a second copy exiting because the first
+    holds the lock is not a restart.
+    """
+    now = datetime.now()
+    try:
+        data = load()
+        starts = []
+        for stamp in data.get("starts") or []:
+            try:
+                when = datetime.fromisoformat(str(stamp))
+            except ValueError:
+                continue
+            if (now - when).total_seconds() <= CRASH_LOOP_WINDOW_SECS:
+                starts.append(stamp)
+        starts.append(now.isoformat(timespec="seconds"))
+        data["starts"] = starts[-CRASH_LOOP_STARTS:]
+        _save(data)
+        return len(starts)
+    except Exception:
+        _log.debug("Could not record the app start", exc_info=True)
+        return 1  # never let bookkeeping stop the app from running
+
+
+def clear_starts() -> None:
+    """Forget the start history.
+
+    Called when a loop is caught, so the next launch — the user's own, after
+    reading what happened — gets a clean run rather than being refused by the
+    guard that just tripped.
+    """
+    try:
+        data = load()
+        data["starts"] = []
+        _save(data)
+    except Exception:
+        _log.debug("Could not clear the start history", exc_info=True)
 
 
 def clear(component: str = "") -> None:

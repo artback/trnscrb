@@ -162,6 +162,10 @@ A meeting that transcribes but fails to diarize looks like a success: the transc
 
 When diarization fails, the recording is kept instead of deleted, so the speaker labels and voiceprints for that meeting are not lost — redo it with `trnscrb transcribe <wav>` once `doctor` is green.
 
+### If the app keeps restarting
+
+launchd restarts a failing job every 10 seconds and never gives up, so anything that kills trnscrb during startup turns into a silent loop. The app counts its own starts: five inside two minutes and it stops instead, exits cleanly so launchd leaves it alone, and records why. `trnscrb status` then shows an **App startup** row, and the log names the exit status — `128 + signal`, so 138 is SIGBUS and 137 is a kill. Start it again with `trnscrb start` once the cause is fixed; the guard resets itself.
+
 ---
 
 ## Claude Desktop / MCP tools
