@@ -1317,6 +1317,13 @@ def status():
     _row("ffmpeg", bool(_sh.which("ffmpeg")), "audio decoding")
     diar_ok, diar_detail = _diarization_ready()
     _row("Speaker labels", diar_ok, diar_detail)
+    # Only shown once it has something to report: a restart loop that stopped
+    # itself leaves no other trace the user would go looking for.
+    from trnscrb import health as _health
+
+    if _health.get(_health.APP_START):
+        entry = _health.get(_health.APP_START) or {}
+        _row("App startup", bool(entry.get("ok")), _health.describe(_health.APP_START))
     if _CLAUDE_CONFIG.parent.exists() and _mcp_configured():
         detail = (
             "Claude Desktop"
