@@ -1094,15 +1094,52 @@ def import_meet_cmd(meet_file: Path, transcript_id: str, apply_glossary: bool):
     click.echo()
 
 
-def _play_voice(voice_id: str) -> bool:
-    """Play a voice's saved clip through the system player."""
+_playing: subprocess.Popen | None = None
+
+
+def _stop_playing() -> None:
+    """Silence whatever clip is still playing.
+
+    Two clips at once is not two pieces of information, it is neither — and
+    starting one without stopping the last is the easiest way to make a
+    single voice sound like two.
+    """
+    global _playing
+    if _playing is None:
+        return
+    try:
+        if _playing.poll() is None:
+            _playing.terminate()
+            _playing.wait(timeout=2)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    _playing = None
+
+
+def _play_voice(voice_id: str, wait: bool = True) -> bool:
+    """Play a voice's saved clip through the system player.
+
+    ``wait=False`` returns as soon as playback starts, for the case where
+    something is about to ask a question about what is playing: identifying a
+    voice is a listening task, and holding the prompt back until the clip has
+    finished means answering from memory instead of from the sound.
+    """
+    global _playing
     from trnscrb import voiceprints
 
     path = voiceprints.sample_path(voice_id)
     if not path.is_file():
         return False
+    _stop_playing()
     try:
-        subprocess.run(["afplay", str(path)], check=False, timeout=30)
+        if wait:
+            subprocess.run(["afplay", str(path)], check=False, timeout=30)
+        else:
+            _playing = subprocess.Popen(
+                ["afplay", str(path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
     except (OSError, subprocess.SubprocessError):
         click.echo(f"Could not play it; the clip is at {path}", err=True)
     return True
@@ -1127,10 +1164,13 @@ def _label_voices() -> None:
         if not voiceprints.sample_path(row["id"]).is_file():
             click.echo("     (no clip saved — recorded before clips were kept)")
         while True:
-            _play_voice(row["id"])
+            # Not blocking: the question goes up while the voice is still in
+            # the listener's ear, which is when they can answer it.
+            _play_voice(row["id"], wait=False)
             answer = click.prompt("     who is this?", default="", show_default=False).strip()
             if answer.lower() != "r":
                 break
+        _stop_playing()
         if answer:
             voiceprints.name_voice(row["id"], answer)
             click.echo(click.style(f"     ✓ named {answer}", fg="green"))
