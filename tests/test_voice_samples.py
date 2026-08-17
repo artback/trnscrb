@@ -162,3 +162,59 @@ class LabelVoicesMenuTest(unittest.TestCase):
         name, _, alert = self._run([self._row("voice-1", "Me")], [])
         name.assert_not_called()
         alert.assert_called_once()
+
+
+class PlaybackTest(unittest.TestCase):
+    """One clip at a time, and never make the user wait to be asked."""
+
+    def setUp(self):
+        from trnscrb import cli
+
+        self.cli = cli
+        cli._playing = None
+        self.addCleanup(setattr, cli, "_playing", None)
+        patcher = mock.patch.object(voiceprints, "sample_path", return_value=Path(__file__))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_play_waits_by_default(self):
+        """A one-shot `--play` should outlive its own audio."""
+        with mock.patch.object(self.cli.subprocess, "run") as run:
+            self.cli._play_voice("voice-1")
+        run.assert_called_once()
+
+    def test_labelling_does_not_wait(self):
+        with (
+            mock.patch.object(self.cli.subprocess, "run") as run,
+            mock.patch.object(self.cli.subprocess, "Popen") as popen,
+        ):
+            self.cli._play_voice("voice-1", wait=False)
+        run.assert_not_called()
+        popen.assert_called_once()
+
+    def test_a_new_clip_stops_the_previous_one(self):
+        previous = mock.Mock()
+        previous.poll.return_value = None  # still playing
+        with mock.patch.object(self.cli.subprocess, "Popen", return_value=previous):
+            self.cli._play_voice("voice-1", wait=False)
+            self.cli._play_voice("voice-2", wait=False)
+        previous.terminate.assert_called()
+
+    def test_a_finished_clip_is_not_terminated(self):
+        previous = mock.Mock()
+        previous.poll.return_value = 0  # already done
+        with mock.patch.object(self.cli.subprocess, "Popen", return_value=previous):
+            self.cli._play_voice("voice-1", wait=False)
+            self.cli._play_voice("voice-2", wait=False)
+        previous.terminate.assert_not_called()
+
+    def test_stopping_when_nothing_plays_is_safe(self):
+        self.cli._stop_playing()
+
+    def test_a_missing_clip_plays_nothing(self):
+        with (
+            mock.patch.object(voiceprints, "sample_path", return_value=Path("/nope.wav")),
+            mock.patch.object(self.cli.subprocess, "run") as run,
+        ):
+            self.assertFalse(self.cli._play_voice("voice-9"))
+        run.assert_not_called()

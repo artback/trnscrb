@@ -718,11 +718,20 @@ class TrnscrbApp(rumps.App):
             return
 
         named = 0
+        playing: subprocess.Popen | None = None
         for row in unnamed:
             clip = voiceprints.sample_path(row["id"])
             if clip.is_file():
+                # Stop the last one first. Answering Name or Skip quickly
+                # would otherwise start this clip over the previous one, and
+                # two voices at once is worse than either alone.
+                if playing is not None and playing.poll() is None:
+                    try:
+                        playing.terminate()
+                    except OSError:
+                        pass
                 try:
-                    subprocess.Popen(
+                    playing = subprocess.Popen(
                         ["afplay", str(clip)],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
@@ -749,6 +758,13 @@ class TrnscrbApp(rumps.App):
             name = result.text.strip()
             if name and voiceprints.name_voice(row["id"], name):
                 named += 1
+
+        # Don't leave the last clip playing into whatever the user does next.
+        if playing is not None and playing.poll() is None:
+            try:
+                playing.terminate()
+            except OSError:
+                pass
 
         if named:
             _notify("Trnscrb", f"Named {named} voice(s)", "They apply to past and future meetings.")
