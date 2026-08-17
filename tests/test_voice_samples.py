@@ -218,3 +218,33 @@ class PlaybackTest(unittest.TestCase):
         ):
             self.assertFalse(self.cli._play_voice("voice-9"))
         run.assert_not_called()
+
+
+class UserDataIsolationTest(unittest.TestCase):
+    """The suite must not be able to reach the user's own voice data.
+
+    It could, and it did: a run of these tests deleted a real voice clip
+    through forget(), which unlinks the sample as part of forgetting. The
+    meeting audio a clip is cut from is normally deleted with the transcript,
+    so that clip was the only copy.
+    """
+
+    def test_the_store_is_redirected_away_from_home(self):
+        self.assertNotIn(str(Path.home() / ".config"), str(voiceprints.STORE))
+
+    def test_the_samples_dir_is_redirected_away_from_home(self):
+        self.assertNotIn(str(Path.home() / ".config"), str(voiceprints.SAMPLES_DIR))
+
+    def test_forgetting_cannot_reach_a_real_clip(self):
+        """The exact call that destroyed one."""
+        self.assertNotIn(str(Path.home() / ".config"), str(voiceprints.sample_path("voice-1")))
+
+    def test_the_health_store_is_redirected(self):
+        from trnscrb import health
+
+        self.assertNotIn(str(Path.home() / ".config"), str(health.STORE))
+
+    def test_transcripts_are_redirected(self):
+        from trnscrb import storage
+
+        self.assertNotEqual(storage.NOTES_DIR, Path.home() / "meeting-notes")
