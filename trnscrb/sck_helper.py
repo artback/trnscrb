@@ -16,6 +16,7 @@ is scoped to Trnscrb alone — Python needs no screen-recording rights at all.
 import ctypes
 import os
 import signal
+import struct
 import threading
 from pathlib import Path
 
@@ -26,6 +27,13 @@ from trnscrb.log import get_logger
 _log = get_logger("trnscrb.sck_helper")
 
 _READ_FRAMES = 1600  # 100 ms at 16 kHz
+
+# Each chunk arrives as [magic][age float32][sample count uint32][float32 PCM].
+# The age is how long ago the audio was actually captured, which is the only
+# way to lay system audio down beside the microphone at the moment it
+# happened rather than the moment it arrived.
+_MAGIC = b"TRNS"
+_HEADER_BYTES = 12
 
 
 def _spawn_disclaimed(args: list[str], stdout_fd: int, stderr_fd: int) -> int:
@@ -167,6 +175,7 @@ class HelperCapture:
     def _read_loop(self) -> None:
         chunk_bytes = _READ_FRAMES * 4  # float32
         pending = b""
+        framed = None  # decided by the first bytes; see _take_frame
         while self._running and self._stdout is not None:
             try:
                 data = os.read(self._stdout, chunk_bytes)
@@ -175,12 +184,46 @@ class HelperCapture:
             if not data:
                 break
             pending += data
-            usable = len(pending) - (len(pending) % 4)  # whole float32 samples only
-            if usable:
-                self._on_chunk(np.frombuffer(pending[:usable], dtype=np.float32).copy())
-                pending = pending[usable:]
+            if framed is None and len(pending) >= _HEADER_BYTES:
+                framed = pending[:4] == _MAGIC
+                if not framed:
+                    # An older bundle that streams bare PCM. Still usable, just
+                    # unaligned — the bundle is replaced on the next install.
+                    _log.warning(
+                        "System audio helper predates capture timestamps; "
+                        "audio cannot be aligned. Run `trnscrb install`."
+                    )
+            if framed is False:
+                usable = len(pending) - (len(pending) % 4)
+                if usable:
+                    self._on_chunk(np.frombuffer(pending[:usable], dtype=np.float32).copy(), 0.0)
+                    pending = pending[usable:]
+                continue
+            while framed:
+                taken, pending = self._take_frame(pending)
+                if not taken:
+                    break
         if self._running:
             _log.warning("System audio helper stopped delivering audio")
+
+    def _take_frame(self, pending: bytes) -> tuple[bool, bytes]:
+        """Pull one [magic][age][count] frame off the buffer, if a whole one is there."""
+        if len(pending) < _HEADER_BYTES:
+            return False, pending
+        if pending[:4] != _MAGIC:
+            # Resync rather than give up: one torn frame should not end capture.
+            index = pending.find(_MAGIC, 1)
+            if index < 0:
+                return False, pending[-3:]  # keep only what could start a magic
+            _log.debug("Resynced system audio stream, dropped %d byte(s)", index)
+            return True, pending[index:]
+        age, count = struct.unpack_from("<fI", pending, 4)
+        end = _HEADER_BYTES + count * 4
+        if len(pending) < end:
+            return False, pending
+        samples = np.frombuffer(pending[_HEADER_BYTES:end], dtype=np.float32).copy()
+        self._on_chunk(samples, float(age))
+        return True, pending[end:]
 
     def stop(self) -> None:
         self._running = False

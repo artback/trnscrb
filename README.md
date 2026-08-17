@@ -194,6 +194,8 @@ After `trnscrb install`, Claude Desktop has these tools:
 
 trnscrb captures both your mic and other participants' audio natively via **ScreenCaptureKit** — no virtual audio driver or Multi-Output Device needed.
 
+**Upgrading to 0.51.0 asks for Screen Recording once more.** System audio now carries its capture timestamp so it can be laid down beside the microphone at the moment it happened rather than the moment it arrived — without that, anything coming out of your speakers is recorded twice, once as mic bleed and once through the capture path a few hundred milliseconds later. The fix changes the capture binary, and macOS ties the grant to that binary's signature.
+
 The only requirement is the **Screen Recording** permission (macOS 15+ shows it as "Screen & System Audio Recording"). `trnscrb install` requests it, or grant it manually under **System Settings → Privacy & Security**. Without it, only your mic is recorded.
 
 ---

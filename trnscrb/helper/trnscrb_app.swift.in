@@ -125,7 +125,25 @@ final class AudioCapture: NSObject, SCStreamDelegate, SCStreamOutput {
             block, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &length,
             dataPointerOut: &pointer)
         guard status == kCMBlockBufferNoErr, let bytes = pointer, length > 0 else { return }
+
+        // How old this audio already is. ScreenCaptureKit hands us a buffer
+        // some way after the sound happened, and the microphone arrives
+        // essentially live — so mixing the two as they arrive lays the same
+        // voice down twice: once through the mic as speaker bleed, once
+        // through here a few hundred milliseconds later. Audible as an echo,
+        // and it varies per session, so only the capture timestamp can say
+        // by how much. The reader delays the mic to match.
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let now = CMClockGetTime(CMClockGetHostTimeClock())
+        var age = Float32(CMTimeGetSeconds(now) - CMTimeGetSeconds(pts))
+        if !age.isFinite || age < 0 { age = 0 }
+
+        var header = Data()
+        withUnsafeBytes(of: UInt32(0x5452_4E53).littleEndian) { header.append(contentsOf: $0) }
+        withUnsafeBytes(of: age.bitPattern.littleEndian) { header.append(contentsOf: $0) }
+        withUnsafeBytes(of: UInt32(length / 4).littleEndian) { header.append(contentsOf: $0) }
         do {
+            try stdout.write(contentsOf: header)
             try stdout.write(contentsOf: Data(bytes: bytes, count: length))
         } catch {
             exit(0)  // Python closed the pipe

@@ -30,7 +30,7 @@ BUNDLE_ID = "io.trnscrb.app"
 # bundles (launcher behavior, icon, plist capabilities). Each bump replaces
 # the installed bundle → new ad-hoc signature → the user must re-grant
 # Screen Recording once. Routine releases must NOT bump this.
-_LAUNCHER_VERSION = 7  # v7: unified launcher+capturer (one cdhash, one grant)
+_LAUNCHER_VERSION = 8  # v8: capture chunks carry their timestamp (audio alignment)
 
 # The bundle's single main executable is BOTH the launcher and the
 # ScreenCaptureKit capturer (invoked with --sck-capture). One binary means one
