@@ -78,28 +78,22 @@ class SaveSampleTest(unittest.TestCase):
 
 
 class KeepVoiceSampleTest(unittest.TestCase):
-    """The recording-path wrapper must never fail a transcription."""
+    """The enrolment wrapper must never fail a transcription."""
 
     def test_no_audio_path_is_a_noop(self):
-        from trnscrb import menu_bar
-
         with mock.patch.object(voiceprints, "save_sample") as save:
-            menu_bar._keep_voice_sample("voice-1", None, [], "S0")
+            voiceprints._keep_sample("voice-1", None, [], "S0")
         save.assert_not_called()
 
     def test_only_this_speakers_turns_are_used(self):
-        from trnscrb import menu_bar
-
         diar = _turns([(0.0, 5.0, "S0"), (5.0, 9.0, "S1")])
         with mock.patch.object(voiceprints, "save_sample") as save:
-            menu_bar._keep_voice_sample("voice-1", Path("/tmp/a.wav"), diar, "S1")
+            voiceprints._keep_sample("voice-1", Path("/tmp/a.wav"), diar, "S1")
         self.assertEqual([t["speaker"] for t in save.call_args.args[2]], ["S1"])
 
     def test_failure_is_swallowed(self):
-        from trnscrb import menu_bar
-
         with mock.patch.object(voiceprints, "save_sample", side_effect=OSError("boom")):
-            menu_bar._keep_voice_sample("voice-1", Path("/tmp/a.wav"), [], "S0")
+            voiceprints._keep_sample("voice-1", Path("/tmp/a.wav"), [], "S0")
 
 
 if __name__ == "__main__":

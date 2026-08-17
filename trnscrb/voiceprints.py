@@ -302,6 +302,104 @@ def save_sample(voice_id: str, audio_path: Path, turns: list[dict]) -> Path | No
     return dest
 
 
+def speech_by_speaker(turns: list[dict]) -> dict[str, float]:
+    """Total speaking time per diarized label, for the enrolment quality gate."""
+    totals: dict[str, float] = {}
+    for turn in turns:
+        speaker = turn.get("speaker")
+        if not speaker:
+            continue
+        try:
+            duration = float(turn["end"]) - float(turn["start"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if duration > 0:
+            totals[speaker] = totals.get(speaker, 0.0) + duration
+    return totals
+
+
+def enrol(
+    embeddings: dict,
+    turns: list[dict],
+    *,
+    model: str,
+    space: str,
+    meeting: str = "",
+    self_label: str | None = None,
+    cluster_others: bool = False,
+    audio_path=None,
+) -> list[str]:
+    """Carry one meeting's speakers into the persistent identities.
+
+    Shared by the live recording path and by transcribing a file after the
+    fact, which differ in exactly one thing: live capture keeps the mic and
+    the system audio apart, so it can say which speaker is the user. A file
+    on disk is already mixed, so ``self_label`` is None there and the user's
+    own voice is enrolled only if it *matches* an identity already known —
+    which is the honest answer, since nothing in a mixed recording can tell
+    the user's voice from anyone else's.
+
+    Returns the voice ids touched.
+    """
+    learned: list[str] = []
+    speech = speech_by_speaker(turns)
+
+    if self_label is not None and self_label in embeddings:
+        voice_id = observe(
+            embeddings[self_label], model, speech.get(self_label, 0.0), meeting, self_label, space
+        )
+        # Naming is idempotent, and re-asserting it each meeting repairs the
+        # case where the user's voice was first seen (unnamed) in a recording
+        # without system audio.
+        if voice_id:
+            name_voice(voice_id, SELF)
+            learned.append(voice_id)
+            _keep_sample(voice_id, audio_path, turns, self_label)
+
+    if cluster_others:
+        for label, vector in embeddings.items():
+            if label == self_label:
+                continue
+            other_id = observe(vector, model, speech.get(label, 0.0), meeting, label, space)
+            if other_id:
+                learned.append(other_id)
+                _keep_sample(other_id, audio_path, turns, label)
+
+    return learned
+
+
+def _keep_sample(voice_id: str, audio_path, turns: list[dict], label: str) -> None:
+    """Save a clip of this speaker while the recording still exists.
+
+    A meeting's audio is deleted as soon as its transcript is saved, so this
+    is the only chance — without it a voice can never be identified by ear.
+    """
+    if not audio_path:
+        return
+    try:
+        save_sample(voice_id, audio_path, [t for t in turns if t.get("speaker") == label])
+    except Exception:
+        _log.debug("Could not keep a sample for %s", voice_id, exc_info=True)
+
+
+def enrolment_health(learned: list[str], turns: list[dict]) -> tuple[bool, str]:
+    """(ok, detail) describing what this meeting's enrolment achieved.
+
+    "Ran and enrolled nobody" is the shape the silent failure takes: every
+    meeting looks fine and `trnscrb voices` quietly never grows. A meeting
+    where nobody spoke for long enough is not that — it is the enrolment bar
+    doing its job, and flagging it would train the user to ignore the warning
+    that matters.
+    """
+    if learned:
+        return True, f"{len(learned)} voice(s)"
+    speech = speech_by_speaker(turns)
+    enrollable = [label for label, secs in speech.items() if secs >= MIN_ENROLL_SECS]
+    if not enrollable:
+        return True, f"nobody spoke the {MIN_ENROLL_SECS:.0f}s needed to enrol"
+    return False, f"{len(enrollable)} speaker(s) spoke long enough but none was enrolled"
+
+
 def name_voice(voice_id: str, name: str) -> bool:
     """Attach a name to an identity — and so to every meeting it appears in."""
     data = load()
