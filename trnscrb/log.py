@@ -2,13 +2,20 @@
 
 Writes to ~/Library/Logs/trnscrb.log with automatic rotation (5 MB × 3 files).
 Also emits to stderr so launchd / terminal sessions capture output.
+
+TRNSCRB_LOG_DIR redirects that file. It exists because the test suite wrote
+into the real log, and INFO lines from tests read exactly like real events —
+"Aligning system audio: it runs 500 ms behind the mic" is a test fixture's
+value, but nothing in the log says so, and it cost real time during a live
+debugging session.
 """
 
 import logging
+import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-_LOG_DIR = Path.home() / "Library" / "Logs"
+_LOG_DIR = Path(os.environ.get("TRNSCRB_LOG_DIR") or Path.home() / "Library" / "Logs")
 _LOG_FILE = _LOG_DIR / "trnscrb.log"
 _MAX_BYTES = 5 * 1024 * 1024  # 5 MB per file
 _BACKUP_COUNT = 3

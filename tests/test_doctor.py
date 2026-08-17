@@ -120,3 +120,65 @@ class VoiceprintStoreStateTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SystemAudioChecksTest(unittest.TestCase):
+    """Doctor has to name the failure the checkbox lies about."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.addCleanup(setattr, health, "STORE", health.STORE)
+        health.STORE = Path(tmp.name) / "health.json"
+
+    def _run(self, granted):
+        from trnscrb import sck_helper
+        from trnscrb.cli import doctor
+
+        with (
+            mock.patch("trnscrb.settings.read_hf_token", return_value="hf_x"),
+            mock.patch.object(diarizer, "is_downloaded", return_value=True),
+            mock.patch.object(sck_helper, "has_permission", return_value=granted),
+            mock.patch.object(sck_helper, "helper_path", return_value=Path("/Apps/T.app/x")),
+        ):
+            return CliRunner().invoke(doctor, ["--quick"])
+
+    def test_a_denied_grant_is_reported(self):
+        out = self._run(False).output
+        self.assertIn("screen recording", out)
+        self.assertIn("only your microphone", out)
+
+    def test_the_stale_entry_is_explained_with_its_fix(self):
+        """The checkbox says yes and the capture says no; say why."""
+        out = self._run(False).output
+        self.assertIn("stale", out)
+        self.assertIn("tccutil reset ScreenCapture io.trnscrb.app", out)
+
+    def test_a_granted_permission_says_so(self):
+        out = self._run(True).output
+        self.assertIn("granted", out)
+        self.assertNotIn("tccutil", out)
+
+    def test_an_unanswerable_check_is_not_a_silent_pass(self):
+        out = self._run(None).output
+        self.assertIn("could not ask the helper", out)
+
+
+class LogIsolationTest(unittest.TestCase):
+    """Test runs must not write into the log a user debugs from."""
+
+    def test_the_log_file_is_redirected(self):
+        from trnscrb import log
+
+        self.assertNotEqual(log._LOG_DIR, Path.home() / "Library" / "Logs")
+
+    def test_the_redirect_is_honoured_from_the_environment(self):
+        import os
+
+        self.assertIn(os.environ["TRNSCRB_LOG_DIR"], str(log_file()))
+
+
+def log_file():
+    from trnscrb import log
+
+    return log._LOG_FILE

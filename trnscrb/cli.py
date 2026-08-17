@@ -1536,6 +1536,14 @@ def doctor(quick: bool):
         finally:
             clip.unlink(missing_ok=True)
 
+    click.echo("\n  Diagnosing system audio\n")
+    _check(
+        "capture helper",
+        _capture_helper_state,
+        "run `trnscrb install` to rebuild the app bundle",
+    )
+    _check("screen recording", _screen_recording_state, _TCC_RESET_HINT)
+
     click.echo()
     for component in sorted(health.LABELS):
         if health.get(component):
@@ -1555,6 +1563,57 @@ def doctor(quick: bool):
 
 def _fail(message: str):
     raise RuntimeError(message)
+
+
+# The failure this exists for: the app bundle is ad-hoc signed, so macOS can
+# only pin the Screen Recording grant to the binary's exact hash. Replacing
+# the capture binary — which every launcher change does — invalidates the
+# record while leaving the entry in System Settings looking enabled. The
+# checkbox says yes, the capture says no, and nothing on screen explains it.
+_TCC_RESET_HINT = (
+    "the entry in System Settings is stale — the capture binary changed and "
+    "an ad-hoc signature cannot carry the grant across it. Clear it and let "
+    "macOS ask again:\n"
+    "      tccutil reset ScreenCapture io.trnscrb.app\n"
+    "      then quit and reopen Trnscrb, and start a recording to get the prompt"
+)
+
+
+def _capture_helper_state() -> str:
+    """Where the capture helper is, and whether the installed bundle is current."""
+    import shutil
+
+    from trnscrb import sck_helper
+    from trnscrb.app_bundle import _bundle_marker, _packaged_bundle, bundle_path
+
+    helper = sck_helper.helper_path()
+    if helper is None:
+        _fail("not found in the app bundle")
+
+    installed = _bundle_marker(bundle_path())
+    try:
+        packaged = _bundle_marker(_packaged_bundle(Path(shutil.which("trnscrb") or "")))
+    except Exception:
+        packaged = None
+    if installed and packaged and installed != packaged:
+        _fail(
+            f"the installed bundle is older than the packaged one "
+            f"({installed.splitlines()[0]} vs {packaged.splitlines()[0]}) — run `trnscrb install`"
+        )
+    version = (installed or "?").splitlines()[0]
+    return f"launcher v{version}"
+
+
+def _screen_recording_state() -> str:
+    """Whether the helper can actually capture, which is the only thing that counts."""
+    from trnscrb import sck_helper
+
+    granted = sck_helper.has_permission()
+    if granted is None:
+        _fail("could not ask the helper — is the app bundle installed?")
+    if not granted:
+        _fail("denied: system audio will not be recorded, only your microphone")
+    return "granted"
 
 
 def _voiceprint_store_state(space: str) -> tuple[str, bool]:
