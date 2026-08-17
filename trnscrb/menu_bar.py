@@ -82,22 +82,6 @@ def _find_claude_cli() -> str | None:
     return None
 
 
-def _speech_by_speaker(diar: list[dict]) -> dict[str, float]:
-    """Total speaking time per diarized label, for enrolment quality gates."""
-    totals: dict[str, float] = {}
-    for turn in diar:
-        speaker = turn.get("speaker")
-        if not speaker:
-            continue
-        try:
-            duration = float(turn["end"]) - float(turn["start"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if duration > 0:
-            totals[speaker] = totals.get(speaker, 0.0) + duration
-    return totals
-
-
 def _notes_root() -> Path:
     """Where note integration is allowed to work — the vault, else the notes folder.
 
@@ -116,23 +100,6 @@ def _notes_root() -> Path:
     except Exception:
         _log.debug("Could not resolve the Obsidian vault", exc_info=True)
     return storage.ensure_notes_dir()
-
-
-def _keep_voice_sample(voice_id: str, audio_path, diar: list[dict], label: str) -> None:
-    """Save a clip of this speaker while the recording still exists.
-
-    The meeting's audio is deleted as soon as its transcript is saved, so this
-    is the only chance — without it a voice can never be identified by ear.
-    """
-    if not audio_path:
-        return
-    try:
-        from trnscrb import voiceprints
-
-        turns = [t for t in diar if t.get("speaker") == label]
-        voiceprints.save_sample(voice_id, audio_path, turns)
-    except Exception:
-        _log.debug("Could not keep a sample for %s", voice_id, exc_info=True)
 
 
 def _integrate_notes(transcript_path: Path) -> None:
@@ -1325,61 +1292,27 @@ class TrnscrbApp(rumps.App):
         try:
             from trnscrb import voiceprints
 
-            model = diarizer.pipeline_id()
-            space = diarizer.embedding_space()
-            speech = _speech_by_speaker(diar)
-
             self_label = None
-            voice_id = None
             if learn_self:
-                self_label, secs = attribution.self_speaker(diar, recorder.attribution_timeline())
-                if self_label is not None and self_label in embeddings:
-                    voice_id = voiceprints.observe(
-                        embeddings[self_label], model, secs, meeting, self_label, space
-                    )
-                    # Naming is idempotent, and re-asserting it each meeting
-                    # repairs the case where the user's voice was first seen
-                    # (unnamed) in a recording without system audio.
-                    if voice_id:
-                        voiceprints.name_voice(voice_id, voiceprints.SELF)
-                        _keep_voice_sample(voice_id, audio_path, diar, self_label)
-                else:
+                self_label, _ = attribution.self_speaker(diar, recorder.attribution_timeline())
+                if self_label is None or self_label not in embeddings:
+                    self_label = None
                     _log.debug("No unambiguous self speaker; skipping self enrolment")
 
-            learned = [voice_id] if voice_id else []
-            if cluster_others:
-                for label, vector in embeddings.items():
-                    if label == self_label:
-                        continue
-                    other_id = voiceprints.observe(
-                        vector, model, speech.get(label, 0.0), meeting, label, space
-                    )
-                    if other_id:
-                        learned.append(other_id)
-                        _keep_voice_sample(other_id, audio_path, diar, label)
-
-            # "Ran and enrolled nobody" is the shape this failure takes: every
-            # meeting looks fine and `trnscrb voices` quietly never grows.
-            # A meeting where nobody spoke for long enough is not that — it is
-            # the enrolment bar doing its job, and flagging it would train the
-            # user to ignore the warning that matters.
-            enrollable = [
-                label for label, secs in speech.items() if secs >= voiceprints.MIN_ENROLL_SECS
-            ]
-            if learned:
-                health.record_ok(health.VOICE_ENROLMENT, f"{len(learned)} voice(s)", meeting)
-            elif not enrollable:
-                health.record_ok(
-                    health.VOICE_ENROLMENT,
-                    f"nobody spoke the {voiceprints.MIN_ENROLL_SECS:.0f}s needed to enrol",
-                    meeting,
-                )
-            else:
-                health.record_failure(
-                    health.VOICE_ENROLMENT,
-                    f"{len(enrollable)} speaker(s) spoke long enough but none was enrolled",
-                    meeting,
-                )
+            learned = voiceprints.enrol(
+                embeddings,
+                diar,
+                model=diarizer.pipeline_id(),
+                space=diarizer.embedding_space(),
+                meeting=meeting,
+                self_label=self_label,
+                cluster_others=cluster_others,
+                audio_path=audio_path,
+            )
+            ok, detail = voiceprints.enrolment_health(learned, diar)
+            (health.record_ok if ok else health.record_failure)(
+                health.VOICE_ENROLMENT, detail, meeting
+            )
         except Exception as e:
             _log.debug("Voice identity update failed", exc_info=True)
             health.record_failure(health.VOICE_ENROLMENT, e, meeting)

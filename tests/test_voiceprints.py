@@ -366,3 +366,76 @@ class SpaceMigrationTest(_StoreTest):
         voiceprints.observe(np.ones(128), _MODEL, 120, "m1", "S0", "plda")
         voiceprints.observe(np.ones(128), _MODEL, 120, "m2", "S0", "plda")
         self.assertEqual(voiceprints.summary()[0]["observations"], 2)
+
+
+class BacklogEnrolmentTest(_StoreTest):
+    """Transcribing a file after the fact must grow the voice store too.
+
+    It cannot do the whole job: identifying the user needs the mic and system
+    streams kept apart, and a file on disk is already mixed.
+    """
+
+    def _run(self, *, cluster=True, embeddings=None, turns=None):
+        from trnscrb import backlog
+
+        embeddings = embeddings or {"S0": _vec(1.0, 0.0), "S1": _vec(0.0, 1.0)}
+        turns = turns if turns is not None else _turns([(0, 100, "S0"), (100, 200, "S1")])
+        with (
+            mock.patch("trnscrb.settings.get", side_effect={"cluster_voices": cluster}.get),
+            mock.patch.object(diarizer, "pipeline_id", return_value=_MODEL),
+            mock.patch.object(diarizer, "embedding_space", return_value="plda"),
+        ):
+            backlog._learn_voices(turns, embeddings, "recovered", Path("/tmp/none.wav"))
+        return voiceprints.summary()
+
+    def test_speakers_are_enrolled(self):
+        rows = self._run()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([r["meetings"] for r in rows], [["recovered"], ["recovered"]])
+
+    def test_nobody_is_named_me(self):
+        """A mixed file cannot tell the user's voice from anyone else's."""
+        self.assertEqual([r["name"] for r in self._run()], ["", ""])
+
+    def test_a_known_voice_still_lands_on_its_identity(self):
+        """Recovering a meeting should extend Me, not fork it — via matching."""
+        voiceprints.observe(_vec(1.0, 0.0), _MODEL, 120, "earlier", "S0", "plda")
+        voiceprints.name_voice("voice-1", voiceprints.SELF)
+        rows = self._run(embeddings={"S0": _vec(0.99, 0.14)}, turns=_turns([(0, 100, "S0")]))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["name"], voiceprints.SELF)
+        self.assertEqual(rows[0]["observations"], 2)
+
+    def test_clustering_off_enrols_nobody(self):
+        self.assertEqual(self._run(cluster=False), [])
+
+    def test_short_speakers_are_skipped(self):
+        turns = _turns([(0, 10, "S0"), (10, 20, "S1")])
+        self.assertEqual(self._run(turns=turns), [])
+
+    def test_enrolment_never_fails_the_transcription(self):
+        from trnscrb import backlog
+
+        with (
+            mock.patch("trnscrb.settings.get", return_value=True),
+            mock.patch.object(voiceprints, "enrol", side_effect=RuntimeError("boom")),
+        ):
+            backlog._learn_voices([], {"S0": _vec(1.0)}, "m", Path("/tmp/none.wav"))
+
+
+class EnrolmentHealthTest(unittest.TestCase):
+    def test_enrolled_voices_are_ok(self):
+        ok, detail = voiceprints.enrolment_health(["voice-1"], [])
+        self.assertTrue(ok)
+        self.assertIn("1 voice(s)", detail)
+
+    def test_nobody_over_the_bar_is_ok(self):
+        """The bar doing its job is not a broken component."""
+        ok, detail = voiceprints.enrolment_health([], _turns([(0, 5, "S0")]))
+        self.assertTrue(ok)
+        self.assertIn("needed to enrol", detail)
+
+    def test_a_long_speaker_that_was_not_enrolled_is_a_failure(self):
+        ok, detail = voiceprints.enrolment_health([], _turns([(0, 300, "S0")]))
+        self.assertFalse(ok)
+        self.assertIn("spoke long enough", detail)

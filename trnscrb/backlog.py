@@ -34,6 +34,42 @@ def finalize_wav_header(path: Path) -> None:
     _log.info("Finalized interrupted WAV header: %s", path.name)
 
 
+def _learn_voices(turns: list[dict], embeddings: dict, meeting: str, audio_file: Path) -> None:
+    """Cluster this recording's speakers into the persistent identities.
+
+    Only the clustering half of what the live path does. Identifying the user
+    needs the microphone and the system audio kept apart, and a file on disk
+    is already mixed — so "Me" is never asserted here. The user's own voice
+    still lands on the right identity when it *matches* one already known,
+    which is what recovering a meeting after the fact can honestly claim.
+
+    Gated on `cluster_voices` like the live path: these are fingerprints of
+    people who did not consent to being enrolled. Never fails the
+    transcription.
+    """
+    from trnscrb import diarizer, health, voiceprints
+    from trnscrb.settings import get as get_setting
+
+    if not embeddings or not get_setting("cluster_voices"):
+        return
+    try:
+        learned = voiceprints.enrol(
+            embeddings,
+            turns,
+            model=diarizer.pipeline_id(),
+            space=diarizer.embedding_space(),
+            meeting=meeting,
+            cluster_others=True,
+            audio_path=audio_file,
+        )
+        ok, detail = voiceprints.enrolment_health(learned, turns)
+        (health.record_ok if ok else health.record_failure)(health.VOICE_ENROLMENT, detail, meeting)
+        if learned:
+            _log.info("Enrolled %d voice(s) from %s", len(learned), audio_file.name)
+    except Exception:
+        _log.warning("Voice enrolment failed for %s", audio_file.name, exc_info=True)
+
+
 def transcribe_file(audio_file: Path, meeting_name: str = "") -> tuple[Path, int]:
     """Transcribe one WAV and save the transcript. Returns (path, segment count).
 
@@ -53,11 +89,12 @@ def transcribe_file(audio_file: Path, meeting_name: str = "") -> tuple[Path, int
     hf_token = read_hf_token()
     if hf_token and segments:
         try:
-            diar = diarizer.diarize(audio_file, hf_token)
+            diar, embeddings = diarizer.diarize_with_embeddings(audio_file, hf_token)
             segments = diarizer.merge(segments, diar)
             health.record_ok(
                 health.DIARIZATION, f"{len({t['speaker'] for t in diar})} speaker(s)", meeting_name
             )
+            _learn_voices(diar, embeddings, meeting_name, audio_file)
         except Exception as e:
             health.record_failure(health.DIARIZATION, e, meeting_name)
 
