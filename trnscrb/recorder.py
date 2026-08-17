@@ -30,6 +30,11 @@ _STALE_AGE_SECS = 3600  # 1 hour
 # clock drift between the two capture paths is tiny (~ms/hour), so this cap
 # only matters if the mic stream stalls.
 _SYS_BUFFER_MAX_FRAMES = SAMPLE_RATE * 30
+# Most the mic may be delayed to meet system audio. Measured offsets on real
+# calls sit between 100 and 400 ms; anything past this is a stalled helper
+# rather than latency, and delaying the whole recording to chase it would
+# cost more than the echo it fixes.
+_ALIGN_MAX_FRAMES = SAMPLE_RATE // 2
 
 # Mic level balancing: the mic is often much quieter than system playback,
 # drowning the user's voice in the mix. Track loudness of both sources and
@@ -155,6 +160,10 @@ class Recorder:
         # mixing — lets the transcriber attribute segments to "Me" (mic) vs
         # "Them" (system audio) without any diarization model.
         self._attr_lock = threading.Lock()
+        # How far the mic is held back to meet system audio, and the audio
+        # waiting in that delay line. None until the first timestamped chunk.
+        self._align_frames: int | None = None
+        self._mic_hold = np.zeros(0, dtype=np.float32)
         self._attr_offsets: list[int] = []  # frame offset of each block
         self._attr_mic: list[float] = []  # mic mean-square per block
         self._attr_sys: list[float] = []  # system-audio mean-square per block
@@ -166,6 +175,8 @@ class Recorder:
         # Write a placeholder WAV header (44 bytes); finalized in stop().
         self._tmpfile.write(b"\x00" * 44)
         self._frame_count = 0
+        self._align_frames = None
+        self._mic_hold = np.zeros(0, dtype=np.float32)
         with self._attr_lock:
             self._attr_offsets.clear()
             self._attr_mic.clear()
@@ -193,6 +204,10 @@ class Recorder:
     def stop(self) -> Path | None:
         """Stop recording and return the path to a temporary WAV file."""
         self._recording = False
+        # Whatever the alignment delay is holding is real audio the meeting
+        # ended on — a fraction of a second of it, but losing the last words
+        # of a call to a buffer is not a trade anyone would make.
+        self._flush_mic_hold()
         if self._system_capture:
             try:
                 self._system_capture.stop()
@@ -359,7 +374,18 @@ class Recorder:
         self._system_capture = capture
         self._system_audio_active = True
 
-    def _on_system_chunk(self, chunk: np.ndarray) -> None:
+    def _on_system_chunk(self, chunk: np.ndarray, age: float = 0.0) -> None:
+        if self._align_frames is None and age > 0:
+            # First chunk that can say how late system audio runs. Everything
+            # after this is paired with microphone audio from the same moment
+            # instead of the same arrival, which is what stops a bled-through
+            # voice being recorded twice.
+            frames = min(int(age * SAMPLE_RATE), _ALIGN_MAX_FRAMES)
+            self._align_frames = frames
+            _log.info(
+                "Aligning system audio: it runs %.0f ms behind the mic",
+                frames / SAMPLE_RATE * 1000,
+            )
         with self._sys_lock:
             self._sys_chunks.append(chunk)
             self._sys_frames += len(chunk)
@@ -399,6 +425,39 @@ class Recorder:
             return min(max(gain, 1.0), _MIC_GAIN_MAX)
         return 1.0
 
+    def _flush_mic_hold(self) -> None:
+        """Write out whatever the alignment delay line still holds."""
+        if len(self._mic_hold) == 0 or not self._tmpfile:
+            return
+        mic, self._mic_hold = self._mic_hold, np.zeros(0, dtype=np.float32)
+        system = self._pull_system_frames(len(mic))
+        mixed = mic * self._mic_gain(mic, system) + system if system is not None else mic
+        audio = (np.clip(mixed, -1.0, 1.0) * 32_767).astype(np.int16)
+        try:
+            with self._lock:
+                self._tmpfile.write(audio.tobytes())
+                self._frame_count += len(audio)
+        except (OSError, ValueError):
+            _log.debug("Could not flush the alignment buffer", exc_info=True)
+
+    def _delayed_mic(self, mic: np.ndarray) -> np.ndarray | None:
+        """Hold the mic back so it lines up with system audio of the same moment.
+
+        System audio arrives late — ScreenCaptureKit hands it over some way
+        after the sound happened — and the only stream that can be moved to
+        meet it is the live one. Returns None while the delay line is still
+        filling, which costs the first fraction of a second of the recording
+        and is why the delay is capped.
+        """
+        if not self._align_frames:
+            return mic
+        self._mic_hold = np.concatenate((self._mic_hold, mic))
+        if len(self._mic_hold) <= self._align_frames:
+            return None
+        take = len(self._mic_hold) - self._align_frames
+        out, self._mic_hold = self._mic_hold[:take], self._mic_hold[take:]
+        return out
+
     def _callback(self, indata, frames, time_info, status):
         if status:
             _log.warning("Audio stream status: %s", status)
@@ -406,7 +465,9 @@ class Recorder:
         try:
             if self._recording and self._tmpfile:
                 block_offset = self._frame_count  # only this thread mutates it
-                mic = indata[:, 0]
+                mic = self._delayed_mic(indata[:, 0])
+                if mic is None:
+                    return
                 system = self._pull_system_frames(len(mic))
                 with self._attr_lock:
                     self._attr_offsets.append(block_offset)
