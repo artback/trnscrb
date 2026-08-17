@@ -1904,15 +1904,36 @@ def _login_item_exists() -> bool:
 
 
 def _login_item_needs_update() -> bool:
-    """True if the plist predates the restart policy or the app-bundle launcher."""
+    """True if the plist predates the restart policy or the app-bundle launcher.
+
+    A plist that still injects DYLD_LIBRARY_PATH must be rewritten too: the
+    app cannot stay running with it (see _setup_login_item).
+    """
     try:
         content = _PLIST_PATH.read_text()
     except OSError:
         return False
-    return "SuccessfulExit" not in content or "Trnscrb.app" not in content
+    return (
+        "SuccessfulExit" not in content
+        or "Trnscrb.app" not in content
+        or "DYLD_LIBRARY_PATH" in content
+    )
 
 
 def _setup_login_item(binary_path: str) -> bool:
+    """Write the launch-at-login agent.
+
+    Deliberately sets no environment. An earlier version exported
+    DYLD_LIBRARY_PATH=/opt/homebrew/lib:/usr/local/lib to dodge a segfault
+    where a system FFmpeg clashed with the av package's bundled dylibs. That
+    cured it by making *everything* the app loads prefer Homebrew's copies —
+    including the ones AppKit and ImageIO reach for — and the app stopped
+    surviving its own startup: dead three seconds in, every launch, but only
+    when launched from here. It read as a launchd fault for four days.
+
+    A dyld override is a process-wide instrument aimed at one library. If the
+    av clash comes back it has to be handled where av is loaded.
+    """
     # Launch through the app bundle when possible so TCC permission prompts
     # are attributed to "Trnscrb" (the bundle launcher runs `trnscrb start`).
     from trnscrb.app_bundle import ensure_bundle
@@ -1940,11 +1961,6 @@ def _setup_login_item(binary_path: str) -> bool:
     <dict>
         <key>SuccessfulExit</key>
         <false/>
-    </dict>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>DYLD_LIBRARY_PATH</key>
-        <string>/opt/homebrew/lib:/usr/local/lib</string>
     </dict>
     <key>StandardOutPath</key>
     <string>/tmp/trnscrb.log</string>
