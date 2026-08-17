@@ -142,3 +142,67 @@ class IconIntegrityTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HealthyUptimeTest(unittest.TestCase):
+    """A launch that survives has to be able to say so."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.addCleanup(setattr, health, "STORE", health.STORE)
+        health.STORE = Path(tmp.name) / "health.json"
+
+    def test_uptime_clears_a_recovered_loop(self):
+        health.record_failure(health.APP_START, "5 starts in under 2 minutes")
+        health.note_healthy_uptime()
+        entry = health.get(health.APP_START)
+        self.assertTrue(entry["ok"])
+        self.assertEqual(entry["failures"], 0)
+        self.assertEqual(health.unhealthy(), [])
+
+    def test_uptime_also_forgets_the_start_history(self):
+        for _ in range(3):
+            health.note_start()
+        health.note_healthy_uptime()
+        self.assertEqual(health.note_start(), 1)
+
+    def test_a_loop_can_never_reach_the_uptime_mark(self):
+        """Otherwise a loop could mark itself healthy between restarts."""
+        self.assertGreater(health.HEALTHY_UPTIME_SECS, health.CRASH_LOOP_WINDOW_SECS)
+
+    def test_the_app_schedules_it_for_later_not_now(self):
+        """At startup every launch looks fine, including the doomed ones."""
+        import inspect
+
+        from trnscrb import menu_bar
+
+        source = inspect.getsource(menu_bar.TrnscrbApp.__init__)
+        self.assertIn("HEALTHY_UPTIME_SECS", source)
+        self.assertIn("threading.Timer", source)
+
+
+class RunNounTest(unittest.TestCase):
+    """Failure counts have to name what was counted."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.addCleanup(setattr, health, "STORE", health.STORE)
+        health.STORE = Path(tmp.name) / "health.json"
+
+    def test_a_restart_loop_is_counted_in_starts(self):
+        health.record_failure(health.APP_START, "boom")
+        self.assertIn("(1 start)", health.describe(health.APP_START))
+
+    def test_starts_pluralise(self):
+        for _ in range(3):
+            health.record_failure(health.APP_START, "boom")
+        self.assertIn("(3 starts)", health.describe(health.APP_START))
+
+    def test_diarization_is_still_counted_in_meetings(self):
+        health.record_failure(health.DIARIZATION, "boom")
+        self.assertIn("(1 meeting)", health.describe(health.DIARIZATION))
+
+    def test_every_component_has_a_noun(self):
+        self.assertEqual(set(health.RUN_NOUNS), set(health.LABELS))
