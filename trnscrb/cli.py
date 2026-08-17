@@ -1442,16 +1442,20 @@ def doctor(quick: bool):
     from trnscrb.settings import read_hf_token
 
     click.echo("\n  Diagnosing speaker labels\n")
+    # Two independent verdicts. Speaker labels can work perfectly on a machine
+    # with no system-audio permission, and saying "broken" about the first
+    # because of the second would be wrong in both directions.
     failures: list[str] = []
+    audio_failures: list[str] = []
 
-    def _check(label: str, fn, fix: str = ""):
+    def _check(label: str, fn, fix: str = "", bucket: list[str] | None = None):
         try:
             detail = fn() or "ok"
         except Exception as e:
             _row(label, False, click.style(str(e)[:120], fg="red"))
             if fix:
                 click.echo(f"    → {fix}")
-            failures.append(label)
+            (failures if bucket is None else bucket).append(label)
             return False
         _row(label, True, detail)
         return True
@@ -1541,8 +1545,9 @@ def doctor(quick: bool):
         "capture helper",
         _capture_helper_state,
         "run `trnscrb install` to rebuild the app bundle",
+        bucket=audio_failures,
     )
-    _check("screen recording", _screen_recording_state, _TCC_RESET_HINT)
+    _check("screen recording", _screen_recording_state, _TCC_RESET_HINT, bucket=audio_failures)
 
     click.echo()
     for component in sorted(health.LABELS):
@@ -1554,11 +1559,16 @@ def doctor(quick: bool):
         # A green probe is evidence the stack works now, so a stale failure
         # from last week should stop being reported as the current state.
         health.record_ok(health.DIARIZATION, "verified by `trnscrb doctor`")
-        click.echo(click.style("\n  Speaker labels work end to end.\n", fg="green"))
+        click.echo(click.style("\n  Speaker labels work end to end.", fg="green"))
     elif failures:
-        click.echo(click.style(f"\n  Broken: {', '.join(failures)}\n", fg="red"))
-    else:
-        click.echo()
+        click.echo(click.style(f"\n  Broken: {', '.join(failures)}", fg="red"))
+
+    if audio_failures:
+        click.echo(
+            click.style(f"  System audio unavailable: {', '.join(audio_failures)}", fg="red")
+        )
+        click.echo("  Recordings will capture your microphone only.")
+    click.echo()
 
 
 def _fail(message: str):

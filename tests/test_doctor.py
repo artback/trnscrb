@@ -182,3 +182,50 @@ def log_file():
     from trnscrb import log
 
     return log._LOG_FILE
+
+
+class VerdictSeparationTest(unittest.TestCase):
+    """Speaker labels and system audio are separate verdicts.
+
+    A machine with no Screen Recording grant can diarize perfectly. Letting
+    one fail the other reports the wrong thing in both directions — and hid
+    the "works end to end" line on CI, which has no app bundle at all.
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.addCleanup(setattr, health, "STORE", health.STORE)
+        health.STORE = Path(tmp.name) / "health.json"
+
+    def _run(self):
+        from trnscrb import sck_helper
+        from trnscrb.cli import doctor
+
+        turns = [{"start": 0.0, "end": 4.0, "speaker": "SPEAKER_00"}]
+        with (
+            mock.patch("trnscrb.settings.read_hf_token", return_value="hf_x"),
+            mock.patch.object(diarizer, "is_downloaded", return_value=True),
+            mock.patch.object(diarizer, "_get_pipeline", return_value=object()),
+            mock.patch.object(diarizer, "pipeline_id", return_value="pyannote/community-1"),
+            mock.patch.object(diarizer, "embedding_space", return_value="plda"),
+            mock.patch.object(
+                diarizer, "diarize_with_embeddings", return_value=(turns, {"SPEAKER_00": [0.1]})
+            ),
+            mock.patch.object(sck_helper, "helper_path", return_value=None),
+            mock.patch.object(sck_helper, "has_permission", return_value=None),
+        ):
+            return CliRunner().invoke(doctor, [])
+
+    def test_missing_system_audio_does_not_fail_speaker_labels(self):
+        out = self._run().output
+        self.assertIn("Speaker labels work end to end", out)
+        self.assertIn("System audio unavailable", out)
+
+    def test_missing_system_audio_still_clears_the_diarization_failure(self):
+        health.record_failure(health.DIARIZATION, "torchcodec is not available")
+        self._run()
+        self.assertTrue(health.get(health.DIARIZATION)["ok"])
+
+    def test_the_consequence_is_spelled_out(self):
+        self.assertIn("microphone only", self._run().output)
