@@ -292,6 +292,12 @@ class TrnscrbApp(rumps.App):
         self._rollout_timer = rumps.Timer(self._check_rollout, self._ROLLOUT_CHECK_SECS)
         self._rollout_timer.start()
 
+        # Nothing else ever records that startup succeeded, so a recovered
+        # restart loop would keep being reported long after it was fixed.
+        self._healthy_timer = threading.Timer(health.HEALTHY_UPTIME_SECS, self._mark_startup_ok)
+        self._healthy_timer.daemon = True
+        self._healthy_timer.start()
+
     def _start_backlog_retry(self):
         """Transcribe any preserved audio left un-transcribed by an earlier run.
 
@@ -681,6 +687,14 @@ class TrnscrbApp(rumps.App):
         # rumps only initializes MenuItem._menu after first submenu insertion.
         if getattr(menu_item, "_menu", None) is not None:
             menu_item.clear()
+
+    def _mark_startup_ok(self):
+        """This launch has been up long enough to call it a good one."""
+        try:
+            health.note_healthy_uptime()
+            self._update_health_item()
+        except Exception:
+            _log.debug("Could not record healthy uptime", exc_info=True)
 
     def _update_health_item(self):
         """Put any standing failure in the menu title itself.

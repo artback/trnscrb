@@ -41,6 +41,16 @@ LABELS = {
     APP_START: "App startup",
 }
 
+# What one run of each component is, for counting failures in a status line.
+# Most run once per meeting; the app runs once per launch, and reporting a
+# restart loop as "1 meeting" describes the wrong thing entirely.
+RUN_NOUNS = {
+    DIARIZATION: "meeting",
+    VOICE_ENROLMENT: "meeting",
+    TRANSCRIPTION: "meeting",
+    APP_START: "start",
+}
+
 # Starts this close together mean the app is not running, it is looping.
 #
 # launchd's KeepAlive has no backoff. A job that dies during startup is
@@ -56,6 +66,13 @@ LABELS = {
 # KeepAlive-on-failure will not restart, and the loop ends.
 CRASH_LOOP_STARTS = 5
 CRASH_LOOP_WINDOW_SECS = 120
+
+# Uptime that counts as "this launch worked". Without it, only failures are
+# ever recorded: an app that has been up for hours still reports the loop it
+# recovered from, and the one row a user checks to see whether the problem is
+# fixed is the one row that cannot say yes. Comfortably longer than the
+# window a loop lives in, so a loop can never reach it.
+HEALTHY_UPTIME_SECS = 300
 
 # Failure text is for a human reading a status line, not a stack trace.
 _MAX_DETAIL = 300
@@ -168,7 +185,8 @@ def describe(component: str) -> str:
 
     failures = int(entry.get("failures", 1))
     since = str(entry.get("failing_since", ""))[:10]
-    run_word = "meeting" if failures == 1 else "meetings"
+    noun = RUN_NOUNS.get(component, "meeting")
+    run_word = noun if failures == 1 else f"{noun}s"
     return f"failing since {since} ({failures} {run_word}): {entry.get('detail', '')}"
 
 
@@ -208,6 +226,16 @@ def note_start() -> int:
     except Exception:
         _log.debug("Could not record the app start", exc_info=True)
         return 1  # never let bookkeeping stop the app from running
+
+
+def note_healthy_uptime() -> None:
+    """Record that this launch has been up long enough to count as working.
+
+    Called once, from a timer, rather than at startup: at startup every launch
+    looks fine, including the ones about to die three seconds later.
+    """
+    record_ok(APP_START, f"up {HEALTHY_UPTIME_SECS // 60} minutes without incident")
+    clear_starts()
 
 
 def clear_starts() -> None:
