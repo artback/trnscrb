@@ -1442,16 +1442,20 @@ def doctor(quick: bool):
     from trnscrb.settings import read_hf_token
 
     click.echo("\n  Diagnosing speaker labels\n")
+    # Two independent verdicts. Speaker labels can work perfectly on a machine
+    # with no system-audio permission, and saying "broken" about the first
+    # because of the second would be wrong in both directions.
     failures: list[str] = []
+    audio_failures: list[str] = []
 
-    def _check(label: str, fn, fix: str = ""):
+    def _check(label: str, fn, fix: str = "", bucket: list[str] | None = None):
         try:
             detail = fn() or "ok"
         except Exception as e:
             _row(label, False, click.style(str(e)[:120], fg="red"))
             if fix:
                 click.echo(f"    → {fix}")
-            failures.append(label)
+            (failures if bucket is None else bucket).append(label)
             return False
         _row(label, True, detail)
         return True
@@ -1536,6 +1540,15 @@ def doctor(quick: bool):
         finally:
             clip.unlink(missing_ok=True)
 
+    click.echo("\n  Diagnosing system audio\n")
+    _check(
+        "capture helper",
+        _capture_helper_state,
+        "run `trnscrb install` to rebuild the app bundle",
+        bucket=audio_failures,
+    )
+    _check("screen recording", _screen_recording_state, _TCC_RESET_HINT, bucket=audio_failures)
+
     click.echo()
     for component in sorted(health.LABELS):
         if health.get(component):
@@ -1546,15 +1559,71 @@ def doctor(quick: bool):
         # A green probe is evidence the stack works now, so a stale failure
         # from last week should stop being reported as the current state.
         health.record_ok(health.DIARIZATION, "verified by `trnscrb doctor`")
-        click.echo(click.style("\n  Speaker labels work end to end.\n", fg="green"))
+        click.echo(click.style("\n  Speaker labels work end to end.", fg="green"))
     elif failures:
-        click.echo(click.style(f"\n  Broken: {', '.join(failures)}\n", fg="red"))
-    else:
-        click.echo()
+        click.echo(click.style(f"\n  Broken: {', '.join(failures)}", fg="red"))
+
+    if audio_failures:
+        click.echo(
+            click.style(f"  System audio unavailable: {', '.join(audio_failures)}", fg="red")
+        )
+        click.echo("  Recordings will capture your microphone only.")
+    click.echo()
 
 
 def _fail(message: str):
     raise RuntimeError(message)
+
+
+# The failure this exists for: the app bundle is ad-hoc signed, so macOS can
+# only pin the Screen Recording grant to the binary's exact hash. Replacing
+# the capture binary — which every launcher change does — invalidates the
+# record while leaving the entry in System Settings looking enabled. The
+# checkbox says yes, the capture says no, and nothing on screen explains it.
+_TCC_RESET_HINT = (
+    "the entry in System Settings is stale — the capture binary changed and "
+    "an ad-hoc signature cannot carry the grant across it. Clear it and let "
+    "macOS ask again:\n"
+    "      tccutil reset ScreenCapture io.trnscrb.app\n"
+    "      then quit and reopen Trnscrb, and start a recording to get the prompt"
+)
+
+
+def _capture_helper_state() -> str:
+    """Where the capture helper is, and whether the installed bundle is current."""
+    import shutil
+
+    from trnscrb import sck_helper
+    from trnscrb.app_bundle import _bundle_marker, _packaged_bundle, bundle_path
+
+    helper = sck_helper.helper_path()
+    if helper is None:
+        _fail("not found in the app bundle")
+
+    installed = _bundle_marker(bundle_path())
+    try:
+        packaged = _bundle_marker(_packaged_bundle(Path(shutil.which("trnscrb") or "")))
+    except Exception:
+        packaged = None
+    if installed and packaged and installed != packaged:
+        _fail(
+            f"the installed bundle is older than the packaged one "
+            f"({installed.splitlines()[0]} vs {packaged.splitlines()[0]}) — run `trnscrb install`"
+        )
+    version = (installed or "?").splitlines()[0]
+    return f"launcher v{version}"
+
+
+def _screen_recording_state() -> str:
+    """Whether the helper can actually capture, which is the only thing that counts."""
+    from trnscrb import sck_helper
+
+    granted = sck_helper.has_permission()
+    if granted is None:
+        _fail("could not ask the helper — is the app bundle installed?")
+    if not granted:
+        _fail("denied: system audio will not be recorded, only your microphone")
+    return "granted"
 
 
 def _voiceprint_store_state(space: str) -> tuple[str, bool]:

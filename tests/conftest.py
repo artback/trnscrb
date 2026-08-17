@@ -12,12 +12,25 @@ constant. This redirects every path that leads to the user's own data, for
 every test, whether or not the test knows it needs it. Tests that patch these
 themselves still win — an autouse fixture is applied before the test body.
 
-Deliberately not redirected: the log file (writing there is harmless and
-useful) and the HuggingFace cache (read-only, and a redirect would trigger
-gigabyte downloads).
+The log file is redirected too, via TRNSCRB_LOG_DIR. Writing there looked
+harmless right up until a test fixture's "Aligning system audio: it runs
+500 ms behind the mic" turned up in the real log during a live debugging
+session and read as a genuine capture.
+
+Deliberately not redirected: the HuggingFace cache, which is read-only here
+and would trigger gigabyte downloads if pointed somewhere empty.
 """
 
+import os
+import tempfile
+
 import pytest
+
+# Set before anything imports trnscrb.log, which reads it once when the first
+# logger is built. A fixture would be too late: the handler is created at
+# import time of the first module under test.
+_LOG_DIR = tempfile.mkdtemp(prefix="trnscrb-test-logs-")
+os.environ["TRNSCRB_LOG_DIR"] = _LOG_DIR
 
 
 @pytest.fixture(autouse=True)
