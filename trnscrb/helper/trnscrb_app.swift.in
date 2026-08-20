@@ -139,7 +139,9 @@ final class AudioCapture: NSObject, SCStreamDelegate, SCStreamOutput {
         if !age.isFinite || age < 0 { age = 0 }
 
         var header = Data()
-        withUnsafeBytes(of: UInt32(0x5452_4E53).littleEndian) { header.append(contentsOf: $0) }
+        // Big-endian so the bytes read "TRNS" on the wire, in that order —
+        // the reader matches the literal, not the number.
+        withUnsafeBytes(of: UInt32(0x5452_4E53).bigEndian) { header.append(contentsOf: $0) }
         withUnsafeBytes(of: age.bitPattern.littleEndian) { header.append(contentsOf: $0) }
         withUnsafeBytes(of: UInt32(length / 4).littleEndian) { header.append(contentsOf: $0) }
         do {

@@ -7,6 +7,7 @@ recordings at +0.21 to +0.29 waveform correlation, at lags that were steady
 within a call and different between calls — a capture offset, not a room.
 """
 
+import re
 import struct
 import unittest
 from unittest import mock
@@ -132,3 +133,47 @@ class AlignmentTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HelperSourceWireFormatTest(unittest.TestCase):
+    """The Swift writer and the Python reader must agree byte for byte.
+
+    Every other test here builds frames from ``sck_helper._MAGIC``, so both
+    sides share Python's constant and the helper's own encoding is never
+    checked. That is how the magic shipped little-endian — "SNRT" on the
+    wire — with the reader falling back to bare PCM and mixing each header
+    into the audio as a full-scale click.
+    """
+
+    def setUp(self):
+        from trnscrb.app_bundle import _APP_SOURCE
+
+        self.source = _APP_SOURCE.read_text()
+
+    def _field(self, expression: str) -> str:
+        """The endianness the helper writes ``expression`` with."""
+        match = re.search(
+            re.escape(expression) + r"\)?\.(littleEndian|bigEndian)\) \{ header\.append",
+            self.source,
+        )
+        self.assertIsNotNone(match, f"helper no longer writes {expression}")
+        return match.group(1)
+
+    def test_the_magic_lands_as_the_reader_spells_it(self):
+        match = re.search(
+            r"withUnsafeBytes\(of: UInt32\(0x([0-9A-Fa-f_]+)\)\.(littleEndian|bigEndian)\)"
+            r" \{ header\.append",
+            self.source,
+        )
+        self.assertIsNotNone(match, "helper no longer writes a magic word")
+        value = int(match.group(1).replace("_", ""), 16)
+        order = "little" if match.group(2) == "littleEndian" else "big"
+        self.assertEqual(value.to_bytes(4, order), sck_helper._MAGIC)
+
+    def test_age_and_count_are_written_little_endian(self):
+        """``_take_frame`` unpacks them with "<fI"."""
+        self.assertEqual(self._field("withUnsafeBytes(of: age.bitPattern"), "littleEndian")
+        self.assertEqual(self._field("withUnsafeBytes(of: UInt32(length / 4"), "littleEndian")
+
+    def test_the_header_is_the_length_the_reader_expects(self):
+        self.assertEqual(sck_helper._HEADER_BYTES, 4 + struct.calcsize("<fI"))
