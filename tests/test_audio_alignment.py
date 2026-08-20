@@ -173,9 +173,7 @@ class HelperSourceWireFormatTest(unittest.TestCase):
     def test_age_and_count_are_written_little_endian(self):
         """``_take_frame`` unpacks them with "<fI"."""
         self.assertEqual(self._field("withUnsafeBytes(of: age.bitPattern"), "littleEndian")
-        self.assertEqual(
-            self._field("withUnsafeBytes(of: UInt32(length / 4"), "littleEndian"
-        )
+        self.assertEqual(self._field("withUnsafeBytes(of: UInt32(length / 4"), "littleEndian")
 
     def test_the_header_is_the_length_the_reader_expects(self):
         self.assertEqual(sck_helper._HEADER_BYTES, 4 + struct.calcsize("<fI"))
