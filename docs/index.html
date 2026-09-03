@@ -302,7 +302,7 @@
     <div class="nav-links">
       <a href="#install">Install</a>
       <a href="#faq">FAQ</a>
-      <a href="https://github.com/ajayrmk/trnscrb">GitHub</a>
+      <a href="https://github.com/artback/trnscrb">GitHub</a>
       <a href="https://www.producthunt.com/products/trnscrb?utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-trnscrb" target="_blank" rel="noopener noreferrer">
         <img alt="trnscrb on Product Hunt" width="120" height="26" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1082358&theme=dark&t=1771530333877" style="display:block;vertical-align:middle;" />
       </a>
@@ -319,7 +319,7 @@
     <div class="install-block">
       <div class="step-label">Install</div>
       <div><span class="c"># homebrew</span></div>
-      <div>brew tap ajayrmk/tap</div>
+      <div>brew tap artback/trnscrb</div>
       <div>brew install trnscrb</div>
       <div>trnscrb install</div>
     </div>
@@ -399,7 +399,7 @@
         <h3>Homebrew</h3>
       </div>
       <pre><span class="c"># tap once, then install</span>
-brew tap ajayrmk/tap
+brew tap artback/trnscrb
 brew install trnscrb
 trnscrb install</pre>
     </div>
@@ -429,10 +429,14 @@ uv tool install trnscrb &amp;&amp; trnscrb install</pre>
       <tr><td>get_last_transcript</td><td>Fetch the most recent transcript</td></tr>
       <tr><td>list_transcripts</td><td>List all saved meetings</td></tr>
       <tr><td>get_transcript</td><td>Read a specific transcript</td></tr>
+      <tr><td>search_transcripts</td><td>Full-text search across all transcripts</td></tr>
+      <tr><td>semantic_search</td><td>Search transcripts by meaning, not just keywords</td></tr>
       <tr><td>get_calendar_context</td><td>Current or upcoming calendar event</td></tr>
-      <tr><td>enrich_transcript</td><td>Add summary + action items via Claude API</td></tr>
+      <tr><td>enrich_transcript</td><td>Add summary + action items via your configured LLM</td></tr>
+      <tr><td>list_action_items</td><td>Your tracked action items across meetings</td></tr>
     </tbody>
   </table>
+  <p style="margin-top:14px;font-size:13px;">Plus tools for weekly/annual summaries, glossary management, and action-item tracking — see the <a href="https://github.com/artback/trnscrb#claude-desktop--mcp-tools" style="text-decoration:underline;">full list in the README</a>.</p>
 
   <hr />
 
@@ -441,7 +445,7 @@ uv tool install trnscrb &amp;&amp; trnscrb install</pre>
   <div class="faq">
     <div class="faq-item">
       <div class="faq-q">Does it need an internet connection?</div>
-      <div class="faq-a">No. Recording and transcription are fully offline. The only exception is <code>trnscrb enrich</code>, which sends transcript text to the Claude API to generate a summary and action items.</div>
+      <div class="faq-a">No. Recording and transcription are fully offline. The only exception is enrichment (summary + action items), which sends transcript text to whichever LLM provider you've configured — local by default via llama.cpp, or Claude Code, Ollama, LM Studio, Anthropic, or OpenAI.</div>
     </div>
     <div class="faq-item">
       <div class="faq-q">Which meeting apps are detected?</div>
@@ -465,7 +469,7 @@ uv tool install trnscrb &amp;&amp; trnscrb install</pre>
     </div>
     <div class="faq-item">
       <div class="faq-q">Is my audio or transcript data sent anywhere?</div>
-      <div class="faq-a">Never, unless you explicitly run <code>trnscrb enrich</code>. Audio is processed locally and deleted after transcription. Transcripts stay on your machine.</div>
+      <div class="faq-a">Never, except for enrichment — see above. Audio is processed locally and deleted once it's been transcribed successfully; if transcription fails, the audio is kept (and retried automatically) so nothing is lost. Transcripts stay on your machine.</div>
     </div>
   </div>
 
@@ -475,7 +479,7 @@ uv tool install trnscrb &amp;&amp; trnscrb install</pre>
 
 <footer>
   <div class="wrap">
-    <p>MIT License · <a href="https://github.com/ajayrmk/trnscrb">GitHub</a> · <a href="https://github.com/ajayrmk/trnscrb/issues">Issues</a></p>
+    <p>MIT License · <a href="https://github.com/artback/trnscrb">GitHub</a> · <a href="https://github.com/artback/trnscrb/issues">Issues</a></p>
     <a href="https://www.buymeacoffee.com/ajayram" target="_blank" rel="noopener noreferrer"
        style="display:inline-flex;align-items:center;gap:5px;padding:0 12px;height:30px;background:#FFDD00;color:#000;border-radius:6px;font-size:13px;font-weight:500;text-decoration:none;white-space:nowrap;">
       ☕ Buy me a coffee
