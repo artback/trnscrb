@@ -128,9 +128,92 @@ Custom prompt templates can also be placed in `~/.config/trnscrb/prompts/weekly.
 ```bash
 trnscrb search "auth migration"     # search all transcripts
 trnscrb search "Miguel" -n 3        # with context lines
+trnscrb search "who owns billing" --semantic  # search by meaning, not keywords
 ```
 
-Also available as an MCP tool (`search_transcripts`) in Claude Desktop.
+Also available as MCP tools (`search_transcripts`, `semantic_search`) in Claude Desktop.
+
+---
+
+## Custom vocabulary
+
+Teach trnscrb the names, product terms, and acronyms your meetings actually use, so they land correctly in the transcript itself rather than needing a find-and-replace afterwards:
+
+```bash
+trnscrb glossary add Hivenet --alias "high vnet" --alias "hive net"
+trnscrb glossary list
+trnscrb glossary remove Hivenet
+```
+
+Aliases are rewritten to the canonical term (with canonical casing) as each segment is transcribed, so the saved transcript already carries your terminology — this isn't a post-hoc edit or part of enrichment. With `glossary_fuzzy` on (the default), single tokens that are close-spelling matches to a term get nudged onto it too. On the Whisper backend, glossary terms are also handed to the model as decode hotwords; Parakeet has no such hook, so correction is doing all the work there.
+
+Also available as MCP tools in Claude Desktop: `list_glossary`, `add_glossary_terms`, `add_glossary_correction`, `remove_glossary_term`, `suggest_glossary_terms`.
+
+---
+
+## Speaker & voice identities
+
+Diarization labels speakers `SPEAKER_00`, `SPEAKER_01`, etc. trnscrb can learn what those voices actually sound like and carry names across meetings:
+
+```bash
+trnscrb voices                        # list learned identities
+trnscrb voices --label                # play each unnamed voice and name it interactively
+trnscrb voices --name SPEAKER_02 Sara # name one directly
+trnscrb voices --verbose              # show which meetings each voice appeared in
+trnscrb voices --forget SPEAKER_02    # delete an identity
+```
+
+Your own voice is learned by default (`learn_my_voice`) — the mic stream identifies you unambiguously, and it's your voice to keep. Everyone else's voice is **not** clustered by default (`cluster_voices` is off): these are biometric fingerprints of people who haven't consented to being enrolled. Turn it on with `trnscrb config set cluster_voices true` once that's a call you're comfortable making for your team. Naming a voice applies retroactively to every past meeting it appeared in, not just the current one.
+
+If you have an exported Google Meet transcript (Docs → File → Download → Plain text), `trnscrb import-meet <file>` matches its speaker names onto trnscrb's own transcript and voiceprints, and suggests glossary terms from words Meet's captions heard differently:
+
+```bash
+trnscrb import-meet meet-transcript.txt --apply-glossary
+```
+
+---
+
+## Action items & Obsidian
+
+trnscrb tracks *your own* commitments — not tasks assigned to someone else in a standup — across meetings:
+
+```bash
+trnscrb tasks            # open action items
+trnscrb tasks --all      # include completed ones
+```
+
+With `track_action_items` on (the default) and an Obsidian vault available, each meeting is also mirrored into the vault as a note, and open items are kept in sync both ways with an `Action Items.md` note using Tasks-plugin checkboxes and `[[backlinks]]` — ticking a box in Obsidian marks the item done in trnscrb too. The vault is auto-detected from Obsidian's own config, or set explicitly:
+
+```bash
+trnscrb config set obsidian_vault ~/Documents/Notes
+trnscrb config set obsidian_subdir Meetings   # default
+```
+
+`trnscrb vault-sync` refreshes existing notes with the latest attendee/topic properties (worth re-running after glossary changes, since topics are derived from it); `--all` also mirrors transcripts that don't have a note yet, so it can't quietly flood a personal vault by default. Separately, `auto_integrate` (off by default) hands each transcript to the local `claude` CLI to fold key decisions and action items straight into your existing notes — configure its prompt with `trnscrb config set integrate_prompt "..."`.
+
+Also available as MCP tools in Claude Desktop: `list_action_items`, `add_action_item`, `resolve_action_item`, `link_action_item`.
+
+---
+
+## Configuration
+
+```bash
+trnscrb config list              # every setting and its current value
+trnscrb config get quiet_stop_minutes
+trnscrb config set quiet_stop_minutes 10
+```
+
+Settings worth knowing about beyond the ones covered above:
+
+| Setting | Default | What it does |
+|---------|---------|---------------|
+| `auto_record` | `true` | Start watching for mic activity on launch |
+| `auto_enrich` | `true` | Summary + action items after each recording (no-op if no LLM is reachable) |
+| `retention_audio_days` | `30` | Delete *preserved* audio (from a failed transcription) after N days; `0` keeps forever |
+| `retention_transcript_days` | `0` | Delete transcripts after N days; `0` keeps forever |
+| `voice_match_threshold` / `voice_match_margin` | `0.75` / `0.10` | How confidently two recordings must match to be treated as the same person — tuned to favor two identities for one person over merging two people into one |
+| `mlx_cache_limit_mb` | `512` | Cap on MLX's GPU buffer cache; `0` disables the cap |
+| `user_name` | *(macOS username)* | Your display name in meetings, used to tell which action items are yours |
 
 ---
 
@@ -141,17 +224,31 @@ trnscrb start            # launch menu bar app
 trnscrb install          # guided setup
 trnscrb watch            # headless auto-transcribe (no menu bar)
 trnscrb live             # stream live transcript to terminal
+trnscrb toggle           # start/stop recording in the running app (bind to a hotkey)
+trnscrb bookmark [label] # mark this moment in the running recording
+
 trnscrb list             # list saved transcripts
 trnscrb show <id>        # print a transcript
-trnscrb search <query>   # full-text search across all transcripts
-trnscrb enrich <id>      # add summary + action items
+trnscrb search <query>   # full-text search across all transcripts (--semantic for meaning-based)
 trnscrb transcribe <wav> # transcribe a saved recording
 trnscrb retry            # transcribe every recording still missing a transcript
+trnscrb import-meet <f>  # name speakers from an exported Google Meet transcript
+
+trnscrb enrich <id>      # add summary + action items
 trnscrb weekly           # weekly summary from transcripts
 trnscrb annual           # annual summary from weekly summaries
+trnscrb tasks            # list tracked action items
+trnscrb vault-sync       # refresh Obsidian notes from current transcripts
+
+trnscrb glossary list|add|remove   # manage custom vocabulary
+trnscrb voices                     # list/name/forget learned voice identities
+trnscrb config list|get|set        # inspect/change settings
+
 trnscrb mic-status       # live mic activity monitor
 trnscrb devices          # list audio input devices
+trnscrb status           # health check across recording, diarization, MCP, etc.
 trnscrb doctor           # run the speaker-labelling stack end to end
+trnscrb icons            # regenerate menu bar icons (run once after install)
 ```
 
 ### When speaker labels stop working
@@ -180,13 +277,24 @@ After `trnscrb install`, Claude Desktop has these tools:
 | `stop_recording` | Stop and transcribe in background |
 | `recording_status` | Check recording/transcription status |
 | `get_last_transcript` | Most recent transcript |
+| `get_current_transcript` | Live transcript of a recording in progress |
 | `list_transcripts` | All saved meetings |
 | `get_transcript` | Read a specific transcript |
 | `search_transcripts` | Full-text search across transcripts |
+| `semantic_search` | Meaning-based search across transcripts |
 | `get_weekly_transcripts` | All transcripts for a given week |
 | `get_weekly_summaries` | All weekly summaries for a year |
 | `get_calendar_context` | Current/upcoming calendar event |
 | `enrich_transcript` | Summary + action items via LLM |
+| `list_glossary` | Show all glossary terms |
+| `add_glossary_terms` | Add custom vocabulary terms |
+| `add_glossary_correction` | Add a mis-heard → correct spelling pair |
+| `remove_glossary_term` | Remove a glossary term |
+| `suggest_glossary_terms` | Suggest terms from recent transcripts |
+| `list_action_items` | Tracked action items (open or all) |
+| `add_action_item` | Add an action item |
+| `resolve_action_item` | Mark an action item done |
+| `link_action_item` | Attach a Jira/GitHub reference to an item |
 
 ---
 
@@ -230,7 +338,7 @@ Filler words (um, uh, like, basically, etc.) are automatically removed in 5 lang
 
 ## Privacy
 
-Everything runs locally. Enrichment sends transcript text to whichever LLM provider you configure (local by default with Claude Code or Ollama).
+Everything runs locally. Enrichment sends transcript text to whichever LLM provider you configure (local by default, via llama.cpp) — swap in Claude Code, Ollama, LM Studio, or a hosted Anthropic/OpenAI key from menu bar Settings.
 
 ---
 
