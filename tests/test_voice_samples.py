@@ -111,6 +111,8 @@ class LabelVoicesMenuTest(unittest.TestCase):
     def _run(self, rows, answers, clip=True):
         from trnscrb import menu_bar
 
+        for row in rows:
+            row["clip"] = clip
         results = [mock.Mock(clicked=bool(a is not None), text=a or "") for a in answers]
         with (
             mock.patch.object(voiceprints, "summary", return_value=rows),
@@ -153,10 +155,12 @@ class LabelVoicesMenuTest(unittest.TestCase):
         _, popen, _ = self._run([self._row("voice-2")], ["X"])
         self.assertEqual(popen.call_args.args[0][0], "afplay")
 
-    def test_missing_clip_still_prompts(self):
-        name, popen, _ = self._run([self._row("voice-2")], ["X"], clip=False)
+    def test_missing_clip_is_not_asked_about(self):
+        """Nothing to hear means nothing to answer; it gets a clip next time."""
+        name, popen, alert = self._run([self._row("voice-2")], ["X"], clip=False)
         popen.assert_not_called()
-        name.assert_called_once()
+        name.assert_not_called()
+        alert.assert_called_once()
 
     def test_already_named_voices_are_skipped(self):
         name, _, alert = self._run([self._row("voice-1", "Me")], [])

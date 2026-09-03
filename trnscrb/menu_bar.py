@@ -709,12 +709,14 @@ class TrnscrbApp(rumps.App):
         from trnscrb import voiceprints
 
         try:
-            unnamed = [r for r in voiceprints.summary() if not r["name"]]
+            # Only voices with a clip: one that cannot be heard cannot be
+            # named by ear, and it gets a clip the next time it is heard.
+            unnamed = [r for r in voiceprints.summary() if not r["name"] and r["clip"]]
         except Exception:
             _log.warning("Could not read voices", exc_info=True)
             return
         if not unnamed:
-            rumps.alert("Voices", "Every voice trnscrb has learned already has a name.")
+            rumps.alert("Voices", "Every voice trnscrb can play already has a name.")
             return
 
         named = 0
@@ -743,8 +745,6 @@ class TrnscrbApp(rumps.App):
             detail = (
                 f"{row['observations']} meeting(s), {row['speech_secs'] / 60:.0f} min\n{meetings}"
             )
-            if not clip.is_file():
-                detail += "\n\n(No audio clip — recorded before clips were kept.)"
             result = rumps.Window(
                 message=detail,
                 title=f"Who is {row['id']}?",
