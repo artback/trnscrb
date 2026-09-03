@@ -1123,7 +1123,13 @@ class TrnscrbApp(rumps.App):
                     )
                     # system_audio_used was read before stop() cleared it.
                     self._learn_voices(
-                        diar, embeddings, recorder, system_audio_used, meeting_name, audio_path
+                        diar,
+                        embeddings,
+                        recorder,
+                        system_audio_used,
+                        meeting_name,
+                        audio_path,
+                        event=evt,
                     )
                 except Exception as e:
                     # The transcript still saves, so nothing about this meeting
@@ -1282,6 +1288,7 @@ class TrnscrbApp(rumps.App):
         system_audio: bool,
         meeting: str,
         audio_path=None,
+        event: dict | None = None,
     ) -> None:
         """Carry this meeting's speakers into the persistent voice identities.
 
@@ -1325,6 +1332,9 @@ class TrnscrbApp(rumps.App):
                 cluster_others=cluster_others,
                 audio_path=audio_path,
             )
+            # A 1:1's counterpart, or the one invitee not yet known in a
+            # group, gets their name from the invite.
+            attribution.name_voice_from_calendar(learned, event, speakers=len(embeddings))
             ok, detail = voiceprints.enrolment_health(learned, diar)
             (health.record_ok if ok else health.record_failure)(
                 health.VOICE_ENROLMENT, detail, meeting

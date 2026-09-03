@@ -439,3 +439,137 @@ class EnrolmentHealthTest(unittest.TestCase):
         ok, detail = voiceprints.enrolment_health([], _turns([(0, 300, "S0")]))
         self.assertFalse(ok)
         self.assertIn("spoke long enough", detail)
+
+
+def _store(vectors: dict[str, tuple], names: dict[str, str] | None = None) -> dict:
+    """Write a store of already-split identities, bypassing observe()'s matching."""
+    data = voiceprints._empty(_MODEL)
+    for voice_id, vector in vectors.items():
+        data["voices"][voice_id] = {
+            "vector": voiceprints._unit(_vec(*vector)).tolist(),
+            "name": (names or {}).get(voice_id, ""),
+            "observations": 1,
+            "speech_secs": 100.0,
+            "seen": [{"meeting": voice_id, "label": "S0", "secs": 100.0, "at": voice_id}],
+            "updated_at": voice_id,
+        }
+    data["next_id"] = len(vectors) + 1
+    voiceprints._save(data)
+    return data
+
+
+class DuplicateMatchTest(_StoreTest):
+    """A voice stored twice must not make itself unmatchable."""
+
+    def test_duplicate_runner_up_does_not_block_a_match(self):
+        # Two copies of one person, and one genuinely different voice.
+        _store({"voice-1": (1.0, 0.0, 0.0), "voice-2": (0.99, 0.14, 0.0), "voice-3": (0, 0, 1)})
+        voice_id, _ = voiceprints.match(_vec(1.0, 0.05, 0.0))
+        self.assertIn(voice_id, ("voice-1", "voice-2"))
+
+    def test_two_distinct_close_voices_are_still_ambiguous(self):
+        # 0.8 apart is well under the duplicate bar; equidistant stays refused.
+        _store({"voice-1": (1.0, 0.0), "voice-2": (0.8, 0.6)})
+        self.assertIsNone(voiceprints.match(_vec(0.95, 0.31))[0])
+
+    def test_observe_folds_the_duplicate_in(self):
+        _store({"voice-1": (1.0, 0.0, 0.0), "voice-2": (0.99, 0.14, 0.0)})
+        voice_id = voiceprints.observe(_vec(1.0, 0.05, 0.0), _MODEL, 120, "m3", "S0")
+        rows = voiceprints.summary()
+        self.assertEqual([r["id"] for r in rows], [voice_id])
+        self.assertEqual(rows[0]["observations"], 3)
+
+
+class MergeTest(_StoreTest):
+    def setUp(self):
+        super().setUp()
+        samples = mock.patch.object(voiceprints, "SAMPLES_DIR", Path(self._tmp.name) / "samples")
+        samples.start()
+        self.addCleanup(samples.stop)
+
+    def test_named_identity_survives(self):
+        data = _store({"voice-1": (1.0, 0.0), "voice-2": (0.99, 0.14)}, {"voice-2": "Anna"})
+        self.assertEqual(voiceprints.dedupe(data), [("voice-2", "voice-1", mock.ANY)])
+        self.assertEqual(list(data["voices"]), ["voice-2"])
+        entry = data["voices"]["voice-2"]
+        self.assertEqual(entry["name"], "Anna")
+        self.assertEqual(entry["observations"], 2)
+        self.assertEqual(entry["speech_secs"], 200.0)
+        self.assertEqual([s["meeting"] for s in entry["seen"]], ["voice-1", "voice-2"])
+
+    def test_two_different_names_are_never_fused(self):
+        data = _store(
+            {"voice-1": (1.0, 0.0), "voice-2": (0.99, 0.14)}, {"voice-1": "Anna", "voice-2": "Bo"}
+        )
+        self.assertEqual(voiceprints.dedupe(data), [])
+        self.assertEqual(len(data["voices"]), 2)
+
+    def test_chain_collapses_to_one(self):
+        data = _store(
+            {
+                "voice-1": (1.0, 0.0, 0.0),
+                "voice-2": (0.99, 0.14, 0.0),
+                "voice-3": (0.98, 0.20, 0.0),
+                "voice-4": (0.0, 0.0, 1.0),
+            }
+        )
+        merged = voiceprints.dedupe(data)
+        self.assertEqual(len(merged), 2)
+        (survivor,) = [vid for vid in data["voices"] if vid != "voice-4"]
+        self.assertEqual(data["voices"][survivor]["observations"], 3)
+
+    def test_sample_follows_the_identity(self):
+        data = _store({"voice-1": (1.0, 0.0), "voice-2": (0.99, 0.14)})
+        voiceprints.SAMPLES_DIR.mkdir()
+        voiceprints.sample_path("voice-2").write_bytes(b"RIFF")
+        voiceprints.merge(data, "voice-1", "voice-2")
+        self.assertTrue(voiceprints.sample_path("voice-1").is_file())
+        self.assertFalse(voiceprints.sample_path("voice-2").exists())
+
+    def test_merge_duplicates_dry_run_leaves_the_store_alone(self):
+        _store({"voice-1": (1.0, 0.0), "voice-2": (0.99, 0.14)})
+        self.assertEqual(len(voiceprints.merge_duplicates(dry_run=True)), 1)
+        self.assertEqual(len(voiceprints.summary()), 2)
+        self.assertEqual(len(voiceprints.merge_duplicates()), 1)
+        self.assertEqual(len(voiceprints.summary()), 1)
+
+
+class NameVoiceFromCalendarTest(_StoreTest):
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(attribution, "_looks_like_self", lambda n: n == "Jonathan")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _name(self, learned, attendees, speakers):
+        return attribution.name_voice_from_calendar(learned, {"attendees": attendees}, speakers)
+
+    def test_one_to_one_names_the_other_voice(self):
+        _store({"voice-1": (1.0, 0.0), "voice-2": (0.0, 1.0)}, {"voice-1": voiceprints.SELF})
+        self.assertEqual(self._name(["voice-1", "voice-2"], ["Jonathan", "Anna"], 2), "Anna")
+        self.assertEqual(voiceprints.find_by_name("Anna"), "voice-2")
+
+    def test_group_names_the_last_unknown_by_elimination(self):
+        _store(
+            {"voice-1": (1, 0, 0), "voice-2": (0, 1, 0), "voice-3": (0, 0, 1)},
+            {"voice-1": voiceprints.SELF, "voice-2": "Bo"},
+        )
+        learned = ["voice-1", "voice-2", "voice-3"]
+        self.assertEqual(self._name(learned, ["Jonathan", "Bo", "Cleo"], 3), "Cleo")
+
+    def test_two_unknown_voices_stay_unnamed(self):
+        _store({"voice-1": (1, 0, 0), "voice-2": (0, 1, 0), "voice-3": (0, 0, 1)})
+        learned = ["voice-1", "voice-2", "voice-3"]
+        self.assertIsNone(self._name(learned, ["Jonathan", "Bo", "Cleo"], 3))
+        self.assertIsNone(voiceprints.find_by_name("Bo"))
+
+    def test_unenrolled_speaker_blocks_naming(self):
+        """One voice short: the leftover could be the user's own, not the invitee's."""
+        _store({"voice-1": (1.0, 0.0)})
+        self.assertIsNone(self._name(["voice-1"], ["Jonathan", "Anna"], 2))
+
+    def test_uninvited_speaker_blocks_naming(self):
+        _store(
+            {"voice-1": (1, 0, 0), "voice-2": (0, 1, 0), "voice-3": (0, 0, 1)}, {"voice-1": "Me"}
+        )
+        self.assertIsNone(self._name(["voice-1", "voice-2", "voice-3"], ["Jonathan", "Anna"], 3))
