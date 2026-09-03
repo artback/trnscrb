@@ -1149,9 +1149,11 @@ def _label_voices() -> None:
     """Play each unnamed voice and ask who it is."""
     from trnscrb import voiceprints
 
-    unnamed = [r for r in voiceprints.summary() if not r["name"]]
+    # A voice without a clip cannot be told apart by ear, so asking is
+    # pointless; it gets a clip the next time it is heard.
+    unnamed = [r for r in voiceprints.summary() if not r["name"] and r["clip"]]
     if not unnamed:
-        click.echo("Every voice already has a name.")
+        click.echo("Every voice with a clip already has a name.")
         return
 
     click.echo(f"\n  {len(unnamed)} voice(s) to identify. Enter to skip, 'r' to replay.\n")
@@ -1161,8 +1163,6 @@ def _label_voices() -> None:
             f"  {row['id']}  {row['observations']} meeting(s), "
             f"{row['speech_secs'] / 60:.1f} min — {meetings}"
         )
-        if not voiceprints.sample_path(row["id"]).is_file():
-            click.echo("     (no clip saved — recorded before clips were kept)")
         while True:
             # Not blocking: the question goes up while the voice is still in
             # the listener's ear, which is when they can answer it.
@@ -1315,6 +1315,7 @@ def voices_cmd(
         click.echo(
             f"  {row['id']:<10} {label:<20} {row['observations']:>3} meeting(s)  "
             f"{row['speech_secs'] / 60:>6.1f} min  dim {row['dimension']}"
+            + ("" if row["clip"] else click.style("  no clip", dim=True))
         )
         if verbose:
             for meeting in dict.fromkeys(row["meetings"]):

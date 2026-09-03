@@ -308,12 +308,13 @@ def _survivor(data: dict, a: str, b: str) -> str:
     return min(a, b, key=lambda vid: (len(vid), vid))
 
 
-def merge(data: dict, keep: str, absorb: str) -> bool:
+def merge(data: dict, keep: str, absorb: str, *, move_samples: bool = True) -> bool:
     """Fold one identity into another, in place.
 
     Refused when both carry different names: that is two people, and no
     similarity score outranks what the user typed. The sample clip moves
-    with the identity when the survivor has none of its own.
+    with the identity when the survivor has none of its own — unless
+    ``move_samples`` is off, for a caller only asking what would happen.
     """
     voices = data.get("voices") or {}
     if keep == absorb or keep not in voices or absorb not in voices:
@@ -339,6 +340,8 @@ def merge(data: dict, keep: str, absorb: str) -> bool:
     kept["updated_at"] = max(kept.get("updated_at", ""), gone.get("updated_at", ""))
     del voices[absorb]
 
+    if not move_samples:
+        return True
     try:
         if sample_path(absorb).is_file():
             if sample_path(keep).is_file():
@@ -351,7 +354,11 @@ def merge(data: dict, keep: str, absorb: str) -> bool:
 
 
 def dedupe(
-    data: dict, similarity: float = DUPLICATE_SIMILARITY, only: str | None = None
+    data: dict,
+    similarity: float = DUPLICATE_SIMILARITY,
+    only: str | None = None,
+    *,
+    move_samples: bool = True,
 ) -> list[tuple[str, str, float]]:
     """Merge every pair of stored voices at least this alike, most alike first.
 
@@ -379,7 +386,7 @@ def dedupe(
         score, a, b = best
         keep = _survivor(data, a, b)
         absorb = b if keep == a else a
-        if not merge(data, keep, absorb):
+        if not merge(data, keep, absorb, move_samples=move_samples):
             refused.add(frozenset((a, b)))
             continue
         merged.append((keep, absorb, score))
@@ -392,7 +399,10 @@ def merge_duplicates(
 ) -> list[tuple[str, str, float]]:
     """Collapse duplicate identities in the store. Returns what was (or would be) merged."""
     data = load()
-    merged = dedupe(data, similarity)
+    # A dry run must leave the clips alone too: a clip is the only way a
+    # voice can ever be identified by ear, and the audio it came from is
+    # long gone.
+    merged = dedupe(data, similarity, move_samples=not dry_run)
     if merged and not dry_run:
         _save(data)
         _log.info("Merged %d duplicate voice(s)", len(merged))
@@ -633,6 +643,7 @@ def summary() -> list[dict]:
             "speech_secs": entry.get("speech_secs", 0.0),
             "updated_at": entry.get("updated_at", ""),
             "dimension": len(entry.get("vector", [])),
+            "clip": sample_path(voice_id).is_file(),
             "meetings": [
                 s.get("meeting", "") for s in (entry.get("seen") or []) if s.get("meeting")
             ],

@@ -533,8 +533,13 @@ class MergeTest(_StoreTest):
 
     def test_merge_duplicates_dry_run_leaves_the_store_alone(self):
         _store({"voice-1": (1.0, 0.0), "voice-2": (0.99, 0.14)})
+        voiceprints.SAMPLES_DIR.mkdir()
+        voiceprints.sample_path("voice-2").write_bytes(b"RIFF")
         self.assertEqual(len(voiceprints.merge_duplicates(dry_run=True)), 1)
         self.assertEqual(len(voiceprints.summary()), 2)
+        # The clip is the only way voice-2 can ever be identified by ear.
+        self.assertTrue(voiceprints.sample_path("voice-2").is_file())
+        self.assertFalse(voiceprints.sample_path("voice-1").exists())
         self.assertEqual(len(voiceprints.merge_duplicates()), 1)
         self.assertEqual(len(voiceprints.summary()), 1)
 
