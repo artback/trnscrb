@@ -1214,7 +1214,17 @@ def _voice_for(label: str, meeting_stem: str) -> str | None:
 @click.option("--verbose", is_flag=True, help="List the meetings each voice appeared in.")
 @click.option("--play", "play_id", default="", help="Play this voice's saved clip.")
 @click.option("--label", "interactive", is_flag=True, help="Play each unnamed voice and name it.")
-def voices_cmd(naming, forget_id: str, verbose: bool, play_id: str, interactive: bool):
+@click.option("--merge", is_flag=True, help="Fold identities that are really the same voice.")
+@click.option("--dry-run", is_flag=True, help="With --merge: show the merges without saving.")
+def voices_cmd(
+    naming,
+    forget_id: str,
+    verbose: bool,
+    play_id: str,
+    interactive: bool,
+    merge: bool,
+    dry_run: bool,
+):
     """List the voice identities learned across meetings, or name one.
 
     Naming applies to every meeting that voice has appeared in, not just the
@@ -1222,6 +1232,18 @@ def voices_cmd(naming, forget_id: str, verbose: bool, play_id: str, interactive:
     """
     from trnscrb import voiceprints
     from trnscrb.settings import get as get_setting
+
+    if merge:
+        before = len(voiceprints.load().get("voices") or {})
+        merged = voiceprints.merge_duplicates(dry_run=dry_run)
+        if not merged:
+            click.echo("No duplicates — every stored voice is clearly distinct.")
+            return
+        for kept, absorbed, score in merged:
+            click.echo(f"  {absorbed:<10} → {kept:<10} ({score:.3f})")
+        verb = "would leave" if dry_run else "left"
+        click.echo(f"\n{len(merged)} merge(s) {verb} {before - len(merged)} of {before} voices.")
+        return
 
     if play_id:
         if not _play_voice(play_id):

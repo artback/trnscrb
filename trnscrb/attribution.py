@@ -208,6 +208,41 @@ def name_from_calendar(segments: list[dict], event: dict | None) -> str | None:
     return None
 
 
+def name_voice_from_calendar(learned: list[str], event: dict | None, speakers: int) -> str | None:
+    """Name the one enrolled voice the calendar leaves unaccounted for.
+
+    ``name_from_calendar`` labels a 1:1's transcript; this carries the same
+    name onto the voice, so the person is recognised next time even without
+    the calendar. The same rule covers a group where everyone else is already
+    known: one unnamed voice and one invitee matched to no voice are each
+    other. It holds only when every speaker the diarizer heard was enrolled
+    and the invite accounts for all of them — otherwise the leftover voice
+    might be a guest, or the user's own, and would inherit an absent
+    invitee's name.
+    """
+    from trnscrb import voiceprints
+
+    if not event or not learned:
+        return None
+    attendees = [str(a).strip() for a in (event.get("attendees") or []) if str(a).strip()]
+    others = [a for a in attendees if not _looks_like_self(a)]
+    if not others or len(others) + 1 != speakers or len(set(learned)) != speakers:
+        return None
+    voices = voiceprints.load().get("voices") or {}
+    if any(voice_id not in voices for voice_id in learned):
+        return None
+    known = {voices[voice_id].get("name") for voice_id in learned}
+    unnamed = [voice_id for voice_id in dict.fromkeys(learned) if not voices[voice_id].get("name")]
+    unmatched = [a for a in others if a not in known]
+    if len(unnamed) != 1 or len(unmatched) != 1:
+        return None
+    voice_id, name = unnamed[0], unmatched[0]
+    if not voiceprints.name_voice(voice_id, name):
+        return None
+    _log.info("Named voice %s after the calendar (%s)", voice_id, name)
+    return name
+
+
 def _looks_like_self(attendee: str) -> bool:
     """True if this attendee is probably the user running trnscrb."""
     import getpass

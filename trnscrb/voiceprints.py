@@ -48,6 +48,11 @@ MIN_ENROLL_SECS = 60.0
 # without growing without bound.
 _MAX_OBSERVATIONS = 100
 
+# Two *stored* centroids this alike are one person kept twice, not two
+# people. A single observation joins a voice at 0.75; a pair of averages
+# agreeing well beyond that is a split that happened, not a resemblance.
+DUPLICATE_SIMILARITY = 0.90
+
 
 def _empty(model: str = "", space: str = "") -> dict:
     return {"version": _VERSION, "model": model, "space": space, "voices": {}, "next_id": 1}
@@ -153,13 +158,21 @@ def match(vector, data: dict | None = None) -> tuple[str | None, float]:
     best_id, best_score = scored[0]
     if best_score < threshold:
         return None, best_score
-    if len(scored) > 1 and scored[1][1] > best_score - margin:
+    for other_id, other_score in scored[1:]:
+        if other_score <= best_score - margin:
+            break
+        # A runner-up that is itself a copy of the winner is not a second
+        # person to confuse with the first. Refusing here is what bred the
+        # copies: once a voice is stored twice, every later sighting of it
+        # is "ambiguous", and each refusal stores it once more.
+        if _cosine(voices[best_id]["vector"], voices[other_id]["vector"]) >= DUPLICATE_SIMILARITY:
+            continue
         _log.debug(
             "Ambiguous voice match: %s (%.3f) vs %s (%.3f)",
             best_id,
             best_score,
-            scored[1][0],
-            scored[1][1],
+            other_id,
+            other_score,
         )
         return None, best_score
     return best_id, best_score
@@ -245,8 +258,115 @@ def observe(
         }
     )
     entry["seen"] = seen[-_MAX_OBSERVATIONS:]
+    # A match that had to look past a duplicate leaves the duplicate behind;
+    # fold it in now so the next sighting does not have to.
+    for kept, absorbed, score in dedupe(data, only=voice_id):
+        _log.info("Merged duplicate voice %s into %s (%.3f)", absorbed, kept, score)
+        if kept != voice_id:
+            voice_id = kept
     _save(data)
     return voice_id
+
+
+def _survivor(data: dict, a: str, b: str) -> str:
+    """Which of two duplicates keeps its id: the named one, else the better known."""
+    va, vb = data["voices"][a], data["voices"][b]
+    if bool(va.get("name")) != bool(vb.get("name")):
+        return a if va.get("name") else b
+    if va.get("observations", 0) != vb.get("observations", 0):
+        return a if va.get("observations", 0) > vb.get("observations", 0) else b
+    return min(a, b, key=lambda vid: (len(vid), vid))
+
+
+def merge(data: dict, keep: str, absorb: str) -> bool:
+    """Fold one identity into another, in place.
+
+    Refused when both carry different names: that is two people, and no
+    similarity score outranks what the user typed. The sample clip moves
+    with the identity when the survivor has none of its own.
+    """
+    voices = data.get("voices") or {}
+    if keep == absorb or keep not in voices or absorb not in voices:
+        return False
+    kept, gone = voices[keep], voices[absorb]
+    if kept.get("name") and gone.get("name") and kept["name"] != gone["name"]:
+        return False
+
+    n_kept = max(int(kept.get("observations", 1)), 1)
+    n_gone = max(int(gone.get("observations", 1)), 1)
+    kept["vector"] = _unit(
+        np.asarray(kept["vector"], dtype=np.float64) * n_kept
+        + np.asarray(gone["vector"], dtype=np.float64) * n_gone
+    ).tolist()
+    kept["name"] = kept.get("name") or gone.get("name", "")
+    kept["observations"] = n_kept + n_gone
+    kept["speech_secs"] = round(
+        float(kept.get("speech_secs", 0.0)) + float(gone.get("speech_secs", 0.0)), 1
+    )
+    seen = list(kept.get("seen") or []) + list(gone.get("seen") or [])
+    seen.sort(key=lambda s: s.get("at", ""))
+    kept["seen"] = seen[-_MAX_OBSERVATIONS:]
+    kept["updated_at"] = max(kept.get("updated_at", ""), gone.get("updated_at", ""))
+    del voices[absorb]
+
+    try:
+        if sample_path(absorb).is_file():
+            if sample_path(keep).is_file():
+                sample_path(absorb).unlink()
+            else:
+                sample_path(absorb).rename(sample_path(keep))
+    except OSError:
+        _log.debug("Could not move the sample of %s to %s", absorb, keep, exc_info=True)
+    return True
+
+
+def dedupe(
+    data: dict, similarity: float = DUPLICATE_SIMILARITY, only: str | None = None
+) -> list[tuple[str, str, float]]:
+    """Merge every pair of stored voices at least this alike, most alike first.
+
+    Merging moves a centroid, so the pairs are re-scored after each one
+    rather than planned up front. With ``only``, just the pairs involving
+    that voice are considered. Returns (kept, absorbed, score) per merge.
+    """
+    merged: list[tuple[str, str, float]] = []
+    refused: set[frozenset[str]] = set()
+    while True:
+        voices = data.get("voices") or {}
+        ids = sorted(voices, key=lambda vid: (len(vid), vid))
+        best: tuple[float, str, str] | None = None
+        for i, a in enumerate(ids):
+            for b in ids[i + 1 :]:
+                if only is not None and only not in (a, b):
+                    continue
+                if frozenset((a, b)) in refused:
+                    continue
+                score = _cosine(voices[a]["vector"], voices[b]["vector"])
+                if score >= similarity and (best is None or score > best[0]):
+                    best = (score, a, b)
+        if best is None:
+            return merged
+        score, a, b = best
+        keep = _survivor(data, a, b)
+        absorb = b if keep == a else a
+        if not merge(data, keep, absorb):
+            refused.add(frozenset((a, b)))
+            continue
+        merged.append((keep, absorb, score))
+        if only == absorb:
+            only = keep
+
+
+def merge_duplicates(
+    similarity: float = DUPLICATE_SIMILARITY, dry_run: bool = False
+) -> list[tuple[str, str, float]]:
+    """Collapse duplicate identities in the store. Returns what was (or would be) merged."""
+    data = load()
+    merged = dedupe(data, similarity)
+    if merged and not dry_run:
+        _save(data)
+        _log.info("Merged %d duplicate voice(s)", len(merged))
+    return merged
 
 
 SAMPLES_DIR = STORE.parent / "voice-samples"
