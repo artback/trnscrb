@@ -60,6 +60,11 @@ class _StoreTest(unittest.TestCase):
         )
         thresholds.start()
         self.addCleanup(thresholds.stop)
+        # Most tests care about matching, not the founding bar; lower it to
+        # the joining bar so 120s of speech creates a voice as it always did.
+        founding = mock.patch.object(voiceprints, "MIN_NEW_VOICE_SECS", voiceprints.MIN_ENROLL_SECS)
+        founding.start()
+        self.addCleanup(founding.stop)
 
 
 class SelfSpeakerTest(unittest.TestCase):
@@ -573,3 +578,77 @@ class NameVoiceFromCalendarTest(_StoreTest):
             {"voice-1": (1, 0, 0), "voice-2": (0, 1, 0), "voice-3": (0, 0, 1)}, {"voice-1": "Me"}
         )
         self.assertIsNone(self._name(["voice-1", "voice-2", "voice-3"], ["Jonathan", "Anna"], 3))
+
+
+class FoundingBarTest(_StoreTest):
+    """Joining a known voice is cheap; founding a new one is not."""
+
+    def setUp(self):
+        super().setUp()
+        real_bar = mock.patch.object(voiceprints, "MIN_NEW_VOICE_SECS", 180.0)
+        real_bar.start()
+        self.addCleanup(real_bar.stop)
+
+    def test_a_short_unknown_voice_is_not_remembered(self):
+        self.assertIsNone(voiceprints.observe(_vec(1.0, 0.0), _MODEL, 120, "m1", "S0"))
+        self.assertEqual(voiceprints.summary(), [])
+
+    def test_a_short_known_voice_still_joins(self):
+        voiceprints.observe(_vec(1.0, 0.0), _MODEL, 300, "m1", "S0")
+        self.assertEqual(voiceprints.observe(_vec(0.99, 0.14), _MODEL, 90, "m2", "S3"), "voice-1")
+        self.assertEqual(voiceprints.summary()[0]["observations"], 2)
+
+    def test_the_user_is_founded_at_the_joining_bar(self):
+        """The mic split already says who it is, so no extra evidence is needed."""
+        learned = voiceprints.enrol(
+            {"S0": _vec(1.0, 0.0), "S1": _vec(0.0, 1.0)},
+            _turns([(0, 90, "S0"), (90, 180, "S1")]),
+            model=_MODEL,
+            space="",
+            self_label="S0",
+            cluster_others=True,
+        )
+        self.assertEqual(learned, ["voice-1"])
+        self.assertEqual(voiceprints.summary()[0]["name"], voiceprints.SELF)
+
+    def test_a_speaker_under_the_founding_bar_is_not_a_failure(self):
+        ok, detail = voiceprints.enrolment_health([], _turns([(0, 120, "S0")]))
+        self.assertTrue(ok)
+        self.assertIn("180s", detail)
+
+
+class PruneTest(_StoreTest):
+    def setUp(self):
+        super().setUp()
+        samples = mock.patch.object(voiceprints, "SAMPLES_DIR", Path(self._tmp.name) / "samples")
+        samples.start()
+        self.addCleanup(samples.stop)
+
+    def _store_aged(self):
+        from datetime import datetime, timedelta
+
+        old = (datetime.now() - timedelta(days=45)).isoformat(timespec="seconds")
+        new = datetime.now().isoformat(timespec="seconds")
+        data = _store(
+            {"voice-1": (1, 0, 0, 0), "voice-2": (0, 1, 0, 0), "voice-3": (0, 0, 1, 0)},
+            {"voice-3": "Anna"},
+        )
+        data["voices"]["voice-1"]["updated_at"] = old
+        data["voices"]["voice-2"]["updated_at"] = new
+        data["voices"]["voice-3"]["updated_at"] = old
+        data["voices"]["voice-4"] = dict(data["voices"]["voice-1"], observations=2, name="")
+        voiceprints._save(data)
+
+    def test_only_old_single_unnamed_sightings_go(self):
+        self._store_aged()
+        voiceprints.SAMPLES_DIR.mkdir()
+        voiceprints.sample_path("voice-1").write_bytes(b"RIFF")
+        self.assertEqual(voiceprints.prune(), ["voice-1"])
+        kept = [r["id"] for r in voiceprints.summary()]
+        self.assertEqual(kept, ["voice-2", "voice-3", "voice-4"])
+        self.assertFalse(voiceprints.sample_path("voice-1").exists())
+
+    def test_dry_run_keeps_everything(self):
+        self._store_aged()
+        self.assertEqual(voiceprints.prune(dry_run=True), ["voice-1"])
+        self.assertEqual(len(voiceprints.summary()), 4)

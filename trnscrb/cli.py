@@ -1215,7 +1215,18 @@ def _voice_for(label: str, meeting_stem: str) -> str | None:
 @click.option("--play", "play_id", default="", help="Play this voice's saved clip.")
 @click.option("--label", "interactive", is_flag=True, help="Play each unnamed voice and name it.")
 @click.option("--merge", is_flag=True, help="Fold identities that are really the same voice.")
-@click.option("--dry-run", is_flag=True, help="With --merge: show the merges without saving.")
+@click.option(
+    "--similarity",
+    type=click.FloatRange(0.5, 1.0),
+    default=None,
+    help="With --merge: how alike two voices must be to fold (default 0.90).",
+)
+@click.option(
+    "--prune",
+    is_flag=True,
+    help="Forget unnamed voices heard once and not again in the last 30 days.",
+)
+@click.option("--dry-run", is_flag=True, help="With --merge/--prune: show, don't save.")
 def voices_cmd(
     naming,
     forget_id: str,
@@ -1223,6 +1234,8 @@ def voices_cmd(
     play_id: str,
     interactive: bool,
     merge: bool,
+    similarity: float | None,
+    prune: bool,
     dry_run: bool,
 ):
     """List the voice identities learned across meetings, or name one.
@@ -1233,9 +1246,21 @@ def voices_cmd(
     from trnscrb import voiceprints
     from trnscrb.settings import get as get_setting
 
+    if prune:
+        before = len(voiceprints.load().get("voices") or {})
+        gone = voiceprints.prune(dry_run=dry_run)
+        if not gone:
+            click.echo("Nothing to prune — every unnamed voice recurred or is recent.")
+            return
+        click.echo("  " + ", ".join(gone))
+        verb = "would leave" if dry_run else "left"
+        click.echo(f"\nPruning {len(gone)} {verb} {before - len(gone)} of {before} voices.")
+        return
+
     if merge:
         before = len(voiceprints.load().get("voices") or {})
-        merged = voiceprints.merge_duplicates(dry_run=dry_run)
+        bar = voiceprints.DUPLICATE_SIMILARITY if similarity is None else similarity
+        merged = voiceprints.merge_duplicates(bar, dry_run=dry_run)
         if not merged:
             click.echo("No duplicates — every stored voice is clearly distinct.")
             return

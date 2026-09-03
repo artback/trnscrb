@@ -70,7 +70,7 @@ class SaveSampleTest(unittest.TestCase):
         store.start()
         self.addCleanup(store.stop)
         with mock.patch.object(voiceprints, "_thresholds", return_value=(0.75, 0.1)):
-            voiceprints.observe([1.0, 0.0], "m", 120, "mtg", "S0", "plda")
+            voiceprints.observe([1.0, 0.0], "m", 300, "mtg", "S0", "plda")
         clip = voiceprints.save_sample("voice-1", self.audio, _turns([(2.0, 20.0, "S0")]))
         self.assertTrue(clip.is_file())
         voiceprints.forget("voice-1")

@@ -44,6 +44,17 @@ SELF = "Me"
 # a voice, and would drag a centroid toward whatever the room sounded like.
 MIN_ENROLL_SECS = 60.0
 
+# Founding a *new* identity takes more than joining a known one. A short
+# cameo still lands on the right person, because the centroid it is judged
+# against was built from real speech; a centroid built from the cameo itself
+# is half room-noise, and every later sighting would be judged against it.
+# Below this an unknown voice is simply not remembered yet.
+MIN_NEW_VOICE_SECS = 180.0
+
+# An unnamed voice heard once and not again for this long is more likely a
+# one-off — a guest, a mislabelled stretch — than someone worth keeping.
+PRUNE_AFTER_DAYS = 30
+
 # Keep the most recent occurrences per voice; enough to explain a match
 # without growing without bound.
 _MAX_OBSERVATIONS = 100
@@ -76,6 +87,11 @@ def _cosine(a, b) -> float:
     if a.shape != b.shape:
         return -1.0
     return float(np.dot(a, b))
+
+
+def _founding_secs() -> float:
+    """Speech needed to create an identity; never below what joining one needs."""
+    return max(MIN_ENROLL_SECS, MIN_NEW_VOICE_SECS)
 
 
 def _thresholds() -> tuple[float, float]:
@@ -185,8 +201,14 @@ def observe(
     meeting: str = "",
     label: str = "",
     space: str = "",
+    *,
+    founding_secs: float | None = None,
 ) -> str | None:
     """Record one sighting of a voice, joining or creating an identity.
+
+    ``founding_secs`` is the speech needed to create a new identity when
+    nothing matches; the default is the founding bar, and a caller that
+    already knows who is speaking may lower it to the joining bar.
 
     Returns the voice id, or None when the observation was rejected.
     """
@@ -220,6 +242,14 @@ def observe(
 
     voice_id, score = match(vector, data)
     if voice_id is None:
+        bar = _founding_secs() if founding_secs is None else founding_secs
+        if speech_secs < bar:
+            _log.debug(
+                "Not founding a voice on %.0fs of speech (best existing match %.3f)",
+                speech_secs,
+                score,
+            )
+            return None
         voice_id = f"voice-{data['next_id']}"
         data["next_id"] += 1
         entry = {
@@ -465,8 +495,17 @@ def enrol(
     speech = speech_by_speaker(turns)
 
     if self_label is not None and self_label in embeddings:
+        # The mic/system split already says who this is, so the founding
+        # bar buys nothing: a first sighting of the user is trustworthy at
+        # the joining bar.
         voice_id = observe(
-            embeddings[self_label], model, speech.get(self_label, 0.0), meeting, self_label, space
+            embeddings[self_label],
+            model,
+            speech.get(self_label, 0.0),
+            meeting,
+            self_label,
+            space,
+            founding_secs=MIN_ENROLL_SECS,
         )
         # Naming is idempotent, and re-asserting it each meeting repairs the
         # case where the user's voice was first seen (unnamed) in a recording
@@ -514,9 +553,10 @@ def enrolment_health(learned: list[str], turns: list[dict]) -> tuple[bool, str]:
     if learned:
         return True, f"{len(learned)} voice(s)"
     speech = speech_by_speaker(turns)
-    enrollable = [label for label, secs in speech.items() if secs >= MIN_ENROLL_SECS]
+    bar = _founding_secs()
+    enrollable = [label for label, secs in speech.items() if secs >= bar]
     if not enrollable:
-        return True, f"nobody spoke the {MIN_ENROLL_SECS:.0f}s needed to enrol"
+        return True, f"nobody spoke the {bar:.0f}s needed to enrol"
     return False, f"{len(enrollable)} speaker(s) spoke long enough but none was enrolled"
 
 
@@ -551,6 +591,35 @@ def forget(voice_id: str) -> bool:
     sample_path(voice_id).unlink(missing_ok=True)  # forgetting includes the audio
     _log.info("Forgot voice %s", voice_id)
     return True
+
+
+def prune(max_age_days: int = PRUNE_AFTER_DAYS, dry_run: bool = False) -> list[str]:
+    """Forget unnamed voices heard exactly once and not since ``max_age_days``.
+
+    A name is a promise to keep; a second sighting is evidence the person
+    recurs. Lacking both, an old single sighting is noise the list is
+    better without. Returns the ids forgotten (or, with ``dry_run``, that
+    would be).
+    """
+    from datetime import timedelta
+
+    data = load()
+    cutoff = (datetime.now() - timedelta(days=max_age_days)).isoformat(timespec="seconds")
+    stale = [
+        voice_id
+        for voice_id, entry in sorted((data.get("voices") or {}).items())
+        if not entry.get("name")
+        and int(entry.get("observations", 0)) <= 1
+        and (entry.get("updated_at") or "") < cutoff
+    ]
+    if dry_run or not stale:
+        return stale
+    for voice_id in stale:
+        del data["voices"][voice_id]
+        sample_path(voice_id).unlink(missing_ok=True)
+    _save(data)
+    _log.info("Pruned %d voice(s) heard once, over %d days ago", len(stale), max_age_days)
+    return stale
 
 
 def summary() -> list[dict]:
