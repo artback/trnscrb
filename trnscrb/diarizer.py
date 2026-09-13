@@ -8,6 +8,7 @@ overridden with the `diarization_pipeline` setting.
 """
 
 import threading
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 import numpy as np
@@ -25,8 +26,49 @@ _loaded_pipeline_id = ""
 _diarize_lock = threading.Lock()
 
 
+class _TorchcodecBlocked:
+    """Meta-path hook that refuses `import torchcodec` while it is installed."""
+
+    def find_spec(self, name, path=None, target=None):
+        if name == "torchcodec" or name.startswith("torchcodec."):
+            raise ImportError("trnscrb decodes audio itself; torchcodec is not used")
+        return None
+
+
+@contextmanager
+def _without_torchcodec():
+    """Keep torchcodec — and the second FFmpeg it loads — out of the process.
+
+    pyannote imports torchcodec at module scope for its built-in decoding. We
+    never reach that code: `_audio_input` hands the pipeline a waveform. But
+    importing it dlopens Homebrew's FFmpeg, and faster-whisper has already
+    loaded PyAV's bundled FFmpeg of a different major version. Both register
+    AVFFrameReceiver and AVFAudioReceiver with the Objective-C runtime, which
+    warns that one implementation will be used for both and that this "may
+    cause spurious casting failures and mysterious crashes".
+
+    pyannote's import sits in a try/except that degrades to waveform-only
+    decoding, which is all we ask of it, so refusing the import costs nothing
+    and leaves exactly one FFmpeg in the process.
+    """
+    import sys
+    import warnings
+
+    blocker = _TorchcodecBlocked()
+    sys.meta_path.insert(0, blocker)
+    try:
+        with warnings.catch_warnings():
+            # pyannote warns at length about the refused import. Expected.
+            warnings.filterwarnings("ignore", message=".*torchcodec.*")
+            yield
+    finally:
+        with suppress(ValueError):
+            sys.meta_path.remove(blocker)
+
+
 def _load_pipeline(model_id: str, hf_token: str):
-    from pyannote.audio import Pipeline
+    with _without_torchcodec():
+        from pyannote.audio import Pipeline
 
     try:
         return Pipeline.from_pretrained(model_id, token=hf_token)  # pyannote.audio >= 4
@@ -233,8 +275,9 @@ def _audio_input(audio_path: Path):
     — no speaker labels, no voiceprints, for a recording that captured
     perfectly. Our own recordings are plain 16-bit PCM WAV, which soundfile
     reads with no FFmpeg involved, so decode here and pass the waveform
-    through pyannote's in-memory form instead. Falls back to the path for
-    anything soundfile cannot open, leaving the pipeline to try its decoder.
+    through pyannote's in-memory form instead. Anything soundfile cannot open
+    goes through the ffmpeg CLI; only if that fails too does the path reach
+    the pipeline, which by then has no decoder and will say so.
     """
     import soundfile as sf
     import torch
@@ -242,13 +285,59 @@ def _audio_input(audio_path: Path):
     try:
         samples, sample_rate = sf.read(str(audio_path), dtype="float32", always_2d=True)
     except Exception:
-        log.debug("Could not decode %s here; leaving it to the pipeline", audio_path.name)
-        return str(audio_path)
+        decoded = _decode_with_ffmpeg(audio_path)
+        if decoded is None:
+            log.debug("Could not decode %s here; leaving it to the pipeline", audio_path.name)
+            return str(audio_path)
+        samples, sample_rate = decoded
     # soundfile gives (frames, channels); pyannote wants (channels, frames).
     return {
         "waveform": torch.from_numpy(np.ascontiguousarray(samples.T)),
         "sample_rate": int(sample_rate),
     }
+
+
+def _decode_with_ffmpeg(audio_path: Path):
+    """Decode what soundfile cannot open, using the ffmpeg we already depend on.
+
+    This is the case that used to fall through to pyannote's own decoder, and
+    so to torchcodec, which `_without_torchcodec` now keeps out. The CLI runs
+    in a child process, so its FFmpeg never shares ours with PyAV's.
+
+    Returns (samples, sample_rate) as soundfile would, or None.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    import soundfile as sf
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        return None
+    with tempfile.TemporaryDirectory() as tmp:
+        wav = Path(tmp) / "decoded.wav"
+        try:
+            subprocess.run(
+                [
+                    ffmpeg,
+                    "-nostdin",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    str(audio_path),
+                    "-c:a",
+                    "pcm_s16le",
+                    str(wav),
+                ],
+                check=True,
+                capture_output=True,
+                timeout=300,
+            )
+            return sf.read(str(wav), dtype="float32", always_2d=True)
+        except Exception:
+            log.debug("ffmpeg could not decode %s either", audio_path.name)
+            return None
 
 
 def diarize_with_embeddings(audio_path: Path, hf_token: str) -> tuple[list[dict], dict]:
