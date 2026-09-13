@@ -1,5 +1,6 @@
 """Tests for diarization pipeline selection (community-1 with 3.1 fallback)."""
 
+import shutil
 import types
 import unittest
 from unittest.mock import patch
@@ -118,6 +119,26 @@ class AudioInputTest(unittest.TestCase):
         path.write_bytes(b"not a wav")
         self.assertEqual(diarizer._audio_input(path), str(path))
 
+    @unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
+    def test_audio_soundfile_cannot_open_goes_through_ffmpeg(self):
+        """An mp3 is decoded by the CLI rather than handed to the pipeline."""
+        import subprocess
+        import tempfile
+        from pathlib import Path
+
+        source = self._wav(seconds=0.5)
+        mp3 = Path(tempfile.mkdtemp()) / "clip.mp3"
+        self.addCleanup(shutil.rmtree, mp3.parent, ignore_errors=True)
+        subprocess.run(
+            ["ffmpeg", "-nostdin", "-loglevel", "error", "-i", str(source), str(mp3)],
+            check=True,
+            capture_output=True,
+        )
+
+        audio = diarizer._audio_input(mp3)
+        self.assertIsInstance(audio, dict, "mp3 should have been decoded, not passed as a path")
+        self.assertEqual(audio["sample_rate"], 16_000)
+
     def test_diarize_hands_the_waveform_to_the_pipeline(self):
         seen = {}
 
@@ -131,3 +152,31 @@ class AudioInputTest(unittest.TestCase):
             diarizer.diarize_with_embeddings(self._wav(), "hf_token")
         self.assertIsInstance(seen["audio"], dict)
         self.assertIn("waveform", seen["audio"])
+
+
+class TorchcodecBlockTest(unittest.TestCase):
+    """Only one FFmpeg may be loaded, so pyannote must not import torchcodec."""
+
+    def test_import_is_refused_inside_the_context(self):
+        import sys
+
+        with diarizer._without_torchcodec():
+            with self.assertRaises(ImportError):
+                import torchcodec  # noqa: F401
+        self.assertFalse(
+            any(isinstance(f, diarizer._TorchcodecBlocked) for f in sys.meta_path),
+            "the blocker should be removed again on exit",
+        )
+
+    def test_blocker_is_removed_even_when_the_body_raises(self):
+        import sys
+
+        with self.assertRaises(RuntimeError), diarizer._without_torchcodec():
+            raise RuntimeError("boom")
+        self.assertFalse(any(isinstance(f, diarizer._TorchcodecBlocked) for f in sys.meta_path))
+
+    def test_other_imports_are_untouched(self):
+        with diarizer._without_torchcodec():
+            import json
+
+            self.assertTrue(hasattr(json, "dumps"))
