@@ -37,6 +37,28 @@ jobs:
             echo "released=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # The version lives in pyproject.toml, but uv.lock carries its own copy of
+      # it. Nothing here used to update that copy, so the lock silently fell
+      # behind the releases — by three versions before anyone noticed. Sync it
+      # before tagging, so the tag, the tarball and the lock all agree.
+      - name: Install uv
+        if: steps.check.outputs.released == 'false'
+        uses: astral-sh/setup-uv@v6
+
+      - name: Sync uv.lock with the new version
+        if: steps.check.outputs.released == 'false'
+        run: |
+          uv lock
+          if git diff --quiet -- uv.lock; then
+            echo "uv.lock already matches ${{ steps.version.outputs.version }}"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add uv.lock
+          git commit -m "Sync uv.lock with ${{ steps.version.outputs.tag }}"
+          git push origin HEAD:main
+
       - name: Tag the release
         if: steps.check.outputs.released == 'false'
         run: |
