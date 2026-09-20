@@ -245,5 +245,96 @@ class AppIconTest(unittest.TestCase):
             self.assertEqual(info["LSApplicationCategoryType"], "public.app-category.productivity")
 
 
+class SigningIdentityTest(unittest.TestCase):
+    """A stable self-signed identity lets the TCC grant survive rebuilds."""
+
+    def test_ensure_identity_is_a_fast_noop_when_in_keychain(self):
+        with patch.object(app_bundle, "_identity_in_keychain", return_value=True):
+            self.assertEqual(app_bundle.ensure_signing_identity(), app_bundle._CODESIGN_IDENTITY)
+
+    def test_ensure_identity_returns_none_without_openssl(self):
+        with (
+            patch.object(app_bundle, "_identity_in_keychain", return_value=False),
+            patch.object(app_bundle.shutil, "which", return_value=None),
+        ):
+            self.assertIsNone(app_bundle.ensure_signing_identity())
+
+    def test_ensure_identity_generates_backs_up_and_imports(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        p12 = tmp / f"{app_bundle._CODESIGN_IDENTITY}.p12"
+        import subprocess as _sp
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "openssl":
+
+                def arg_after(flag):
+                    return cmd[cmd.index(flag) + 1]
+
+                if "req" in cmd:
+                    Path(arg_after("-keyout")).write_bytes(b"key")
+                    Path(arg_after("-out")).write_bytes(b"cert")
+                elif "pkcs12" in cmd:
+                    Path(arg_after("-out")).write_bytes(b"p12")
+            return _sp.CompletedProcess(cmd, 0)
+
+        with (
+            patch.object(app_bundle, "_identity_in_keychain", side_effect=[False, True]),
+            patch.object(app_bundle, "_signing_p12", return_value=p12),
+            patch.object(app_bundle.shutil, "which", return_value="/usr/bin/openssl"),
+            patch("subprocess.run", side_effect=fake_run),
+        ):
+            self.assertEqual(app_bundle.ensure_signing_identity(), app_bundle._CODESIGN_IDENTITY)
+        self.assertTrue(p12.exists(), "p12 must be backed up for restoration")
+        self.assertFalse((p12.parent / "key.pem").exists(), "raw key must not be kept")
+
+    def test_codesign_uses_stable_identity_when_available(self):
+        import subprocess as _sp
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return _sp.CompletedProcess(cmd, 0)
+
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch.object(
+                app_bundle,
+                "ensure_signing_identity",
+                return_value=app_bundle._CODESIGN_IDENTITY,
+            ),
+            patch.object(
+                app_bundle.shutil,
+                "which",
+                side_effect=lambda n: "/usr/bin/codesign" if n == "codesign" else None,
+            ),
+        ):
+            app_bundle._codesign(Path("/tmp/x.app"))
+        self.assertIn(app_bundle._CODESIGN_IDENTITY, calls[0])
+        self.assertNotIn("-", calls[0], "must not sign ad-hoc when identity exists")
+
+    def test_codesign_falls_back_to_adhoc_without_identity(self):
+        import subprocess as _sp
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return _sp.CompletedProcess(cmd, 0)
+
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch.object(app_bundle, "ensure_signing_identity", return_value=None),
+            patch.object(
+                app_bundle.shutil,
+                "which",
+                side_effect=lambda n: "/usr/bin/codesign" if n == "codesign" else None,
+            ),
+        ):
+            app_bundle._codesign(Path("/tmp/x.app"))
+        self.assertIn("-", calls[0], "ad-hoc fallback keeps old behaviour")
+
+
 if __name__ == "__main__":
     unittest.main()
