@@ -20,7 +20,7 @@ class StaleNoticeTest(unittest.TestCase):
         with mock.patch.object(rollout, "is_stale", return_value=True):
             notice = mcp_server._stale_notice()
         self.assertIn("upgraded", notice)
-        self.assertIn("Restart Claude Desktop", notice)
+        self.assertIn("Restart OpenCode", notice)
 
     def test_status_carries_the_notice_while_recording(self):
         with (
@@ -29,7 +29,7 @@ class StaleNoticeTest(unittest.TestCase):
             mock.patch.object(mcp_server, "_recording_started_at", mcp_server.datetime.now()),
         ):
             out = mcp_server.recording_status()
-        self.assertIn("Restart Claude Desktop", out)
+        self.assertIn("Restart OpenCode", out)
         self.assertIn("Recording in progress", out)
 
     def test_status_is_clean_when_healthy(self):

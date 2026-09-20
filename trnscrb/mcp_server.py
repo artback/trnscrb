@@ -1,9 +1,9 @@
-"""MCP server exposing trnscrb tools to Claude Desktop.
+"""MCP server exposing trnscrb tools over MCP.
 
-Runs as a stdio server — Claude Desktop starts it automatically via the
-entry in claude_desktop_config.json.
+Runs as a stdio server — OpenCode starts it automatically via the trnscrb
+entry under the mcp section of its opencode.json config.
 
-Tools available to Claude:
+Tools available to the assistant:
   start_recording        — begin audio capture
   stop_recording         — stop immediately, process in background
   recording_status       — check if recording / if processing is done
@@ -60,7 +60,7 @@ def _stale_notice() -> str:
         return ""
     return (
         "⚠ trnscrb was upgraded since this server started, so parts of it are "
-        "no longer loadable. Restart Claude Desktop to pick up the new version.\n\n"
+        "no longer loadable. Restart OpenCode to pick up the new version.\n\n"
     )
 
 

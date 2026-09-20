@@ -2,7 +2,7 @@
 
 > Offline meeting transcription for macOS — no cloud, no subscription.
 
-trnscrb lives in your menu bar, auto-detects meetings (Google Meet, Zoom, Teams, Slack, FaceTime), records and transcribes them locally, cleans up filler words, and makes every transcript searchable from Claude Desktop.
+trnscrb lives in your menu bar, auto-detects meetings (Google Meet, Zoom, Teams, Slack, FaceTime), records and transcribes them locally, cleans up filler words, and makes every transcript searchable from OpenCode.
 
 ---
 
@@ -20,7 +20,7 @@ Or with `uv`:
 uv tool install trnscrb && trnscrb install
 ```
 
-`trnscrb install` handles the system-audio (Screen Recording) permission, model downloads, Claude Desktop MCP config, and launch-at-login. It also creates a `~/Applications/Trnscrb.app` wrapper so macOS permission prompts are attributed to **Trnscrb** rather than your terminal.
+`trnscrb install` handles the system-audio (Screen Recording) permission, model downloads, OpenCode MCP config, and launch-at-login. It also creates a `~/Applications/Trnscrb.app` wrapper so macOS permission prompts are attributed to **Trnscrb** rather than your terminal.
 
 ---
 
@@ -72,7 +72,7 @@ During recording, trnscrb transcribes what it has so far every 60 seconds and wr
 
 - **Menu bar** — click "Open Latest" to open the transcript in your default editor
 - **Terminal** — `trnscrb live` streams new content as it appears
-- **Claude Desktop** — use `get_transcript` on the latest ID
+- **OpenCode** — use `get_transcript` on the latest ID
 
 When the call ends, the final full transcription (with diarization and enrichment) replaces the live version.
 
@@ -131,7 +131,7 @@ trnscrb search "Miguel" -n 3        # with context lines
 trnscrb search "who owns billing" --semantic  # search by meaning, not keywords
 ```
 
-Also available as MCP tools (`search_transcripts`, `semantic_search`) in Claude Desktop.
+Also available as MCP tools (`search_transcripts`, `semantic_search`) in OpenCode.
 
 ---
 
@@ -147,7 +147,7 @@ trnscrb glossary remove Hivenet
 
 Aliases are rewritten to the canonical term (with canonical casing) as each segment is transcribed, so the saved transcript already carries your terminology — this isn't a post-hoc edit or part of enrichment. With `glossary_fuzzy` on (the default), single tokens that are close-spelling matches to a term get nudged onto it too. On the Whisper backend, glossary terms are also handed to the model as decode hotwords; Parakeet has no such hook, so correction is doing all the work there.
 
-Also available as MCP tools in Claude Desktop: `list_glossary`, `add_glossary_terms`, `add_glossary_correction`, `remove_glossary_term`, `suggest_glossary_terms`.
+Also available as MCP tools in OpenCode: `list_glossary`, `add_glossary_terms`, `add_glossary_correction`, `remove_glossary_term`, `suggest_glossary_terms`.
 
 ---
 
@@ -191,7 +191,7 @@ trnscrb config set obsidian_subdir Meetings   # default
 
 `trnscrb vault-sync` refreshes existing notes with the latest attendee/topic properties (worth re-running after glossary changes, since topics are derived from it); `--all` also mirrors transcripts that don't have a note yet, so it can't quietly flood a personal vault by default. Separately, `auto_integrate` (off by default) hands each transcript to the local `claude` CLI to fold key decisions and action items straight into your existing notes — configure its prompt with `trnscrb config set integrate_prompt "..."`.
 
-Also available as MCP tools in Claude Desktop: `list_action_items`, `add_action_item`, `resolve_action_item`, `link_action_item`.
+Also available as MCP tools in OpenCode: `list_action_items`, `add_action_item`, `resolve_action_item`, `link_action_item`.
 
 ---
 
@@ -267,9 +267,9 @@ launchd restarts a failing job every 10 seconds and never gives up, so anything 
 
 ---
 
-## Claude Desktop / MCP tools
+## OpenCode / MCP tools
 
-After `trnscrb install`, Claude Desktop has these tools:
+After `trnscrb install`, OpenCode has these tools:
 
 | Tool | Description |
 |------|-------------|

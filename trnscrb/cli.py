@@ -2,7 +2,7 @@
 
 trnscrb install   — smart dependency checker / installer
 trnscrb start     — launch the menu bar app
-trnscrb server    — start MCP server (Claude Desktop calls this)
+trnscrb server    — start MCP server (OpenCode calls this)
 trnscrb list      — list saved transcripts
 trnscrb show <id> — print a transcript
 trnscrb enrich <id> — run LLM enrichment pass on a transcript
@@ -24,10 +24,8 @@ from trnscrb.log import get_logger
 
 _log = get_logger("trnscrb.cli")
 
-# Path to Claude Desktop's MCP config file
-_CLAUDE_CONFIG = (
-    Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
-)
+# Path to OpenCode's config file (the mcp section trnscrb manages lives here)
+_OPENCODE_CONFIG = Path.home() / ".config" / "opencode" / "opencode.json"
 _DEFAULT_PARAKEET_MODEL_ID = "mlx-community/parakeet-tdt-0.6b-v3"
 
 
@@ -53,7 +51,7 @@ def _ensure_tool_path() -> None:
 
 @click.group()
 def cli():
-    """Trnscrb — lightweight offline meeting transcription for Claude Desktop."""
+    """Trnscrb — lightweight offline meeting transcription for OpenCode."""
     _ensure_tool_path()
 
 
@@ -86,7 +84,9 @@ def install(force: bool):
         "faster_whisper": "faster-whisper>=1.0.0",
         "pyannote.audio": "pyannote.audio>=3.1",
         "sentence_transformers": "sentence-transformers>=3.0",
-        "mcp": "mcp>=1.0.0",
+        # mcp 2.0 introduced the MCPServer API the server is built on; 1.x
+        # satisfies ">=1.0.0" but crashes trnscrb.server at import time.
+        "mcp": "mcp>=2.0.0",
         "anthropic": "anthropic>=0.25",
         "openai": "openai>=2.24.0",
         "scipy": "scipy>=1.11",
@@ -209,20 +209,22 @@ def install(force: bool):
     click.echo()
 
     # ── 8. Optional integrations ─────────────────────────────────────────────
-    # Claude Desktop MCP — only offer if Claude Desktop is installed
-    if _CLAUDE_CONFIG.parent.exists():
+    # OpenCode MCP — only offer if OpenCode is installed
+    import shutil
+
+    if shutil.which("opencode") or _OPENCODE_CONFIG.exists():
         mcp_ok = _mcp_configured()
         healthy = mcp_ok and _mcp_config_healthy()
-        _row("Claude Desktop integration", healthy)
+        _row("OpenCode integration", healthy)
         if mcp_ok and not healthy:
             # Configured, but the command path is dead (typically a stale
             # ~/.local/bin path after moving to Homebrew) — repair silently.
             _write_mcp_config()
-            click.echo("  Fixed a stale command path. Restart Claude Desktop to apply.")
+            click.echo("  Fixed a stale command path. Restart OpenCode to apply.")
         elif not mcp_ok:
-            if click.confirm("  Register trnscrb with Claude Desktop?", default=True):
+            if click.confirm("  Register trnscrb with OpenCode?", default=True):
                 _write_mcp_config()
-                click.echo(click.style("  Done. Restart Claude Desktop to apply.", fg="green"))
+                click.echo(click.style("  Done. Restart OpenCode to apply.", fg="green"))
         click.echo()
 
     # App bundle wrapper — makes macOS permission prompts say "Trnscrb"
@@ -319,7 +321,7 @@ def start():
 
 @cli.command()
 def server():
-    """Start the MCP server (used internally by Claude Desktop)."""
+    """Start the MCP server (used internally by OpenCode)."""
     from trnscrb.mcp_server import main
 
     main()
@@ -1412,11 +1414,9 @@ def status():
     if _health.get(_health.APP_START):
         entry = _health.get(_health.APP_START) or {}
         _row("App startup", bool(entry.get("ok")), _health.describe(_health.APP_START))
-    if _CLAUDE_CONFIG.parent.exists() and _mcp_configured():
+    if _OPENCODE_CONFIG.exists() and _mcp_configured():
         detail = (
-            "Claude Desktop"
-            if _mcp_config_healthy()
-            else "stale command path — run `trnscrb install`"
+            "OpenCode" if _mcp_config_healthy() else "stale command path — run `trnscrb install`"
         )
         _row("MCP server", _mcp_config_healthy(), detail)
     click.echo()
@@ -1953,29 +1953,36 @@ def _normalize_backend(value) -> str:
 
 
 def _mcp_configured() -> bool:
-    if not _CLAUDE_CONFIG.exists():
+    if not _OPENCODE_CONFIG.exists():
         return False
     try:
-        config = json.loads(_CLAUDE_CONFIG.read_text())
-        return "trnscrb" in config.get("mcpServers", {})
+        config = json.loads(_OPENCODE_CONFIG.read_text())
+        return "trnscrb" in config.get("mcp", {})
     except Exception:
         return False
 
 
 def _mcp_command_path() -> str | None:
-    """The command Claude Desktop is configured to spawn for trnscrb, if any."""
+    """The executable OpenCode is configured to spawn for trnscrb, if any.
+
+    OpenCode stores the command as a list (executable first); a bare string
+    from an older config is tolerated.
+    """
     try:
-        config = json.loads(_CLAUDE_CONFIG.read_text())
-        return config["mcpServers"]["trnscrb"].get("command")
+        config = json.loads(_OPENCODE_CONFIG.read_text())
+        cmd = config["mcp"]["trnscrb"].get("command")
     except Exception:
         return None
+    if isinstance(cmd, (list, tuple)):
+        return cmd[0] if cmd else None
+    return cmd
 
 
 def _mcp_config_healthy() -> bool:
     """True if the configured MCP command exists and is runnable.
 
     A stale command path (e.g. a ~/.local/bin binary left behind after moving
-    to Homebrew) makes Claude Desktop spawn a missing executable, which it
+    to Homebrew) makes OpenCode spawn a missing executable, which it
     reports as the server "disconnecting".
     """
     cmd = _mcp_command_path()
@@ -1988,9 +1995,9 @@ def _mcp_config_healthy() -> bool:
 
 def _write_mcp_config():
     config: dict = {}
-    if _CLAUDE_CONFIG.exists():
+    if _OPENCODE_CONFIG.exists():
         try:
-            config = json.loads(_CLAUDE_CONFIG.read_text())
+            config = json.loads(_OPENCODE_CONFIG.read_text())
         except Exception:
             pass
     # Prefer the installed binary on PATH; fall back to python -m
@@ -1998,14 +2005,14 @@ def _write_mcp_config():
 
     binary = shutil.which("trnscrb") or sys.executable
     if binary.endswith("trnscrb"):
-        cmd_entry = {"command": binary, "args": ["server"]}
+        command = [binary, "server"]
     else:
-        cmd_entry = {"command": binary, "args": ["-m", "trnscrb.mcp_server"]}
+        command = [binary, "-m", "trnscrb.mcp_server"]
 
-    config.setdefault("mcpServers", {})
-    config["mcpServers"]["trnscrb"] = cmd_entry
-    _CLAUDE_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-    _CLAUDE_CONFIG.write_text(json.dumps(config, indent=2))
+    entry = config.setdefault("mcp", {}).setdefault("trnscrb", {})
+    entry.update({"type": "local", "command": command, "enabled": True})
+    _OPENCODE_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    _OPENCODE_CONFIG.write_text(json.dumps(config, indent=2))
 
 
 def _run(cmd: list[str]):

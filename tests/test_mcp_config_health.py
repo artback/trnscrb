@@ -1,8 +1,8 @@
-"""Tests for detecting and repairing a stale Claude Desktop MCP command path.
+"""Tests for detecting and repairing a stale OpenCode MCP command path.
 
 A dead command path (e.g. a ~/.local/bin binary left behind after moving to
-Homebrew) makes Claude Desktop spawn a missing executable, which surfaces to
-the user as the trnscrb MCP server repeatedly disconnecting.
+Homebrew) makes OpenCode spawn a missing executable, which surfaces to the
+user as the trnscrb MCP server repeatedly disconnecting.
 """
 
 import json
@@ -19,14 +19,25 @@ class McpConfigHealthTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
-        self.config = self.root / "claude_desktop_config.json"
-        patcher = patch.object(cli, "_CLAUDE_CONFIG", self.config)
+        self.config = self.root / "opencode.json"
+        patcher = patch.object(cli, "_OPENCODE_CONFIG", self.config)
         patcher.start()
         self.addCleanup(patcher.stop)
 
     def _write(self, command):
+        cmd = [command, "server"] if isinstance(command, str) else list(command)
         self.config.write_text(
-            json.dumps({"mcpServers": {"trnscrb": {"command": command, "args": ["server"]}}})
+            json.dumps(
+                {
+                    "mcp": {
+                        "trnscrb": {
+                            "type": "local",
+                            "command": cmd,
+                            "enabled": True,
+                        }
+                    }
+                }
+            )
         )
 
     def _real_binary(self):
