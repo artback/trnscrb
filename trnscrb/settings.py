@@ -66,6 +66,10 @@ _DEFAULTS: dict = {
     # default — a brain-dump is the user's raw thought stream and should only be
     # rewritten when they explicitly ask for it (``trnscrb dictation draft``).
     "auto_enrich_dictation": False,
+    # When a message dictation finishes, paste the transcribed text directly
+    # into whatever text field is currently focused (cmd+v via AppleScript).
+    # Requires Accessibility permissions for Trnscrb in System Settings.
+    "paste_on_dictation": True,
     "auto_integrate": False,  # push transcripts into notes via the Claude Code CLI
     # Prompt for note integration. {transcript_path} is the saved transcript;
     # {notes_dir} is the vault (or notes folder) the agent runs inside.

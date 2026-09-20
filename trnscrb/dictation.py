@@ -32,7 +32,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from trnscrb import storage, transcriber
+from trnscrb import settings, storage, transcriber
 from trnscrb.log import get_logger
 from trnscrb.recorder import Recorder
 
@@ -276,6 +276,51 @@ def copy_to_clipboard(text: str) -> bool:
         return False
 
 
+def paste_text_to_active_app(text: str) -> tuple[bool, str]:
+    """Copy text to clipboard and paste it into the currently focused text field.
+
+    Uses AppleScript to paste into the frontmost application. Requires
+    Accessibility permissions on macOS. Returns (success, detail).
+    """
+    if not text:
+        return False, "empty text"
+    # Copy to clipboard first.
+    ok = copy_to_clipboard(text)
+    if not ok:
+        return False, "could not copy to clipboard"
+    # Paste via AppleScript (System Events → keystroke v with command).
+    try:
+        script = """
+            tell application "System Events"
+                tell (first process whose frontmost is true)
+                    keystroke "v" using command down
+                end tell
+            end tell
+        """
+        proc = subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)
+        if proc.returncode == 0:
+            return True, "pasted into active text field"
+        # Fallback: try pasting via target app.
+        try:
+            script2 = f"""
+                set the clipboard to "{text}"
+                tell application "System Events"
+                    tell (first process whose frontmost is true)
+                        keystroke "v" using command down
+                    end tell
+                end tell
+            """
+            proc2 = subprocess.run(["osascript", "-e", script2], capture_output=True, timeout=5)
+            if proc2.returncode == 0:
+                return True, "pasted into active text field"
+        except Exception:
+            pass
+        return False, "paste failed (Accessibility permissions?)"
+    except Exception as e:
+        _log.debug("paste_text_to_active_app failed: %s", e, exc_info=True)
+        return False, "paste failed — clipboard still has text"
+
+
 # ── meeting-aware dictation ───────────────────────────────────────────────────
 
 
@@ -402,8 +447,17 @@ def finish(
                 )
 
     on_clipboard = False
-    if preset == "message" and plain:
-        on_clipboard = copy_to_clipboard(plain)
+    # Only message preset copies to clipboard (brain-dump is saved, not typed
+    # elsewhere).
+    paste_ok = False
+    paste_detail = ""
+    if plain and preset == "message":
+        if settings.get("paste_on_dictation"):
+            # paste_text_to_active_app handles copy + paste in one step.
+            paste_ok, paste_detail = paste_text_to_active_app(plain)
+            on_clipboard = True  # it copies first, so clipboard landed.
+        else:
+            on_clipboard = copy_to_clipboard(plain)
 
     return {
         "preset": preset,
@@ -413,6 +467,8 @@ def finish(
         "on_clipboard": on_clipboard,
         "duration_secs": duration_secs,
         "injected": injected,
+        "pasted": paste_ok,
+        "paste_detail": paste_detail,
     }
 
 

@@ -2099,28 +2099,177 @@ def dictation_status():
     click.echo(f"Last result: {Path(path).name} ({clip})")
 
 
+@dictation.command(name="list")
+@click.option(
+    "--meeting",
+    default=None,
+    help="Only show dictations from this meeting name (case-insensitive).",
+)
+def dictation_list(meeting):
+    """List saved dictation notes, optionally grouped by meeting.
+
+    Use ``--meeting NAME`` to filter notes for a specific meeting.
+    Notes saved during an active meeting go into the meeting's
+    subfolder and are auto-grouped.
+    """
+    from trnscrb import storage
+
+    notes = storage.list_transcripts()
+    dictation_ids = [
+        n for n in notes if n["id"].startswith("message-") or n["id"].startswith("brain-dump")
+    ]
+
+    # Group by folder: notes in a meeting subfolder have the meeting name
+    # in their parent directory.
+    by_meeting: dict[str, list[dict]] = {}
+    by_root: list[dict] = []
+
+    for entry in dictation_ids:
+        parts = Path(entry["path"]).parts
+        # If note is at NOTES_DIR/<meeting>/note.txt
+        if len(parts) >= 2 and parts[0] == "meeting-notes":
+            meeting_slug = parts[1]
+            # Try to reverse the slug back to a readable name.
+            meeting_key = " ".join(w.title() for w in meeting_slug.replace("-", " ").split())
+            if meeting_key.lower() == "meeting":
+                meeting_key = f"Meeting {meeting_slug}"
+            by_meeting.setdefault(meeting_key, []).append(entry)
+        else:
+            by_root.append(entry)
+
+    if not dictation_ids:
+        click.echo("No dictation notes found.")
+        return
+
+    if meeting:
+        # Filter: match by meeting name or by root-level note ID.
+        meeting = meeting.lower()
+        hits = []
+        for entry in dictation_ids:
+            if meeting in entry["id"].lower():
+                hits.append(entry)
+            elif meeting in str(entry["path"]).lower():
+                hits.append(entry)
+        dictation_ids = hits
+
+    if not dictation_ids:
+        click.echo("No matching dictation notes.")
+        return
+
+    # Print grouped by meeting, then root-level notes.
+    shown = 0
+    for meeting_name in sorted(by_meeting.keys()):
+        entries = by_meeting[meeting_name]
+        click.echo(f"\n{click.style(meeting_name, bold=True)}")
+        for entry in entries:
+            click.echo(f"  {Path(entry['name']).stem}  ({entry['modified'][:16]})")
+            shown += 1
+
+    if by_root:
+        click.echo(f"\n{click.style('Unsorted', bold=True)}")
+        for entry in by_root:
+            click.echo(f"  {Path(entry['name']).stem}  ({entry['modified'][:16]})")
+            shown += 1
+
+    if shown == 0:
+        click.echo("(none)")
+
+
+@dictation.command(name="notes")
+@click.argument("meeting_name")
+def dictation_notes(meeting_name):
+    """Show all dictation notes saved for a meeting.
+
+    Notes saved while a meeting was active are placed in the
+    ``~/meeting-notes/<meeting>/`` subfolder — this command lists those.
+    """
+    from trnscrb import storage
+
+    slug = re.sub(r"[^A-Za-z0-9_-]", "-", meeting_name)[:50]
+    notes_dir = storage.NOTES_DIR / slug
+    if not notes_dir.is_dir():
+        click.echo(f"No dictation notes for ``{meeting_name}``.")
+        return
+
+    files = sorted(notes_dir.glob("*.txt"), key=lambda f: f.stat().st_mtime, reverse=True)
+    if not files:
+        click.echo(f"No dictation notes in ``{slug}/``.")
+        return
+
+    click.echo(f"Dictation notes for ``{meeting_name}`` ({len(files)}):")
+    for f in files:
+        stem = f.stem
+        size = f.stat().st_size
+        mtime = datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        click.echo(f"  {stem:<30} {size:>6} bytes  {mtime}")
+    click.echo()
+
+
 @dictation.command(name="draft")
-@click.argument("transcript_id")
-def dictation_draft(transcript_id):
+@click.option(
+    "--all/--single",
+    default=False,
+    help="Run the draft pass on every dictation note instead of one.",
+)
+@click.argument("transcript_id", required=False, default=None)
+def dictation_draft(transcript_id, all):
     """Run the LLM draft pass on a saved dictation note.
 
     The note id can be a full filename stem or a short suffix such as
     `message-0941` / `brain-dump-0941`. Uses the prompt at
-    ~/.config/trnscrb/prompts/draft.md when present, else a built-in default.
+    ~/.config/trnscrb/prompts/draft.md when present, else a built-in
+    default.
+
+    With ``--all`` the draft pass runs on every dictation note in the
+    notes folder, saving each draft next to the original as
+    ``<stem>-draft.txt``.
     """
     from trnscrb import dictation as d
+    from trnscrb import storage
     from trnscrb.enricher import (
         draft_dictation,
         get_active_provider_config,
         provider_label,
     )
 
+    if all:
+        notes = storage.list_transcripts()
+        dictation_notes = [
+            n for n in notes if n["id"].startswith("message-") or n["id"].startswith("brain-dump")
+        ]
+        if not dictation_notes:
+            click.echo("No dictation notes found.")
+            return
+        click.echo(f"Drafting {len(dictation_notes)} dictation note(s)…\n")
+        for entry in dictation_notes:
+            note_path = Path(entry["path"])
+            try:
+                note_text = note_path.read_text(encoding="utf-8")
+                body = d.note_body(note_text)
+                if not body:
+                    click.echo(f"  ⏭ {note_path.name} (no spoken content)")
+                    continue
+                draft = draft_dictation(body)
+                draft_path = note_path.parent / (note_path.stem + "-draft.txt")
+                draft_path.write_text(draft["draft"], encoding="utf-8")
+                provider_name = provider_label(draft["provider"])
+                click.echo(f"  ✓ {note_path.name} → {draft_path.name} ({provider_name})")
+            except Exception as e:
+                click.echo(f"  ✗ {note_path.name}: {e}")
+        click.echo()
+        return
+
+    if not transcript_id:
+        click.echo("Provide a transcript id or use ``--all``.", err=True)
+        sys.exit(1)
+
     path = d.resolve_note(transcript_id)
     if path is None:
         click.echo(f"No dictation note matching '{transcript_id}' found.", err=True)
         sys.exit(1)
-    note = d.note_body(path.read_text(encoding="utf-8"))
-    if not note:
+    note_text = path.read_text(encoding="utf-8")
+    body = d.note_body(note_text)
+    if not body:
         click.echo(f"'{path.name}' has no spoken content.", err=True)
         sys.exit(1)
 
@@ -2128,7 +2277,7 @@ def dictation_draft(transcript_id):
     model_name = str(profile.get("model") or "<not selected>")
     click.echo(f"  Drafting with {provider_label(provider)} ({model_name})…")
     try:
-        result = draft_dictation(note)
+        result = draft_dictation(body)
     except Exception as e:
         click.echo(f"  Draft failed: {e}", err=True)
         sys.exit(1)
@@ -2266,7 +2415,10 @@ def _print_dictation_result(result: dict) -> None:
         return
     click.echo(f"  ✓ Saved → ~/meeting-notes/{Path(path).name}")
     if preset == "message":
-        if result.get("on_clipboard"):
+        if result.get("pasted"):
+            detail = result.get("paste_detail", "")
+            click.echo(f"  ✎ {detail} (verbatim).")
+        elif result.get("on_clipboard"):
             click.echo("  📋 Copied to the clipboard (verbatim).")
         else:
             click.echo("  ⚠  Clipboard copy failed — the text is in the saved note.")

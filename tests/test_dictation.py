@@ -690,5 +690,30 @@ class MeetingAwareDictationTest(unittest.TestCase):
         self.assertIn("dictated text", content)
 
 
+# ── paste to active app ───────────────────────────────────────────────────────
+
+
+class PasteTextTest(unittest.TestCase):
+    """dictation.paste_text_to_active_app: copies + pastes via AppleScript."""
+
+    def test_empty_text_returns_failure(self):
+        ok, detail = d.paste_text_to_active_app("")
+        self.assertFalse(ok)
+
+    def test_no_text_returns_failure(self):
+        ok, detail = d.paste_text_to_active_app(None)
+        self.assertFalse(ok)
+
+    def test_paste_text_calls_osascript(self):
+        # Stub the osascript call to simulate success.
+        class FakeProc:
+            returncode = 0
+
+        with mock.patch("subprocess.run", return_value=FakeProc()):
+            ok, detail = d.paste_text_to_active_app("hello")
+        self.assertTrue(ok)
+        self.assertIn("pasted", detail)
+
+
 if __name__ == "__main__":
     unittest.main()

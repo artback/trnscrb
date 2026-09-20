@@ -512,9 +512,6 @@ class TrnscrbApp(rumps.App):
         if self._current_state == "recording":
             _notify("Trnscrb", "Command refused", "A meeting is recording. Stop the meeting first.")
             return
-        if self._current_state == "transcribing":
-            _notify("Trnscrb", "Command refused", "Meeting is transcribing — wait a moment.")
-            return
 
         recorder = rec_module.Recorder(system_audio=False)
         try:
@@ -536,8 +533,9 @@ class TrnscrbApp(rumps.App):
     def _start_dictation(self, preset: str):
         """Start a mic-only dictation, refusing loudly if a meeting runs.
 
-        A menu click that silently does nothing reads as a broken app, so every
-        refusal comes with a warning notification naming the blocker.
+        Dictation is refused only while a meeting is actively recording
+        (mic contention).  During transcription the recorder has released
+        the mic so dictation can safely run alongside a finishing meeting.
         """
         from trnscrb import dictation as d
 
@@ -553,13 +551,6 @@ class TrnscrbApp(rumps.App):
                 "Trnscrb",
                 f"{d.preset_label(preset)} refused",
                 "A meeting is recording. Stop the meeting first.",
-            )
-            return
-        if self._current_state == "transcribing":
-            _notify(
-                "Trnscrb",
-                f"{d.preset_label(preset)} refused",
-                "A meeting is still being transcribed — wait a moment.",
             )
             return
 
@@ -639,11 +630,12 @@ class TrnscrbApp(rumps.App):
             if result.get("injected"):
                 msg += " — also appended to the meeting transcript"
             if preset == "message":
-                msg += (
-                    " — copied to clipboard"
-                    if result.get("on_clipboard")
-                    else " — clipboard copy failed, see the note"
-                )
+                if result.get("pasted"):
+                    msg += f" — pasted into active app ({result.get('paste_detail', '')})"
+                elif result.get("on_clipboard"):
+                    msg += " — copied to clipboard"
+                else:
+                    msg += " — clipboard copy failed, see the note"
             _notify("Trnscrb", f"{d.preset_label(preset)} saved", msg)
 
             # Auto-draft brain-dump notes when the setting is on.

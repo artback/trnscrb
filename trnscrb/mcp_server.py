@@ -671,6 +671,121 @@ def add_action_item(text: str, owner: str = "Me") -> str:
     return f"Added ({record['id']})." if record else "Already tracked (or empty)."
 
 
+# ── Dictation MCP tools ─────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def dictation_list(meeting: str = "") -> str:
+    """List saved dictation notes (message / brain-dump), optionally filtered.
+
+    Dictation notes are the short voice-captured notes saved under
+    ~/meeting-notes/message-<HHMM>.txt and ~/meeting-notes/brain-dump-<HHMM>.txt.
+
+    Args:
+        meeting: If provided, only return notes that were saved during a
+                 meeting with this name (case-insensitive).
+    """
+    from trnscrb import storage
+
+    notes = storage.list_transcripts()
+    dictation_ids = [
+        n for n in notes if n["id"].startswith("message-") or n["id"].startswith("brain-dump")
+    ]
+    if not dictation_ids:
+        return "No dictation notes found."
+
+    # Optionally filter to a specific meeting.
+    if meeting:
+        meeting = meeting.lower()
+        filtered = []
+        for entry in dictation_ids:
+            path = Path(entry["path"])
+            if str(meeting) in path.parent.name.lower():
+                filtered.append(entry)
+        dictation_ids = filtered
+        if not dictation_ids:
+            return f"No dictation notes found for meeting '{meeting}'."
+
+    lines = []
+    for entry in sorted(dictation_ids, key=lambda e: e.get("modified", ""), reverse=True):
+        lines.append(f"{entry['id']}  ({entry.get('modified', '?')[:16]})")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def dictation_draft(transcript_id: str = "") -> str:
+    """Run the LLM draft pass on a saved dictation note.
+
+    Cleans up a brain-dump note into a polished version, or rewrites a
+    verbatim message. Returns the draft text directly.
+
+    Args:
+        transcript_id: The filename stem of the dictation note to draft.
+    """
+    from trnscrb import dictation as d
+    from trnscrb.enricher import (
+        draft_dictation,
+        get_active_provider_config,
+        provider_label,
+    )
+
+    if not transcript_id:
+        return "Provide a transcript id."
+
+    path = d.resolve_note(transcript_id)
+    if path is None:
+        return f"No dictation note matching '{transcript_id}' found."
+
+    note_text = path.read_text(encoding="utf-8")
+    body = d.note_body(note_text)
+    if not body:
+        return f"'{path.name}' has no spoken content."
+
+    provider, profile = get_active_provider_config()
+    model_name = str(profile.get("model") or "<not selected>")
+    try:
+        result = draft_dictation(body)
+    except Exception as e:
+        return f"Draft failed ({provider_label(provider)} / {model_name}): {e}"
+
+    return result["draft"]
+
+
+@mcp.tool()
+def dictation_draft_all() -> str:
+    """Run the LLM draft pass on every saved dictation note.
+
+    Saves each draft next to the original as ``<stem>-draft.txt``.
+    """
+    from trnscrb import dictation as d
+    from trnscrb import storage
+    from trnscrb.enricher import draft_dictation
+
+    notes = storage.list_transcripts()
+    dictation_notes = [
+        n for n in notes if n["id"].startswith("message-") or n["id"].startswith("brain-dump")
+    ]
+    if not dictation_notes:
+        return "No dictation notes found."
+
+    results = []
+    for entry in dictation_notes:
+        note_path = Path(entry["path"])
+        try:
+            note_text = note_path.read_text(encoding="utf-8")
+            body = d.note_body(note_text)
+            if not body:
+                results.append(f"  ⏭ {note_path.name} (no spoken content)")
+                continue
+            draft = draft_dictation(body)
+            draft_path = note_path.parent / (note_path.stem + "-draft.txt")
+            draft_path.write_text(draft["draft"], encoding="utf-8")
+            results.append(f"  ✓ {note_path.name} → {draft_path.name}")
+        except Exception as e:
+            results.append(f"  ✗ {note_path.name}: {e}")
+    return "\n".join(results)
+
+
 # ── Background processing ─────────────────────────────────────────────────────
 
 
