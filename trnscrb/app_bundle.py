@@ -28,9 +28,10 @@ _log = get_logger("trnscrb.app_bundle")
 BUNDLE_ID = "io.trnscrb.app"
 # Bundle identity version: bump ONLY for changes that must reach installed
 # bundles (launcher behavior, icon, plist capabilities). Each bump replaces
-# the installed bundle; with the stable local signing identity in use the
-# Screen Recording grant survives the replacement, and without it the user
-# must re-grant once. Routine releases must NOT bump this.
+# the installed bundle — and because it is ad-hoc signed, replacing it
+# invalidates the Screen Recording grant, which the user re-grants once.
+# Routine releases must NOT bump this; the marker is exactly what keeps the
+# installed bundle — and its grant — untouched across upgrades.
 _LAUNCHER_VERSION = 8  # v8: capture chunks carry their timestamp (audio alignment)
 
 # The bundle's single main executable is BOTH the launcher and the
@@ -216,133 +217,19 @@ def _build_main_executable(target: str, dest: Path) -> str:
     return "script"
 
 
-# ── Stable signing identity ───────────────────────────────────────────────────
-# TCC ties a Screen Recording grant to the app's code signature. An ad-hoc
-# signature's identity IS the binary's cdhash (a hash of its exact bytes), so
-# every rebuild or relocation re-sign gives a new identity and the user must
-# re-grant. A certificate signature anchors the identity to the certificate
-# instead, which is stable across rebuilds: the user re-grants once, when the
-# app first signs with this identity, and every later upgrade keeps the grant.
-_CODESIGN_IDENTITY = "trnscrb-local-signing"
-
-
-def _signing_p12() -> Path:
-    return Path.home() / ".config" / "trnscrb" / "codesign" / f"{_CODESIGN_IDENTITY}.p12"
-
-
-def _identity_in_keychain() -> bool:
-    try:
-        out = subprocess.run(
-            ["security", "find-identity", "-v", "-p", "codesigning"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except Exception:
-        return False
-    return f'"{_CODESIGN_IDENTITY}"' in out.stdout
-
-
-def ensure_signing_identity() -> str | None:
-    """Make the stable local signing identity available; return its name.
-
-    A self-signed certificate (10-year) is generated once per machine and
-    backed up as a p12 under ~/.config/trnscrb/codesign/, so a lost keychain
-    entry can be restored from the file. None where openssl/security are
-    missing or fail — callers then fall back to ad-hoc signing.
-    """
-    if _identity_in_keychain():
-        return _CODESIGN_IDENTITY
-    if not shutil.which("openssl"):
-        return None
-    try:
-        p12 = _signing_p12()
-        if not p12.exists():
-            p12.parent.mkdir(parents=True, exist_ok=True)
-            key = p12.parent / "key.pem"
-            cert = p12.parent / "cert.pem"
-            subprocess.run(
-                [
-                    "openssl",
-                    "req",
-                    "-x509",
-                    "-newkey",
-                    "ec",
-                    "-pkeyopt",
-                    "ec_paramgen_curve:prime256v1",
-                    "-days",
-                    "3650",
-                    "-nodes",
-                    "-keyout",
-                    str(key),
-                    "-out",
-                    str(cert),
-                    "-subj",
-                    f"/CN={_CODESIGN_IDENTITY}",
-                ],
-                check=True,
-                capture_output=True,
-                timeout=60,
-            )
-            subprocess.run(
-                [
-                    "openssl",
-                    "pkcs12",
-                    "-export",
-                    "-inkey",
-                    str(key),
-                    "-certfile",
-                    str(cert),
-                    "-out",
-                    str(p12),
-                    "-passout",
-                    "pass:",
-                ],
-                check=True,
-                capture_output=True,
-                timeout=60,
-            )
-            os.chmod(p12, 0o600)
-            key.unlink(missing_ok=True)
-            cert.unlink(missing_ok=True)
-        # -T lets codesign use the private key without a prompt; -A puts the
-        # certificate on the default search list.
-        subprocess.run(
-            [
-                "security",
-                "import",
-                str(p12),
-                "-T",
-                "/usr/bin/codesign",
-                "-A",
-                "-P",
-                "",
-            ],
-            check=True,
-            capture_output=True,
-            timeout=60,
-        )
-    except Exception:
-        _log.warning(
-            "Could not create local signing identity; falling back to ad-hoc",
-            exc_info=True,
-        )
-        return None
-    return _CODESIGN_IDENTITY if _identity_in_keychain() else None
-
-
 def _codesign(bundle: Path) -> None:
     """Sign the finished bundle so TCC can persist grants for it.
 
     Must be the LAST build step — codesign seals the current bundle contents,
-    and any later change invalidates the seal. Signs with the stable local
-    identity when available, so the TCC grant survives rebuilds; falls back
-    to ad-hoc, where the grant only survives byte-identical rebuilds.
+    and any later change invalidates the seal. Always ad-hoc: the installed
+    bundle is only ever replaced when its identity marker changes (see
+    _install_packaged), so a routine release leaves the signature — and the
+    user's Screen Recording grant — untouched.
     """
     codesign = shutil.which("codesign")
     if not codesign:
         return
-    sign = ensure_signing_identity() or "-"
+    sign = "-"  # ad-hoc; the installed bundle is never re-signed (see _install_packaged)
     try:
         # One binary, signed with the app identifier — the same identity the
         # user grants and the same one that captures. No nested helper to sign.
@@ -443,8 +330,9 @@ def _install_packaged(packaged: Path) -> Path | None:
     and its signature and the user's permission grant — untouched (Info.plist
     keeps the older version string; that is deliberate and purely cosmetic).
     Bumping _LAUNCHER_VERSION is the explicit, documented way to roll the
-    bundle; with the stable local signing identity in use the TCC grant
-    survives even that replacement.
+    bundle; because the bundle is ad-hoc signed, that replacement
+    invalidates the TCC grant and the user must grant Screen Recording
+    once more.
     """
     installed = bundle_path()
     executable = executable_path()
