@@ -1963,6 +1963,7 @@ def dictation_record(preset):
     Ctrl+C cancels without saving (the captured audio is discarded).
     """
     from trnscrb import dictation as d
+    from trnscrb import settings
 
     reason = d.refusing_reason()
     if reason:
@@ -1994,6 +1995,23 @@ def dictation_record(preset):
     except Exception as e:
         click.echo(f"  Dictation failed: {e}", err=True)
         sys.exit(1)
+
+    # Auto-draft brain-dump notes when the setting is on.
+    if preset == "brain-dump" and result.get("path"):
+        try:
+            note_path = Path(result["path"])
+            note_text = note_path.read_text(encoding="utf-8")
+            body = d.note_body(note_text)
+            if body and settings.get("auto_enrich_dictation"):
+                from trnscrb.enricher import draft_dictation
+
+                draft = draft_dictation(body)
+                draft_path = note_path.parent / (note_path.stem + "-draft.txt")
+                draft_path.write_text(draft["draft"], encoding="utf-8")
+                click.echo(f"  ✎ Auto-drafted → {draft_path.name}")
+        except Exception:
+            click.echo("  ⚠  Auto-draft failed (see logs)", err=True)
+
     _print_dictation_result(result)
 
 
@@ -2053,6 +2071,7 @@ def dictation_stop():
     import signal as _signal
 
     from trnscrb import dictation as d
+    from trnscrb import settings
 
     pid = d.running_pid()
     if not pid:
@@ -2072,6 +2091,24 @@ def dictation_stop():
             err=True,
         )
         sys.exit(1)
+
+    # Auto-draft brain-dump notes when the setting is on.
+    preset = result.get("preset", "brain-dump")
+    if preset == "brain-dump" and result.get("path"):
+        try:
+            note_path = Path(result["path"])
+            note_text = note_path.read_text(encoding="utf-8")
+            body = d.note_body(note_text)
+            if body and settings.get("auto_enrich_dictation"):
+                from trnscrb.enricher import draft_dictation
+
+                draft = draft_dictation(body)
+                draft_path = note_path.parent / (note_path.stem + "-draft.txt")
+                draft_path.write_text(draft["draft"], encoding="utf-8")
+                click.echo(f"  ✎ Auto-drafted → {draft_path.name}")
+        except Exception:
+            click.echo("  ⚠  Auto-draft failed (see logs)", err=True)
+
     _print_dictation_result(result)
 
 
