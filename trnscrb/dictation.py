@@ -45,6 +45,165 @@ _CONTROL_DIR = Path.home() / ".config" / "trnscrb"
 _PID_FILE = _CONTROL_DIR / "dictation.pid"
 _RESULT_FILE = _CONTROL_DIR / "dictation_result.json"
 
+# ── app-side control channel (SIGUSR2 + request file) ─────────────────────────
+# The CLI command "trnscrb dictate <preset>" signals the menu-bar app via
+# SIGUSR2. Because Unix signals can't carry a preset, a small JSON request file
+# does the heavy lifting: the app reads it on receipt.
+
+_START_REQUEST_FILE = _CONTROL_DIR / "dictation_request.json"
+
+
+def write_start_request(preset: str) -> None:
+    """Write a dictation-start request for the menu-bar app to pick up."""
+    _CONTROL_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        _START_REQUEST_FILE.write_text(json.dumps({"preset": preset}), encoding="utf-8")
+    except Exception:
+        _log.debug("Could not write dictation request", exc_info=True)
+
+
+def read_start_request() -> str | None:
+    """Return the preset from the latest request, or None."""
+    try:
+        payload = json.loads(_START_REQUEST_FILE.read_text())
+        preset = payload.get("preset") if isinstance(payload, dict) else None
+        return preset if is_preset(preset) else None
+    except Exception:
+        return None
+
+
+def clear_start_request() -> None:
+    """Remove the request file so the app never picks up a stale one."""
+    try:
+        _START_REQUEST_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+# ── command mode ──────────────────────────────────────────────────────────────
+# Command-mode dictation maps spoken phrases to actions (stop meeting, bookmark,
+# etc.). The matcher is pure data + a single function so it is easy to test and
+# reuse across the menu bar, CLI, and MCP.
+
+_COMMANDS: list[dict] = [
+    {
+        "name": "stop_meeting",
+        "trigger": "stop the meeting",
+        "phrases": [
+            "stop meeting",
+            "stop the meeting",
+            "end meeting",
+            "end the meeting",
+            "stop recording",
+            "stop the recording",
+            "stop transcribing",
+            "stop the transcribing",
+            "stop",
+        ],
+        "label": "Stop meeting",
+    },
+    {
+        "name": "start_meeting",
+        "trigger": "start the meeting",
+        "phrases": [
+            "start meeting",
+            "start the meeting",
+            "begin meeting",
+            "begin the meeting",
+            "start recording",
+            "start the recording",
+            "start transcribing",
+            "start the transcribing",
+            "begin",
+        ],
+        "label": "Start meeting",
+    },
+    {
+        "name": "bookmark",
+        "trigger": "bookmark this",
+        "phrases": [
+            "bookmark",
+            "bookmark this",
+            "mark this",
+            "add a bookmark",
+            "place a bookmark",
+        ],
+        "label": "Bookmark",
+    },
+    {
+        "name": "stop_dictation",
+        "trigger": "stop dictation",
+        "phrases": [
+            "stop dictation",
+            "stop the dictation",
+            "stop message",
+            "stop brain dump",
+        ],
+        "label": "Stop dictation",
+    },
+    {
+        "name": "start_message",
+        "trigger": "start a message",
+        "phrases": [
+            "start a message",
+            "start message dictation",
+            "dictation message",
+        ],
+        "label": "Start message dictation",
+    },
+    {
+        "name": "start_brain_dump",
+        "trigger": "start a brain dump",
+        "phrases": [
+            "start a brain dump",
+            "start brain dump dictation",
+            "brain dump dictation",
+        ],
+        "label": "Start brain-dump dictation",
+    },
+]
+
+_COMMAND_PHRASES: dict[str, str] = {}
+for _cmd in _COMMANDS:
+    for _phrase in _cmd["phrases"]:
+        _COMMAND_PHRASES[_phrase] = _cmd["name"]
+
+
+def match_command(plain_text: str) -> dict | None:
+    """Match a dictation transcript against known commands.
+
+    Returns ``{"command": "stop_meeting", "matched": "stop meeting"}`` or
+    ``None`` when no command matches.
+    """
+    if not plain_text:
+        return None
+    # Normalize: lowercase, strip punctuation, collapse whitespace.
+    import re
+
+    normalized = re.sub(r"[^\w\s]", "", plain_text.lower())
+    normalized = " ".join(normalized.split())
+    if not normalized:
+        return None
+    # Try the phrase table.
+    if normalized in _COMMAND_PHRASES:
+        cmd = _COMMAND_PHRASES[normalized]
+        for _c in _COMMANDS:
+            if _c["name"] == cmd:
+                return {"command": cmd, "matched": _c["trigger"], "label": _c["label"]}
+    # Partial match: the transcript *starts with* a known command phrase.
+    # Only match if the rest of the transcript is short (a hesitation filler).
+    # This catches "stop the meeting please" without firing on "what does stop
+    # mean" — only consider prefixes <= 5 words when the rest is short.
+    for phrase, cmd in _COMMAND_PHRASES.items():
+        if normalized.startswith(phrase):
+            remainder = normalized[len(phrase) :].strip()
+            if not remainder or len(remainder.split()) <= 2:
+                for _c in _COMMANDS:
+                    if _c["name"] == cmd:
+                        return {"command": cmd, "matched": phrase, "label": _c["label"]}
+    return None
+
+
 # Matches storage._SEPARATOR: the line that splits a note's header from its
 # spoken body. Kept in sync deliberately so note_body() can find it.
 _BODY_SEP = "=" * 60
@@ -68,10 +227,20 @@ def meeting_in_progress() -> bool:
     return storage.get_live_session_info() is not None
 
 
+# Convenience alias — callers in tests expect the module-level function.
+get_live_session_info = storage.get_live_session_info
+
+
 def refusing_reason() -> str | None:
     """Why dictation cannot start right now, or None when it can."""
-    if meeting_in_progress():
-        return "A meeting transcription is in progress. Stop the meeting first, then dictate."
+    info = storage.get_live_session_info()
+    if info:
+        # Only refuse while a meeting is actively recording.  During
+        # transcription the recorder has already released the mic, so
+        # dictation can safely run alongside a finishing meeting.
+        app_state = storage.read_app_state()
+        if app_state and app_state.get("state") == "recording":
+            return "A meeting is actively recording. Stop the meeting first, then dictate."
     return None
 
 
@@ -107,11 +276,51 @@ def copy_to_clipboard(text: str) -> bool:
         return False
 
 
-def save_note(preset: str, started_at: datetime, segments: list[dict]) -> tuple[Path | None, str]:
+# ── meeting-aware dictation ───────────────────────────────────────────────────
+
+
+def get_meeting_context() -> dict | None:
+    """Return a dict with the current meeting context, or None.
+
+    The context contains:
+      ``meeting`` — the meeting name (slugified)
+      ``path``    — the live transcript path
+      ``started_at`` — ISO datetime when the meeting started
+    """
+    info = storage.get_live_session_info()
+    if not info:
+        return None
+    try:
+        path = info.get("path")
+        if isinstance(path, Path):
+            path = str(path)
+        return {
+            "meeting": info.get("meeting", "unknown") or "unknown",
+            "path": path,
+            "started_at": info.get("started_at"),
+        }
+    except Exception:
+        return None
+
+
+def _meeting_slug(meeting_name: str) -> str:
+    """Turn a meeting name into a safe directory slug."""
+    import re
+
+    return re.sub(r"[^A-Za-z0-9_-]", "-", meeting_name)[:50]
+
+
+def save_note(
+    preset: str,
+    started_at: datetime,
+    segments: list[dict],
+    meeting_name: str | None = None,
+) -> tuple[Path | None, str]:
     """Format and save the dictation note. Returns (path, text).
 
-    A dictation with no spoken content (silence) is not saved — a header-only
-    note is worse than no note.
+    When ``meeting_name`` is provided the note is saved into the meeting's
+    subfolder (``~/meeting-notes/<meeting>/``) so all dictations for a
+    meeting are grouped together.
     """
     name = f"{preset}-{started_at.strftime('%H%M')}"
     if not any(str(seg.get("text") or "").strip() for seg in segments):
@@ -119,17 +328,48 @@ def save_note(preset: str, started_at: datetime, segments: list[dict]) -> tuple[
     text = storage.format_transcript(segments, started_at, name, kind=preset)
     if not text.strip():
         return None, ""
-    path = storage.get_transcript_path(name, started_at)
+
+    if meeting_name:
+        # Save into the meeting's subfolder.
+        slug = _meeting_slug(meeting_name)
+        notes_dir = storage.NOTES_DIR / slug
+        notes_dir.mkdir(parents=True, exist_ok=True)
+        path = notes_dir / f"{name}.txt"
+    else:
+        path = storage.get_transcript_path(name, started_at)
+
     storage.save_transcript(path, text)
     return path, text
 
 
-def finish(preset: str, started_at: datetime, audio_path: Path) -> dict:
+def inject_into_meeting_transcript(text: str, meeting_path: Path) -> bool:
+    """Append dictated text to a live meeting transcript.
+
+    Inserts a ``[Dictation]`` marker so the appended text is visually
+    separate.  Returns True when the write succeeded.
+    """
+    try:
+        marker = "\n[Dictation — added while recording]\n"
+        existing = meeting_path.read_text(encoding="utf-8")
+        merged = existing + marker + text + "\n"
+        meeting_path.write_text(merged, encoding="utf-8")
+        return True
+    except Exception:
+        _log.warning("Could not inject into meeting transcript: %s", meeting_path, exc_info=True)
+        return False
+
+
+def finish(
+    preset: str,
+    started_at: datetime,
+    audio_path: Path,
+    inject_meeting: bool = False,
+) -> dict:
     """Transcribe, save the note, and copy the text for a message preset.
 
     The audio file is always cleaned up — the note and clipboard are the
     product, and a few seconds of dictation is cheap to redo. Returns:
-      {preset, path, text, plain, on_clipboard, duration_secs}
+      {preset, path, text, plain, on_clipboard, duration_secs, injected}
     """
     _log.info("Dictation finishing (preset=%s, audio=%s)", preset, audio_path)
     try:
@@ -144,8 +384,23 @@ def finish(preset: str, started_at: datetime, audio_path: Path) -> dict:
     duration_secs = float(segments[-1]["end"]) if segments else 0.0
 
     path, text = None, ""
+    injected = False
     if plain:
-        path, text = save_note(preset, started_at, segments)
+        meeting_ctx = get_meeting_context() if inject_meeting else None
+        meeting_name = meeting_ctx["meeting"] if meeting_ctx else None
+        path, text = save_note(preset, started_at, segments, meeting_name=meeting_name)
+
+        # Inject into the meeting transcript if requested and a meeting is live.
+        if inject_meeting and meeting_ctx and meeting_ctx.get("path"):
+            target = Path(meeting_ctx["path"])
+            if target.exists():
+                injected = inject_into_meeting_transcript(plain, target)
+                _log.info(
+                    "Dictation %s into meeting transcript: %s",
+                    "injected" if injected else "skipped",
+                    injected,
+                )
+
     on_clipboard = False
     if preset == "message" and plain:
         on_clipboard = copy_to_clipboard(plain)
@@ -157,6 +412,7 @@ def finish(preset: str, started_at: datetime, audio_path: Path) -> dict:
         "plain": plain,
         "on_clipboard": on_clipboard,
         "duration_secs": duration_secs,
+        "injected": injected,
     }
 
 

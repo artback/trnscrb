@@ -234,13 +234,37 @@ class DenoiseSettingsTest(unittest.TestCase):
         settings.put("denoise", False)
         off = runner.invoke(cli.cli, ["status"])
         self.assertEqual(off.exit_code, 0, off.output)
-        self.assertIn("Noise filter: off", off.output)
+        self.assertIn("Noise filter", off.output)
+        self.assertIn("off (opt-in)", off.output)
         settings.put("denoise", True)
         on = runner.invoke(cli.cli, ["status"])
         self.assertEqual(on.exit_code, 0, on.output)
         self.assertIn("Noise filter", on.output)
         self.assertIn("denoise local audio", on.output)
         settings.put("denoise", False)
+
+
+class VADGateTest(unittest.TestCase):
+    """VAD gating in denoise: skip denoise for near-silent audio."""
+
+    def test_has_speech_returns_true_for_signal(self):
+        import numpy as np
+
+        # A strong sine wave
+        y = np.sin(np.linspace(0, 4 * np.pi, 48000)).astype(np.float32) * 0.5
+        self.assertTrue(denoise._has_speech(y, 16000))
+
+    def test_has_speech_returns_false_for_silence(self):
+        import numpy as np
+
+        # Pure silence
+        y = np.zeros(48000, dtype=np.float32)
+        self.assertFalse(denoise._has_speech(y, 16000))
+
+    def test_has_speech_returns_false_for_empty(self):
+        import numpy as np
+
+        self.assertFalse(denoise._has_speech(np.array([], dtype=np.float32), 16000))
 
 
 if __name__ == "__main__":

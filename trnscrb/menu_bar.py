@@ -200,8 +200,11 @@ class TrnscrbApp(rumps.App):
         )
         self._dict_brain_item = rumps.MenuItem("Brain Dump", callback=self.start_dictation_brain)
         self._stop_dict_item = rumps.MenuItem("Stop Dictation", callback=None)
+        self._dict_command_item = rumps.MenuItem("Command")
         self._dictation_menu.add(self._dict_message_item)
         self._dictation_menu.add(self._dict_brain_item)
+        self._dictation_menu.add(None)
+        self._dictation_menu.add(self._dict_command_item)
         self._dictation_menu.add(None)
         self._dictation_menu.add(self._stop_dict_item)
         self._voices_item = rumps.MenuItem("Label Voices…", callback=self.label_voices)
@@ -495,6 +498,41 @@ class TrnscrbApp(rumps.App):
     def start_dictation_brain(self, _):
         self._start_dictation("brain-dump")
 
+    def start_dictation_command(self, _):
+        """Start a command-mode dictation; finish it with ``Stop Dictation``."""
+        self._start_command()
+
+    def _start_command(self):
+        """Start a mic-only command-mode dictation, refusing if a meeting records."""
+        from trnscrb import recorder as rec_module
+
+        if getattr(self, "_dict_preset", None):
+            _notify("Trnscrb", "Command refused", "A dictation is already running — stop it first.")
+            return
+        if self._current_state == "recording":
+            _notify("Trnscrb", "Command refused", "A meeting is recording. Stop the meeting first.")
+            return
+        if self._current_state == "transcribing":
+            _notify("Trnscrb", "Command refused", "Meeting is transcribing — wait a moment.")
+            return
+
+        recorder = rec_module.Recorder(system_audio=False)
+        try:
+            recorder.start()
+        except Exception as e:
+            _notify("Trnscrb", "Command failed to start", str(e)[:180])
+            return
+
+        self._recorder = recorder
+        self._dict_preset = "command"
+        self._dict_started_at = datetime.now()
+        self._set_state("dictating")
+        _notify(
+            "Trnscrb",
+            "Command dictation started",
+            "Say a command — choose Stop Dictation when you're done.",
+        )
+
     def _start_dictation(self, preset: str):
         """Start a mic-only dictation, refusing loudly if a meeting runs.
 
@@ -561,8 +599,17 @@ class TrnscrbApp(rumps.App):
         self._process_thread.start()
 
     def _process_dictation(self, recorder, started_at, preset):
-        """Background tail of a dictation: transcribe → save → clipboard."""
+        """Background tail of a dictation: transcribe → save → clipboard.
+
+        For ``"command"`` preset the transcript is matched against the command
+        table and the matched action is executed (stop meeting, bookmark, etc.).
+        For message/brain-dump presets dictation is injected into the live
+        meeting transcript when a meeting is active.
+        """
         import trnscrb.dictation as d
+        from trnscrb import settings
+
+        inject_meeting = preset not in ("command",) and d.get_meeting_context() is not None
 
         try:
             audio_path = recorder.stop()
@@ -570,7 +617,7 @@ class TrnscrbApp(rumps.App):
                 _notify("Trnscrb", "Dictation", "No audio captured.")
                 return
             try:
-                result = d.finish(preset, started_at, audio_path)
+                result = d.finish(preset, started_at, audio_path, inject_meeting=inject_meeting)
             except Exception as e:
                 _log.error("Dictation transcription failed", exc_info=True)
                 _notify("Trnscrb", "Dictation failed", str(e)[:180])
@@ -583,7 +630,14 @@ class TrnscrbApp(rumps.App):
             if not path:
                 _notify("Trnscrb", d.preset_label(preset), "Nothing was said.")
                 return
+
+            if preset == "command":
+                self._run_command(result.get("plain", ""))
+                return
+
             msg = f"~/meeting-notes/{Path(path).name}"
+            if result.get("injected"):
+                msg += " — also appended to the meeting transcript"
             if preset == "message":
                 msg += (
                     " — copied to clipboard"
@@ -591,8 +645,67 @@ class TrnscrbApp(rumps.App):
                     else " — clipboard copy failed, see the note"
                 )
             _notify("Trnscrb", f"{d.preset_label(preset)} saved", msg)
+
+            # Auto-draft brain-dump notes when the setting is on.
+            enrich = settings.get("auto_enrich_dictation")
+            if preset == "brain-dump" and result.get("path") and enrich:
+                try:
+                    note_path = Path(result["path"])
+                    note_text = note_path.read_text(encoding="utf-8")
+                    body = d.note_body(note_text)
+                    if body:
+                        from trnscrb.enricher import draft_dictation
+
+                        draft = draft_dictation(body)
+                        draft_path = note_path.parent / (note_path.stem + "-draft.txt")
+                        draft_path.write_text(draft["draft"], encoding="utf-8")
+                        _log.info("Auto-drafted brain-dump → %s", draft_path)
+                except Exception:
+                    _log.warning("Auto-enrich brain-dump failed", exc_info=True)
         finally:
             self._restore_idle()
+
+    def _run_command(self, plain_text: str) -> None:
+        """Match a dictation transcript against commands and execute the result."""
+        import trnscrb.dictation as d
+
+        match = d.match_command(plain_text)
+        if match is None:
+            _notify("Trnscrb", "No command matched", plain_text[:80] or "(empty)")
+            return
+        cmd = match["command"]
+        label = match.get("label", cmd)
+        _log.info("Command matched: %s (%s)", cmd, match.get("matched", ""))
+        if cmd == "stop_meeting":
+            # Only stop if actually recording — don't clobber transcription.
+            with self._rec_lock:
+                if self._recorder and self._recorder.is_recording:
+                    self.stop_recording(None)
+                    _notify("Trnscrb", "Command", f"{label} — meeting stopped.")
+                    return
+            _notify("Trnscrb", "Command", f"{label} — but no meeting is recording.")
+        elif cmd == "start_meeting":
+            self._do_start()
+            _notify("Trnscrb", "Command", f"{label} — meeting started.")
+        elif cmd == "bookmark":
+            offset = storage.add_bookmark()
+            if offset:
+                _notify("Trnscrb", "Command", f"{label} — bookmark at {offset:.0f}s.")
+            else:
+                _notify("Trnscrb", "Command", f"{label} — but no meeting is recording.")
+        elif cmd == "stop_dictation":
+            if getattr(self, "_dict_preset", None):
+                self.stop_dictation(None)
+                _notify("Trnscrb", "Command", f"{label} — dictation stopped.")
+            else:
+                _notify("Trnscrb", "Command", f"{label} — but no dictation is running.")
+        elif cmd in ("start_message", "start_brain_dump"):
+            # Dispatch to the appropriate dictation start.
+            sub_preset = "message" if cmd == "start_message" else "brain-dump"
+            self._start_dictation(sub_preset)
+            _notify("Trnscrb", "Command", f"{label} — dictation started.")
+        else:
+            _notify("Trnscrb", "Command", f"Unknown command: {cmd}")
 
     # ── enrichment settings ───────────────────────────────────────────────────
 
@@ -992,7 +1105,22 @@ class TrnscrbApp(rumps.App):
             libdispatch.dispatch_source_set_event_handler(toggle_source, self._on_toggle_signal)
             libdispatch.dispatch_resume(toggle_source)
             self._signal_sources.append(toggle_source)
-            _log.debug("Signal handlers installed (SIGTERM, SIGINT, SIGUSR1)")
+
+            # SIGUSR2 starts/stops dictation. `trnscrb dictate <preset>` writes
+            # the preset to a request file then sends this signal. The handler
+            # reads the file and toggles dictation on/off.
+            signal.signal(signal.SIGUSR2, signal.SIG_IGN)
+            dict_source = libdispatch.dispatch_source_create(
+                libdispatch.DISPATCH_SOURCE_TYPE_SIGNAL,
+                signal.SIGUSR2,
+                0,
+                libdispatch.dispatch_get_main_queue(),
+            )
+            libdispatch.dispatch_source_set_event_handler(dict_source, self._on_dictation_signal)
+            libdispatch.dispatch_resume(dict_source)
+            self._signal_sources.append(dict_source)
+
+            _log.debug("Signal handlers installed (SIGTERM, SIGINT, SIGUSR1, SIGUSR2)")
         except Exception:
             _log.warning("Could not install signal handlers", exc_info=True)
 
@@ -1007,6 +1135,28 @@ class TrnscrbApp(rumps.App):
                 self.start_recording(None)
         except Exception:
             _log.warning("Toggle signal handler failed", exc_info=True)
+
+    def _on_dictation_signal(self) -> None:
+        """Handle a SIGUSR2 dictation request.
+
+        Reads the preset from the request file, then toggles dictation:
+        if a dictation is active, stop it; otherwise start with the preset.
+        Falls back to ``"message"`` when no request file is found.
+        """
+        from trnscrb import dictation as d
+
+        preset = d.read_start_request() or "message"
+        try:
+            if getattr(self, "_dict_preset", None):
+                # A dictation is running → stop it (toggle-off).
+                _log.info("SIGUSR2 dictation: stopping active dictation")
+                self.stop_dictation(None)
+            else:
+                _log.info("SIGUSR2 dictation: starting %s", preset)
+                self._start_dictation(preset)
+                d.clear_start_request()
+        except Exception:
+            _log.warning("Dictation signal handler failed", exc_info=True)
 
     # ── shared start / stop ───────────────────────────────────────────────────
 

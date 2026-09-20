@@ -1408,7 +1408,12 @@ def status():
                 "on but noisereduce missing — run `uv add noisereduce`",
             )
     else:
-        click.echo("  Noise filter: off  (on: `trnscrb config set denoise true`)")
+        _row("Noise filter", False, "off (opt-in)")
+
+    if settings.get("auto_enrich_dictation"):
+        _row("Auto-enrich dictation", True, "drafts brain-dump notes")
+    else:
+        _row("Auto-enrich dictation", False, "off — use ``trnscrb dictation enrich``")
     click.echo()
 
     binary = _sh.which("trnscrb") or sys.executable
@@ -1867,6 +1872,65 @@ def devices():
         click.echo(f"  [{d['index']}] {d['name']}  {d['channels']}ch")
 
 
+@cli.command()
+@click.argument("preset", type=click.Choice(("message", "brain-dump")))
+def dictate(preset):
+    """Signal the menu-bar app to start a dictation of the given preset.
+
+    Bind this to a hotkey (Shortcuts, Raycast, Skim) for quick access. Sends
+    SIGUSR2 to the running app along with the preset — the menu-bar app
+    records in-process, so you can stop it from the menu bar.
+
+    If the menu-bar app is not running, falls back to ``trnscrb dictation start``
+    which launches a detached child process.
+    """
+    from trnscrb import dictation as d
+
+    pid = _running_app_pid()
+    if pid:
+        # Try the signal-channel first.
+        d.write_start_request(preset)
+        try:
+            import os
+            import signal
+
+            os.kill(pid, signal.SIGUSR2)
+        except OSError as e:
+            click.echo(f"Could not signal the app: {e}", err=True)
+            d.clear_start_request()
+            return
+        click.echo(f"  🎙  {d.preset_label(preset)} dictation started via the menu bar app.")
+        return
+
+    # App isn't running — fall back to the detached-child path.
+    reason = d.refusing_reason()
+    if reason:
+        click.echo(reason, err=True)
+        sys.exit(1)
+
+    d.clear_result()
+    child_cmd = [sys.executable, "-m", "trnscrb.dictation", preset]
+    try:
+        subprocess.Popen(
+            child_cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as e:
+        click.echo(f"Could not start the dictation process: {e}", err=True)
+        sys.exit(1)
+
+    pid = d.wait_for_pid(timeout=5.0)
+    if not pid:
+        click.echo("The dictation process did not start.", err=True)
+        sys.exit(1)
+    click.echo(
+        f"  🎙  {d.preset_label(preset)} recording (pid {pid}). "
+        "Finish it with ``trnscrb dictation stop``."
+    )
+
+
 # ── dictation ────────────────────────────────────────────────────────────────
 
 _DICTATION_PRESETS = ("message", "brain-dump")
@@ -2071,6 +2135,124 @@ def dictation_draft(transcript_id):
     click.echo("")
     click.echo(result["draft"])
     click.echo(f"\n  ✓ Draft ready — from {path.name} ({provider_label(provider)})")
+
+
+@dictation.command(name="command")
+def dictation_command():
+    """Record a spoken command and execute it.
+
+    Matched commands: stop meeting, start meeting, bookmark, stop
+    dictation, start message, start brain-dump.  Say the command and
+    press Enter to finish; unmatched input is silently ignored.
+    """
+    from trnscrb import dictation as d
+    from trnscrb import recorder as rec_module
+    from trnscrb import storage, transcriber
+
+    click.echo("Listening (press Enter when done)…")
+    recorder = rec_module.Recorder(system_audio=False)
+    recorder.start()
+    try:
+        input()
+    except (EOFError, KeyboardInterrupt):
+        click.echo("")
+    audio_path = recorder.stop()
+    if not audio_path:
+        click.echo("No audio captured.", err=True)
+        return
+    try:
+        segments = transcriber.transcribe(audio_path)
+    except Exception as e:
+        click.echo(f"Transcription failed: {e}", err=True)
+        return
+    text = d.plain_text(segments)
+    text = storage.clean_filler_words(text).strip()
+    match = d.match_command(text)
+    if match is None:
+        click.echo(f"No command matched: ``{text}``")
+        return
+    cmd = match["command"]
+    label = match.get("label", cmd)
+    click.echo(f"  ✓ Matched: {label}")
+    import signal as _sig
+
+    if cmd == "stop_meeting":
+        pid = _running_app_pid()
+        if pid:
+            try:
+                import os
+
+                os.kill(pid, _sig.SIGUSR1)
+                click.echo("  Sent stop signal to menu-bar app.")
+            except OSError:
+                click.echo("  Could not signal the app.", err=True)
+        else:
+            click.echo("  No menu-bar app running — nothing to stop.")
+    elif cmd == "start_meeting":
+        pid = _running_app_pid()
+        if pid:
+            try:
+                import os
+
+                os.kill(pid, _sig.SIGUSR1)
+                click.echo("  Sent start signal to menu-bar app.")
+            except OSError:
+                click.echo("  Could not signal the app.", err=True)
+        else:
+            click.echo("  No menu-bar app running.", err=True)
+    elif cmd == "bookmark":
+        offset = storage.add_bookmark()
+        if offset is not None:
+            click.echo(f"  Bookmark at {offset:.0f}s.")
+        else:
+            click.echo("  No meeting recording to bookmark.")
+    elif cmd == "stop_dictation":
+        pid = d.running_pid()
+        if pid:
+            try:
+                import os
+
+                os.kill(pid, _sig.SIGUSR1)
+                click.echo(f"  Stopped dictation (pid {pid}).")
+            except OSError:
+                click.echo("  Could not signal the dictation process.", err=True)
+        else:
+            click.echo("  No dictation running.")
+    elif cmd in ("start_message", "start_brain_dump"):
+        sub_preset = "message" if cmd == "start_message" else "brain-dump"
+        click.echo(f"  Start it with ``trnscrb dictation start {sub_preset}``.")
+
+
+@dictation.command(name="enrich")
+@click.argument("transcript_id")
+def dictation_enrich(transcript_id):
+    """Draft a clean version of a brain-dump note.
+
+    The note id can be a full filename stem or a short suffix such as
+    `brain-dump-0941`.  Uses the prompt at
+    ~/.config/trnscrb/prompts/draft.md when present, else a built-in default.
+    The draft is saved next to the original note as ``<stem>-draft.txt``.
+    """
+    from trnscrb import dictation as d
+    from trnscrb.enricher import draft_dictation
+
+    path = d.resolve_note(transcript_id)
+    if path is None:
+        click.echo(f"No dictation note matching '{transcript_id}' found.", err=True)
+        sys.exit(1)
+    note_text = path.read_text(encoding="utf-8")
+    body = d.note_body(note_text)
+    if not body:
+        click.echo(f"'{path.name}' has no spoken content.", err=True)
+        sys.exit(1)
+    try:
+        draft = draft_dictation(body)
+    except Exception as e:
+        click.echo(f"Draft failed: {e}", err=True)
+        sys.exit(1)
+    draft_path = path.parent / (path.stem + "-draft.txt")
+    draft_path.write_text(draft["draft"], encoding="utf-8")
+    click.echo(f"  ✓ Draft saved → {draft_path.name} ({draft['provider']})")
 
 
 def _print_dictation_result(result: dict) -> None:
@@ -2438,3 +2620,48 @@ def glossary_remove(term):
         click.echo(f"Removed '{term}'.")
     else:
         click.echo(f"'{term}' was not in the glossary.")
+
+
+@glossary.command(name="train")
+@click.argument("term")
+def glossary_train(term):
+    """Train a glossary entry by recording you saying it.
+
+    Records a short utterance from the mic, transcribes it, and adds the
+    canonical TERM with the ASR's version as an alias — so future
+    transcriptions get corrected onto the canonical form.
+    """
+    from trnscrb import glossary as g
+    from trnscrb import recorder as rec_module
+    from trnscrb import transcriber
+
+    click.echo(f"Say ``{term}`` now (press Enter when done)…")
+    recorder = rec_module.Recorder(system_audio=False)
+    recorder.start()
+    try:
+        input()  # block until user presses Enter
+    except (EOFError, KeyboardInterrupt):
+        click.echo("")  # clean newline after Ctrl-D / Ctrl-C
+    audio_path = recorder.stop()
+    if not audio_path:
+        click.echo("No audio captured.", err=True)
+        return
+
+    try:
+        segments = transcriber.transcribe(audio_path)
+    except Exception as e:
+        click.echo(f"Transcription failed: {e}", err=True)
+        return
+    # Build plain text from segments.
+    text = " ".join(str(seg.get("text") or "").strip() for seg in segments if seg.get("text"))
+    # Strip filler words — they don't help training.
+    from trnscrb import storage as s
+
+    text = s.clean_filler_words(text)
+    text = text.strip()
+    if not text:
+        click.echo("No speech detected.", err=True)
+        return
+    # Merge into glossary: canonical term + ASR transcription as alias.
+    entries = g.add_terms([{"term": term, "aliases": [text]}])
+    click.echo(f"Trained '{term}' ← ``{text}``. Glossary now has {len(entries)} term(s).")

@@ -26,6 +26,31 @@ _DEFAULT_PROP_DECREASE = 0.5
 # gate can misbehave on a handful of frames.
 _MIN_AUDIO_SECS = 0.2
 
+# ── VAD gating (v2) ───────────────────────────────────────────────────────────
+# Only denoise audio segments that actually contain speech — silence or
+# near-silence doesn't benefit from spectral gating and applying it wastes
+# CPU.  This uses a lightweight RMS-based voice-activity detector.
+
+
+def _has_speech(y, sr, threshold_db=-35):  # noqa: D401
+    """Quick RMS-based check: is the audio mostly above *threshold_db* dB?"""
+    if len(y) == 0:
+        return False
+    try:
+        import numpy as np
+    except ImportError:
+        return True  # no numpy — assume speech to be safe
+    rms = np.sqrt(np.mean(np.asarray(y, dtype=np.float32) ** 2))
+    db = 20 * np.log10(rms + 1e-12)
+    return db >= threshold_db
+
+
+# ── learned-denoiser swap-in point (v2) ──────────────────────────────────────
+# The ``reduce_noise_wav`` function is the canonical denoise entry point.
+# To add a learned model (DeepFilterNet-class, RNNoise, etc.) replace the
+# body of ``reduce_noise_wav`` — everything in ``preprocess`` and
+# ``transcriber._denoise_audio`` will continue to work unchanged.
+
 
 def available() -> bool:
     """True when the noisereduce engine is importable."""
@@ -121,6 +146,21 @@ def preprocess(audio_path: Path) -> tuple[Path, Path | None]:
     except Exception as e:
         _log.warning("Skipping noise filter for %s (%s)", path, e)
         return path, None
+
+    # ── VAD gating (v2): skip denoise for near-silent audio. ─────────────
+    try:
+        import numpy as np
+        import soundfile as sf
+
+        data, sr = sf.read(str(path), dtype="float32")
+        if data.ndim == 2:
+            data = np.mean(data, axis=1)
+        if not _has_speech(data, sr):
+            _log.debug("Skipping denoise — no speech detected in %s", path.name)
+            return path, None
+    except Exception:
+        # VAD failed — proceed with denoise anyway (safe default).
+        pass
 
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", prefix="trnscrb-denoised-", delete=False)
     tmp_path = Path(tmp.name)

@@ -62,6 +62,10 @@ _DEFAULTS: dict = {
     # no-op (silently) unless the `claude` CLI or a configured provider is
     # reachable, so it never nags users without an LLM.
     "auto_enrich": True,
+    # Draft a clean version of a brain-dump note after transcription. Off by
+    # default — a brain-dump is the user's raw thought stream and should only be
+    # rewritten when they explicitly ask for it (``trnscrb dictation draft``).
+    "auto_enrich_dictation": False,
     "auto_integrate": False,  # push transcripts into notes via the Claude Code CLI
     # Prompt for note integration. {transcript_path} is the saved transcript;
     # {notes_dir} is the vault (or notes folder) the agent runs inside.

@@ -83,6 +83,31 @@ def add_terms(entries: list) -> list[dict]:
     return current
 
 
+def train_term(term: str, heard: str | None = None) -> list[dict]:
+    """Learn a term from a spoken sample.
+
+    ``term`` is the canonical spelling. ``heard`` is what the ASR heard when
+    the user said it (the mis-transcription) and is stored as an alias, so
+    future transcriptions get corrected onto the canonical form.  Returns the
+    full updated glossary.
+
+    If ``heard`` is not provided the term is ensured in the glossary with no
+    alias — this reinforces it as a hotword.
+    """
+    term = str(term).strip()
+    if not term:
+        raise ValueError("empty term")
+    aliases: list[str] = []
+    if heard:
+        heard = str(heard).strip()
+        # Drop the heard form as an alias if it already matches the canonical.
+        if heard and heard.casefold() != term.casefold():
+            aliases.append(heard)
+    updated = add_terms([{"term": term, "aliases": aliases}])
+    _log.info("Trained term %s (aliases: %s)", term, aliases or "—")
+    return updated
+
+
 def remove_term(term: str) -> bool:
     """Drop a term (case-insensitive). Returns True if something was removed."""
     key = str(term).strip().casefold()

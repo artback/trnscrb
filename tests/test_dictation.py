@@ -14,6 +14,7 @@ from click.testing import CliRunner
 
 from trnscrb import cli, enricher, mcp_server, storage
 from trnscrb import dictation as d
+from trnscrb import glossary as g
 
 
 def _seg(start: float, end: float, text: str) -> dict:
@@ -179,8 +180,20 @@ class DictationEngineTest(unittest.TestCase):
         clip.assert_not_called()
 
     def test_refusing_reason_when_meeting_recording(self):
-        with mock.patch.object(d.storage, "get_live_session_info", return_value={"pid": 1}):
+        with (
+            mock.patch.object(d.storage, "get_live_session_info", return_value={"pid": 1}),
+            mock.patch.object(d.storage, "read_app_state", return_value={"state": "recording"}),
+        ):
             self.assertIn("meeting", d.refusing_reason().lower())
+
+    def test_refusing_reason_when_meeting_transcribing(self):
+        # Dictation should NOT be refused when a meeting is transcribing
+        # (the recorder has already released the mic).
+        with (
+            mock.patch.object(d.storage, "get_live_session_info", return_value={"pid": 1}),
+            mock.patch.object(d.storage, "read_app_state", return_value={"state": "transcribing"}),
+        ):
+            self.assertIsNone(d.refusing_reason())
 
     def test_refusing_reason_none_when_free(self):
         with mock.patch.object(d.storage, "get_live_session_info", return_value=None):
@@ -546,6 +559,135 @@ class DictationBackgroundChildTest(unittest.TestCase):
                 d.run_background("meeting")
         self.assertEqual(ctx.exception.code, 2)
         rec.assert_not_called()
+
+
+# ── command mode matching ─────────────────────────────────────────────────────
+
+
+class CommandMatcherTest(unittest.TestCase):
+    """Pure function: dictation.match_command(text) -> dict | None."""
+
+    def test_stop_meeting_exact(self):
+        result = d.match_command("stop the meeting")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "stop_meeting")
+
+    def test_end_meeting(self):
+        result = d.match_command("end meeting")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "stop_meeting")
+
+    def test_bookmark(self):
+        result = d.match_command("bookmark this")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "bookmark")
+
+    def test_stop_dictation(self):
+        result = d.match_command("stop dictation")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "stop_dictation")
+
+    def test_start_meeting(self):
+        result = d.match_command("start the meeting")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "start_meeting")
+
+    def test_no_match_returns_none(self):
+        result = d.match_command("hello world how are you")
+        self.assertIsNone(result)
+
+    def test_empty_returns_none(self):
+        result = d.match_command("")
+        self.assertIsNone(result)
+
+    def test_stop_meeting_with_filler(self):
+        result = d.match_command("stop the meeting please")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "stop_meeting")
+
+
+# ── voice-trained glossary ────────────────────────────────────────────────────
+
+
+class VoiceTrainedGlossaryTest(unittest.TestCase):
+    """glossary.train_term: learns a term from a spoken sample."""
+
+    def test_train_term_adds_canonical(self):
+        result = g.train_term("TestTerm")
+        self.assertIn("TestTerm", [e["term"] for e in result])
+
+    def test_train_term_adds_alias_when_different(self):
+        result = g.train_term("MyTerm", heard="my term")
+        entries = [e for e in result if e["term"] == "MyTerm"]
+        self.assertEqual(len(entries), 1)
+        self.assertIn("my term", entries[0]["aliases"])
+
+    def test_train_term_skips_alias_when_same(self):
+        result = g.train_term("Hivenet", heard="Hivenet")
+        entries = [e for e in result if e["term"] == "Hivenet"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["aliases"], [])
+
+    def test_train_term_merges_alias(self):
+        g.add_terms([{"term": "MyTerm", "aliases": ["variant1"]}])
+        result = g.train_term("MyTerm", heard="variant2")
+        entries = [e for e in result if e["term"] == "MyTerm"]
+        self.assertEqual(len(entries), 1)
+        self.assertIn("variant1", entries[0]["aliases"])
+        self.assertIn("variant2", entries[0]["aliases"])
+
+    def test_train_term_empty_raises(self):
+        with self.assertRaises(ValueError):
+            g.train_term("")
+
+
+# ── meeting-aware dictation ───────────────────────────────────────────────────
+
+
+class MeetingAwareDictationTest(unittest.TestCase):
+    """Meeting-aware dictation: per-meeting storage and injection."""
+
+    def test_get_meeting_context_when_none(self):
+        with mock.patch.object(d.storage, "get_live_session_info", return_value=None):
+            ctx = d.get_meeting_context()
+            self.assertIsNone(ctx)
+
+    def test_get_meeting_context_returns_info(self):
+        mock_info = {
+            "path": "/tmp/test.txt",
+            "meeting": "Team Standup",
+            "started_at": "2026-01-01T00:00:00",
+        }
+        with mock.patch.object(d.storage, "get_live_session_info", return_value=mock_info):
+            ctx = d.get_meeting_context()
+            self.assertIsNotNone(ctx)
+            self.assertEqual(ctx["meeting"], "Team Standup")
+
+    def test_meeting_slug(self):
+        self.assertEqual(d._meeting_slug("Team Standup"), "Team-Standup")
+        self.assertEqual(d._meeting_slug("Hello World!"), "Hello-World-")
+
+    def test_save_note_meeting_folder(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            notes_dir = Path(tmpdir) / "notes"
+            with mock.patch.object(d.storage, "NOTES_DIR", notes_dir):
+                segments = [_seg(0, 1, "hello")]
+                path, _ = d.save_note(
+                    "message", datetime.now(), segments, meeting_name="Team Meeting"
+                )
+                self.assertIsNotNone(path)
+                self.assertTrue(str(path).startswith(str(notes_dir / "Team-Meeting")))
+
+    def test_inject_into_meeting_transcript(self):
+        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
+            f.write(b"[Alice]\n  00:00  hello\n")
+            f.flush()
+            target = Path(f.name)
+        result = d.inject_into_meeting_transcript("dictated text", target)
+        self.assertTrue(result)
+        content = target.read_text(encoding="utf-8")
+        self.assertIn("[Dictation", content)
+        self.assertIn("dictated text", content)
 
 
 if __name__ == "__main__":
