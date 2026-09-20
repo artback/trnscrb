@@ -1799,6 +1799,22 @@ wheels = [
 ]
 
 [[package]]
+name = "noisereduce"
+version = "3.0.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "joblib" },
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "scipy" },
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/11/08/539e3cff148b7f9bde5b4b060451a7445d708fa3fe5d8a2bc0c552976e52/noisereduce-3.0.3.tar.gz", hash = "sha256:ff64a28fb92e3c81f153cf29550e5c2db56b2523afa8f56f5e03c177cc5e918f", size = 20968, upload-time = "2024-10-06T13:43:45.431Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ce/c5/fc00b3e8f86437039fb300ba41d5d683fdf0878d8782e827c2bad074eb59/noisereduce-3.0.3-py3-none-any.whl", hash = "sha256:95cb64cfe29b5fa0311ac764755d2f503ae71571040693577796412be1a54b9d", size = 22142, upload-time = "2024-10-06T13:43:43.886Z" },
+]
+
+[[package]]
 name = "numba"
 version = "0.64.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3764,6 +3780,7 @@ dependencies = [
     { name = "faster-whisper" },
     { name = "mcp" },
     { name = "mlx-qwen3-asr" },
+    { name = "noisereduce" },
     { name = "numba" },
     { name = "numpy" },
     { name = "openai" },
@@ -3788,6 +3805,7 @@ requires-dist = [
     { name = "faster-whisper", specifier = ">=1.0.0" },
     { name = "mcp", specifier = ">=2.0.0" },
     { name = "mlx-qwen3-asr", specifier = ">=0.3.5" },
+    { name = "noisereduce", specifier = ">=3.0.3" },
     { name = "numba", specifier = ">=0.61" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "openai", specifier = ">=2.24.0" },

@@ -357,8 +357,14 @@ def format_transcript(
     bookmarks: list[dict] | None = None,
     health: dict | None = None,
     ai_summary: str | None = None,
+    kind: str = "meeting",
 ) -> str:
     from trnscrb import analytics
+
+    # Dictation presets render raw: no readable_text pass, no speaker or
+    # analytics blocks — the speaker's exact phrasing is the product.
+    if kind != "meeting":
+        return _format_dictation(segments, started_at, kind)
 
     if segments:
         duration = _fmt_time(segments[-1]["end"])
@@ -594,6 +600,37 @@ def collapse_repeats(text: str) -> str:
 def readable_text(text: str) -> str:
     """Full readability pass: strip fillers, then collapse stutter repeats."""
     return collapse_repeats(clean_filler_words(text))
+
+
+# Dictation presets render with their own header and keep the speaker's
+# phrasing verbatim — no filler strip, no stutter collapse. The header is the
+# preset label rather than "Meeting:", because the date-prefixed filename
+# already carries `message-<HHMM>` / `brain-dump-<HHMM>`.
+_DICTATION_LABELS = {"message": "Message", "brain-dump": "Brain dump"}
+
+
+def _format_dictation(segments: list[dict], started_at: datetime, kind: str) -> str:
+    """Raw dictation formatting: minimal header, then the unedited text.
+
+    Each spoken segment is its own line, untouched by the readability pass —
+    a dictated message or brain dump is the user's own phrasing, and nothing
+    here gets to rewrite it.
+    """
+    duration = _fmt_time(segments[-1]["end"]) if segments else "00:00"
+    label = _DICTATION_LABELS.get(kind) or kind.replace("-", " ").title()
+    lines = [
+        label,
+        f"Date:    {started_at.strftime('%Y-%m-%d %H:%M')}",
+        f"Duration: {duration}",
+        "",
+        _SEPARATOR,
+        "",
+    ]
+    for seg in segments:
+        text = str(seg.get("text") or "").strip()
+        if text:
+            lines.append(text)
+    return "\n".join(lines)
 
 
 def _fmt_time(seconds: float) -> str:

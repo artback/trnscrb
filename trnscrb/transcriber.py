@@ -570,15 +570,45 @@ def transcribe(audio_path: Path) -> list[dict]:
     if file_size == 0:
         raise FileNotFoundError(f"Audio file is empty: {audio_path}")
 
-    backend = _backend()
-    with _transcribe_lock:
-        segments = _inference_executor.submit(_transcribe_on_worker, audio_path, backend).result()
-        # Hand back the GPU buffers this pass allocated; the models themselves
-        # stay loaded (they are released by unload_models when idle).
-        _inference_executor.submit(trim_mlx_cache).result()
-    _apply_glossary(segments)
-    _log.info("Transcription complete: %d segments", len(segments))
-    return segments
+    temp_denoised: Path | None = None
+    try:
+        # Optional noise filter (denoise setting). Runs before the backend so
+        # every decoder — meetings and dictation alike — sees cleaner audio.
+        if bool(settings.get("denoise")):
+            audio_path, temp_denoised = _denoise_audio(audio_path)
+
+        backend = _backend()
+        with _transcribe_lock:
+            segments = _inference_executor.submit(
+                _transcribe_on_worker, audio_path, backend
+            ).result()
+            # Hand back the GPU buffers this pass allocated; the models themselves
+            # stay loaded (they are released by unload_models when idle).
+            _inference_executor.submit(trim_mlx_cache).result()
+        _apply_glossary(segments)
+        _log.info("Transcription complete: %d segments", len(segments))
+        return segments
+    finally:
+        if temp_denoised is not None:
+            try:
+                temp_denoised.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _denoise_audio(audio_path: Path) -> tuple[Path, Path | None]:
+    """Route audio through the noise filter; returns (path, tmp_to_delete).
+
+    The returned ``tmp_to_delete`` is the denoised copy the caller must unlink
+    once transcription is done. When nothing was produced the original path is
+    returned unchanged and there is nothing to clean up.
+    """
+    from trnscrb import denoise
+
+    cleaned, tmp = denoise.preprocess(audio_path)
+    if tmp is not None:
+        _log.info("Noise filter applied — transcribing denoised copy %s", tmp)
+    return cleaned or audio_path, tmp
 
 
 def _apply_glossary(segments: list[dict]) -> None:

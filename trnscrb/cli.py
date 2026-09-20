@@ -8,6 +8,8 @@ trnscrb show <id> — print a transcript
 trnscrb enrich <id> — run LLM enrichment pass on a transcript
 trnscrb watch     — headless auto-record watcher
 trnscrb devices   — list audio input devices
+trnscrb dictation — speak a short note: to the clipboard (message) or as a
+                    brain-dump note, optionally drafted by an LLM afterwards
 """
 
 import importlib.util
@@ -1394,6 +1396,19 @@ def status():
     _row("Auto-transcribe", bool(settings.get("auto_record")), "")
     backend = str(settings.get("transcription_backend") or "auto")
     click.echo(f"  Backend: {backend}")
+    if settings.get("denoise"):
+        from trnscrb import denoise as _denoise
+
+        if _denoise.available():
+            _row("Noise filter", True, "on (denoise local audio)")
+        else:
+            _row(
+                "Noise filter",
+                False,
+                "on but noisereduce missing — run `uv add noisereduce`",
+            )
+    else:
+        click.echo("  Noise filter: off  (on: `trnscrb config set denoise true`)")
     click.echo()
 
     binary = _sh.which("trnscrb") or sys.executable
@@ -1850,6 +1865,233 @@ def devices():
         return
     for d in devs:
         click.echo(f"  [{d['index']}] {d['name']}  {d['channels']}ch")
+
+
+# ── dictation ────────────────────────────────────────────────────────────────
+
+_DICTATION_PRESETS = ("message", "brain-dump")
+
+
+@cli.group()
+def dictation():
+    """Dictate short voice notes — to the clipboard, or as brain-dump notes.
+
+    message    verbatim dictation → clipboard + a `message-<HHMM>` note
+    brain-dump raw capture saved as a `brain-dump-<HHMM>` note, optionally
+               turned into a draft with `trnscrb dictation draft <id>`
+
+    No filler removal, no AI summary, no diarization — your phrasing stays
+    yours. Refuses to start while a meeting is recording.
+    """
+
+
+@dictation.command(name="record")
+@click.option(
+    "--preset",
+    type=click.Choice(_DICTATION_PRESETS),
+    default="message",
+    show_default=True,
+    help="message copies the spoken text to the clipboard (and saves a note).",
+)
+def dictation_record(preset):
+    """Record a dictation in the foreground; press Enter when you are done.
+
+    Ctrl+C cancels without saving (the captured audio is discarded).
+    """
+    from trnscrb import dictation as d
+
+    reason = d.refusing_reason()
+    if reason:
+        click.echo(reason, err=True)
+        sys.exit(1)
+
+    click.echo(
+        f"  🎙  {d.preset_label(preset)} — speak, then press Enter to finish (Ctrl+C cancels)."
+    )
+    recorder = d.new_recorder()
+    started_at = datetime.now()
+    cancelled = False
+    try:
+        click.pause(info="")
+    except (KeyboardInterrupt, click.Abort):
+        click.echo("\n  ⏹  Recording stopped early.")
+        cancelled = True
+    audio_path = recorder.stop()
+    if not audio_path:
+        click.echo("  No audio captured.", err=True)
+        sys.exit(1)
+    if cancelled:
+        audio_path.unlink(missing_ok=True)
+        sys.exit(0)
+
+    click.echo("  Transcribing…")
+    try:
+        result = d.finish(preset, started_at, audio_path)
+    except Exception as e:
+        click.echo(f"  Dictation failed: {e}", err=True)
+        sys.exit(1)
+    _print_dictation_result(result)
+
+
+@dictation.command(name="start")
+@click.option(
+    "--preset",
+    type=click.Choice(_DICTATION_PRESETS),
+    default="message",
+    show_default=True,
+)
+def dictation_start(preset):
+    """Start a background dictation; finish it with `trnscrb dictation stop`.
+
+    Runs detached, so you can start it from one terminal — or later bind the
+    two commands to keyboard shortcuts without any extra plumbing.
+    """
+    from trnscrb import dictation as d
+
+    reason = d.refusing_reason()
+    if reason:
+        click.echo(reason, err=True)
+        sys.exit(1)
+    pid = d.running_pid()
+    if pid:
+        click.echo(f"A dictation is already running (pid {pid}). Stop it first.", err=True)
+        sys.exit(1)
+
+    # A previous run's result must not be mistaken for this one's.
+    d.clear_result()
+
+    child_cmd = [sys.executable, "-m", "trnscrb.dictation", preset]
+    try:
+        subprocess.Popen(
+            child_cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as e:
+        click.echo(f"Could not start the dictation process: {e}", err=True)
+        sys.exit(1)
+
+    pid = d.wait_for_pid(timeout=5.0)
+    if not pid:
+        click.echo("The dictation process did not start.", err=True)
+        sys.exit(1)
+    click.echo(
+        f"  🎙  {d.preset_label(preset)} recording (pid {pid}). "
+        "Finish it with `trnscrb dictation stop`."
+    )
+
+
+@dictation.command(name="stop")
+def dictation_stop():
+    """Stop the running dictation and produce its note / clipboard text."""
+    import os
+    import signal as _signal
+
+    from trnscrb import dictation as d
+
+    pid = d.running_pid()
+    if not pid:
+        click.echo("No dictation is running.", err=True)
+        sys.exit(1)
+    try:
+        os.kill(pid, _signal.SIGUSR1)
+    except OSError as e:
+        click.echo(f"Could not signal the dictation process: {e}", err=True)
+        sys.exit(1)
+
+    click.echo("  Finishing dictation…")
+    result = d.wait_for_stop(timeout=180.0)
+    if result is None:
+        click.echo(
+            "  Still transcribing — check again with `trnscrb dictation status`.",
+            err=True,
+        )
+        sys.exit(1)
+    _print_dictation_result(result)
+
+
+@dictation.command(name="status")
+def dictation_status():
+    """Show whether a background dictation is running and its last result."""
+    from trnscrb import dictation as d
+
+    pid = d.running_pid()
+    if pid:
+        click.echo(f"Dictation running (pid {pid}).")
+    else:
+        click.echo("No dictation running.")
+    result = d.read_result()
+    if not result:
+        return
+    if result.get("error"):
+        click.echo(f"Last result: {result['error']}")
+        return
+    path = result.get("path")
+    if not path:
+        click.echo("Last result: nothing was said.")
+        return
+    clip = "on clipboard" if result.get("on_clipboard") else "not on clipboard"
+    click.echo(f"Last result: {Path(path).name} ({clip})")
+
+
+@dictation.command(name="draft")
+@click.argument("transcript_id")
+def dictation_draft(transcript_id):
+    """Run the LLM draft pass on a saved dictation note.
+
+    The note id can be a full filename stem or a short suffix such as
+    `message-0941` / `brain-dump-0941`. Uses the prompt at
+    ~/.config/trnscrb/prompts/draft.md when present, else a built-in default.
+    """
+    from trnscrb import dictation as d
+    from trnscrb.enricher import (
+        draft_dictation,
+        get_active_provider_config,
+        provider_label,
+    )
+
+    path = d.resolve_note(transcript_id)
+    if path is None:
+        click.echo(f"No dictation note matching '{transcript_id}' found.", err=True)
+        sys.exit(1)
+    note = d.note_body(path.read_text(encoding="utf-8"))
+    if not note:
+        click.echo(f"'{path.name}' has no spoken content.", err=True)
+        sys.exit(1)
+
+    provider, profile = get_active_provider_config()
+    model_name = str(profile.get("model") or "<not selected>")
+    click.echo(f"  Drafting with {provider_label(provider)} ({model_name})…")
+    try:
+        result = draft_dictation(note)
+    except Exception as e:
+        click.echo(f"  Draft failed: {e}", err=True)
+        sys.exit(1)
+    click.echo("")
+    click.echo(result["draft"])
+    click.echo(f"\n  ✓ Draft ready — from {path.name} ({provider_label(provider)})")
+
+
+def _print_dictation_result(result: dict) -> None:
+    if result.get("error"):
+        click.echo(f"  ✗ {result['error']}", err=True)
+        sys.exit(1)
+    preset = result.get("preset") or "message"
+    path = result.get("path")
+    if not path:
+        click.echo("  Nothing was said.")
+        return
+    click.echo(f"  ✓ Saved → ~/meeting-notes/{Path(path).name}")
+    if preset == "message":
+        if result.get("on_clipboard"):
+            click.echo("  📋 Copied to the clipboard (verbatim).")
+        else:
+            click.echo("  ⚠  Clipboard copy failed — the text is in the saved note.")
+    plain = result.get("plain") or ""
+    if plain:
+        click.echo("")
+        click.echo(plain)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

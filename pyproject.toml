@@ -54,6 +54,7 @@ dependencies = [
     "pyobjc-framework-CoreMedia>=10.3",
     "pyobjc-framework-Quartz>=10.3",
     "pyobjc-framework-libdispatch>=10.3",
+    "noisereduce>=3.0.3",
 ]
 
 [project.urls]

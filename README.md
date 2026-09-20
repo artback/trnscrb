@@ -214,6 +214,7 @@ Settings worth knowing about beyond the ones covered above:
 | `voice_match_threshold` / `voice_match_margin` | `0.75` / `0.10` | How confidently two recordings must match to be treated as the same person — tuned to favor two identities for one person over merging two people into one |
 | `mlx_cache_limit_mb` | `512` | Cap on MLX's GPU buffer cache; `0` disables the cap |
 | `user_name` | *(macOS username)* | Your display name in meetings, used to tell which action items are yours |
+| `denoise` | `false` | Run a local spectral-gating noise filter (noisereduce) over the audio before transcription — helps dictation and meetings in fan/AC/traffic-heavy rooms, at the cost of extra pre-processing time |
 
 ---
 
@@ -246,6 +247,13 @@ trnscrb config list|get|set        # inspect/change settings
 
 trnscrb mic-status       # live mic activity monitor
 trnscrb devices          # list audio input devices
+
+trnscrb dictation record              # speak a note into the mic (press Enter to finish)
+trnscrb dictation start               # background dictation; finish with `dictation stop`
+trnscrb dictation stop                # finish a background dictation (transcribe + copy)
+trnscrb dictation status              # is a dictation running? what did the last one say?
+trnscrb dictation draft <id>          # LLM draft pass over a brain-dump note
+
 trnscrb status           # health check across recording, diarization, MCP, etc.
 trnscrb doctor           # run the speaker-labelling stack end to end
 trnscrb icons            # regenerate menu bar icons (run once after install)
@@ -264,6 +272,34 @@ When diarization fails, the recording is kept instead of deleted, so the speaker
 ### If the app keeps restarting
 
 launchd restarts a failing job every 10 seconds and never gives up, so anything that kills trnscrb during startup turns into a silent loop. The app counts its own starts: five inside two minutes and it stops instead, exits cleanly so launchd leaves it alone, and records why. `trnscrb status` then shows an **App startup** row, and the log names the exit status — `128 + signal`, so 138 is SIGBUS and 137 is a kill. Start it again with `trnscrb start` once the cause is fixed; the guard resets itself.
+
+---
+
+## Dictation
+
+Short voice notes, kept exactly as you spoke them — no filler removal, no AI summary, no speaker labels. Two presets:
+
+| Preset | On stop |
+|--------|---------|
+| `message` | Verbatim text copied to the clipboard (pbcopy) and saved as `message-<HHMM>.txt` |
+| `brain-dump` | Raw text saved as `brain-dump-<HHMM>.txt`; optionally drafted later |
+
+```bash
+trnscrb dictation record               # foreground: speak, press Enter to finish
+trnscrb dictation start                # background dictation (runs detached)
+trnscrb dictation stop                 # finish it — transcribes and copies
+trnscrb dictation status               # running? last result?
+trnscrb dictation draft brain-dump-1035   # LLM pass over a saved note
+```
+
+Notes are saved as `message-<HHMM>.txt` / `brain-dump-<HHMM>.txt` in the same
+folder as your transcripts (`~/meeting-notes` unless [Configuration](#configuration)
+changes it). `message` also copies the verbatim text to the clipboard when you
+stop.
+
+Dictation only uses the microphone (no system audio), matches your glossary terms, and refuses to start — with a warning notification — while a meeting is recording. From the menu bar: **Dictation ▸ Message to Clipboard / Brain Dump / Stop Dictation**. The draft pass reads the prompt template at `~/.config/trnscrb/prompts/draft.md` when present (see [Configuration](#configuration)).
+
+Dictating from a noisy room (fan, traffic, café)? Both dictation and meetings share the same transcription pipeline, so a single toggle cleans the audio first: `trnscrb config set denoise true`. It runs a fully local noise filter (noisereduce spectral gating) before the model decodes, which helps most in steady background hiss — at the cost of extra pre-processing time. Off by default.
 
 ---
 
@@ -286,6 +322,8 @@ After `trnscrb install`, OpenCode has these tools:
 | `get_weekly_summaries` | All weekly summaries for a year |
 | `get_calendar_context` | Current/upcoming calendar event |
 | `enrich_transcript` | Summary + action items via LLM |
+| `start_dictation` | Start a mic-only dictation (`message` or `brain-dump`) |
+| `stop_dictation` | Stop it; transcribe, save, and copy a message to the clipboard |
 | `list_glossary` | Show all glossary terms |
 | `add_glossary_terms` | Add custom vocabulary terms |
 | `add_glossary_correction` | Add a mis-heard → correct spelling pair |

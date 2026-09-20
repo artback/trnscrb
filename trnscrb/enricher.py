@@ -605,6 +605,46 @@ def generate_annual_summary(
     return adapter.enrich(prompt, config)
 
 
+_DEFAULT_DRAFT_PROMPT = """You are turning a raw dictation into a clear draft the user can paste.
+
+The dictation below is the user's unedited speech — their phrasing, fillers,
+and asides included. Rewrite it into a clean, well-structured draft.
+
+Rules:
+- Keep the user's voice, intent, and every substantive point.
+- Fix only what an editor would: drop hesitation fillers, tighten repeats and
+  run-ons, group related points, add light structure where it helps.
+- Do not invent facts, change the meaning, or add content the dictation does
+  not imply.
+
+DICTATION:
+{dictation}
+
+DRAFT:
+"""
+
+
+def draft_dictation(
+    dictation_text: str,
+    model: str | None = None,
+    provider: str | None = None,
+) -> dict:
+    """Draft pass over a raw dictation note via the configured LLM.
+
+    The prompt comes from ~/.config/trnscrb/prompts/draft.md when present,
+    else the built-in default. Returns {"draft", "provider", "model"}.
+    """
+    active_provider, config, adapter = _prepare_adapter(provider, model)
+    template = _load_prompt("draft", _DEFAULT_DRAFT_PROMPT)
+    prompt = template.format(dictation=dictation_text)
+    _log.info("Drafting dictation with provider=%s model=%s", active_provider, config["model"])
+    return {
+        "draft": adapter.enrich(prompt, config).strip(),
+        "provider": active_provider,
+        "model": config["model"],
+    }
+
+
 def _prepare_adapter(
     provider: str | None = None,
     model: str | None = None,

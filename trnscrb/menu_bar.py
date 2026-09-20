@@ -194,6 +194,16 @@ class TrnscrbApp(rumps.App):
 
         self._open_latest_item = rumps.MenuItem("Open Latest", callback=self.open_latest)
         self._bookmark_item = rumps.MenuItem("Bookmark This Moment", callback=self.add_bookmark)
+        self._dictation_menu = rumps.MenuItem("Dictation")
+        self._dict_message_item = rumps.MenuItem(
+            "Message to Clipboard", callback=self.start_dictation_message
+        )
+        self._dict_brain_item = rumps.MenuItem("Brain Dump", callback=self.start_dictation_brain)
+        self._stop_dict_item = rumps.MenuItem("Stop Dictation", callback=None)
+        self._dictation_menu.add(self._dict_message_item)
+        self._dictation_menu.add(self._dict_brain_item)
+        self._dictation_menu.add(None)
+        self._dictation_menu.add(self._stop_dict_item)
         self._voices_item = rumps.MenuItem("Label Voices…", callback=self.label_voices)
         # Standing state, not a notification: a component that has been broken
         # all week should be readable from the menu at any moment, rather than
@@ -208,6 +218,7 @@ class TrnscrbApp(rumps.App):
             self._summary_item,
             self._integrate_item,
             self._bookmark_item,
+            self._dictation_menu,
             self._voices_item,
             self._open_latest_item,
             self._health_item,
@@ -227,6 +238,12 @@ class TrnscrbApp(rumps.App):
         self._live_thread: threading.Thread | None = None
         self._meeting_name: str = ""
         self._calendar_event: dict | None = None  # captured at recording start
+
+        # Active dictation state. The recorder is the same field as a meeting's
+        # (_recorder) — the two are mutually exclusive, and sharing the field
+        # makes every is_recording guard refuse a second capture for free.
+        self._dict_preset: str | None = None  # "message" | "brain-dump" while dictating
+        self._dict_started_at: datetime | None = None
 
         self._set_state("idle")
         self._install_signal_handlers()
@@ -469,6 +486,113 @@ class TrnscrbApp(rumps.App):
             else:
                 msg = "Claude CLI not found — install it for integration to work"
             _notify("Trnscrb", "Auto-integrate on", msg)
+
+    # ── dictation ─────────────────────────────────────────────────────────────
+
+    def start_dictation_message(self, _):
+        self._start_dictation("message")
+
+    def start_dictation_brain(self, _):
+        self._start_dictation("brain-dump")
+
+    def _start_dictation(self, preset: str):
+        """Start a mic-only dictation, refusing loudly if a meeting runs.
+
+        A menu click that silently does nothing reads as a broken app, so every
+        refusal comes with a warning notification naming the blocker.
+        """
+        from trnscrb import dictation as d
+
+        if getattr(self, "_dict_preset", None):
+            _notify(
+                "Trnscrb",
+                f"{d.preset_label(preset)} refused",
+                "A dictation is already running — stop it first.",
+            )
+            return
+        if self._current_state == "recording":
+            _notify(
+                "Trnscrb",
+                f"{d.preset_label(preset)} refused",
+                "A meeting is recording. Stop the meeting first.",
+            )
+            return
+        if self._current_state == "transcribing":
+            _notify(
+                "Trnscrb",
+                f"{d.preset_label(preset)} refused",
+                "A meeting is still being transcribed — wait a moment.",
+            )
+            return
+
+        recorder = rec_module.Recorder(system_audio=False)
+        try:
+            recorder.start()
+        except Exception as e:
+            _notify("Trnscrb", "Dictation failed to start", str(e)[:180])
+            return
+
+        self._recorder = recorder
+        self._dict_preset = preset
+        self._dict_started_at = datetime.now()
+        self._set_state("dictating")
+        _notify(
+            "Trnscrb",
+            f"{d.preset_label(preset)} dictation started",
+            "Speak into the mic — choose Stop Dictation when you're done.",
+        )
+
+    def stop_dictation(self, _):
+        """Finish the active dictation: transcribe, save, copy (message)."""
+        preset = self._dict_preset
+        if not preset:
+            return
+        recorder = self._recorder
+        started_at = self._dict_started_at or datetime.now()
+        self._recorder = None
+        self._dict_preset = None
+        self._dict_started_at = None
+        self._set_state("transcribing")
+        self._process_thread = threading.Thread(
+            target=self._process_dictation,
+            args=(recorder, started_at, preset),
+            daemon=True,
+        )
+        self._process_thread.start()
+
+    def _process_dictation(self, recorder, started_at, preset):
+        """Background tail of a dictation: transcribe → save → clipboard."""
+        import trnscrb.dictation as d
+
+        try:
+            audio_path = recorder.stop()
+            if not audio_path:
+                _notify("Trnscrb", "Dictation", "No audio captured.")
+                return
+            try:
+                result = d.finish(preset, started_at, audio_path)
+            except Exception as e:
+                _log.error("Dictation transcription failed", exc_info=True)
+                _notify("Trnscrb", "Dictation failed", str(e)[:180])
+                return
+
+            if result.get("error"):
+                _notify("Trnscrb", "Dictation failed", result["error"][:180])
+                return
+            path = result.get("path")
+            if not path:
+                _notify("Trnscrb", d.preset_label(preset), "Nothing was said.")
+                return
+            msg = f"~/meeting-notes/{Path(path).name}"
+            if preset == "message":
+                msg += (
+                    " — copied to clipboard"
+                    if result.get("on_clipboard")
+                    else " — clipboard copy failed, see the note"
+                )
+            _notify("Trnscrb", f"{d.preset_label(preset)} saved", msg)
+        finally:
+            self._restore_idle()
 
     # ── enrichment settings ───────────────────────────────────────────────────
 
@@ -1024,6 +1148,13 @@ class TrnscrbApp(rumps.App):
             time.sleep(self._LIVE_INTERVAL)
 
     def _do_stop(self):
+        if getattr(self, "_dict_preset", None):
+            # The recorder belongs to a dictation, not a meeting (a SIGUSR1
+            # toggle can land mid-dictation). Stop Dictation is the only way
+            # out; treating this as a meeting stop would transcribe a few
+            # seconds of voice into a fake meeting file.
+            _log.warning("Ignored meeting stop while a dictation was active")
+            return
         with self._rec_lock:
             if not self._recorder or not self._recorder.is_recording:
                 return
@@ -1352,7 +1483,7 @@ class TrnscrbApp(rumps.App):
     # ── state / icon management ───────────────────────────────────────────────
 
     def _set_state(self, state: str):
-        """state: idle | watching | recording | transcribing"""
+        """state: idle | watching | recording | transcribing | dictating"""
         self._current_state = state
         if state in ("idle", "watching"):
             self._start_item.set_callback(self.start_recording)
@@ -1366,13 +1497,18 @@ class TrnscrbApp(rumps.App):
             self._start_item.set_callback(None)
             self._stop_item.title = "Transcribing…"
             self._stop_item.set_callback(None)
+        elif state == "dictating":
+            self._start_item.set_callback(None)
+            self._stop_item.title = "Stop Transcribing"
+            self._stop_item.set_callback(None)
 
+        self._stop_dict_item.set_callback(self.stop_dictation if state == "dictating" else None)
         self._set_icon_state(state)
 
     def _set_icon_state(self, state: str):
         rec_icon = icon_path(recording=True)
         idle_icon = icon_path(recording=False)
-        if state in ("recording", "transcribing"):
+        if state in ("recording", "transcribing", "dictating"):
             self.icon, self.title = (rec_icon, None) if rec_icon else (None, _EMOJI_RECORDING)
         else:
             self.icon, self.title = (idle_icon, None) if idle_icon else (None, _EMOJI_IDLE)
@@ -1380,8 +1516,10 @@ class TrnscrbApp(rumps.App):
 
     def _update_duration_title(self, _timer):
         """Show elapsed recording time next to the menu bar icon."""
-        if getattr(self, "_current_state", "idle") == "recording" and self._started_at:
-            secs = int((datetime.now() - self._started_at).total_seconds())
+        state = getattr(self, "_current_state", "idle")
+        started = self._dict_started_at if state == "dictating" else self._started_at
+        if state in ("recording", "dictating") and started:
+            secs = int((datetime.now() - started).total_seconds())
             if secs >= 3600:
                 elapsed = f"{secs // 3600}:{(secs % 3600) // 60:02d}:{secs % 60:02d}"
             else:
