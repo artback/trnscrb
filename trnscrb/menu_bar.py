@@ -247,6 +247,19 @@ class TrnscrbApp(rumps.App):
         # makes every is_recording guard refuse a second capture for free.
         self._dict_preset: str | None = None  # "message" | "brain-dump" while dictating
         self._dict_started_at: datetime | None = None
+        self._dict_save_note: bool = True  # dictations started with --no-save
+        # Live display + auto-stop for dictation: the HUD text buffer is
+        # written by a background thread and refreshed by the (main-thread)
+        # HUD timer; the silence watchdog sets _dict_stop_requested and the
+        # same timer acts on it, so all UI mutation stays on the main thread.
+        self._hud_window = None
+        self._hud_label = None
+        self._hud_shown_text = ""
+        self._dict_live_text = ""
+        self._dict_live_stop = threading.Event()
+        self._dict_stop_requested = False
+        self._hud_timer = rumps.Timer(self._update_hud, 0.5)
+        self._hud_timer.start()
 
         self._set_state("idle")
         self._install_signal_handlers()
@@ -530,12 +543,17 @@ class TrnscrbApp(rumps.App):
             "Say a command — choose Stop Dictation when you're done.",
         )
 
-    def _start_dictation(self, preset: str):
+    def _start_dictation(self, preset: str, save_note: bool = True):
         """Start a mic-only dictation, refusing loudly if a meeting runs.
 
         Dictation is refused only while a meeting is actively recording
         (mic contention).  During transcription the recorder has released
         the mic so dictation can safely run alongside a finishing meeting.
+
+        While dictating, two background extras run: live transcription
+        feeding the floating HUD (words appear as you speak) and the
+        silence watchdog (the dictation ends when you stop talking). Both
+        are display/UX only — Stop Dictation always works regardless.
         """
         from trnscrb import dictation as d
 
@@ -563,34 +581,76 @@ class TrnscrbApp(rumps.App):
 
         self._recorder = recorder
         self._dict_preset = preset
+        self._dict_save_note = save_note
         self._dict_started_at = datetime.now()
+        self._dict_live_text = ""
+        self._dict_live_stop.clear()
+        self._dict_stop_requested = False
+        self._show_dictation_hud()
         self._set_state("dictating")
-        _notify(
-            "Trnscrb",
-            f"{d.preset_label(preset)} dictation started",
-            "Speak into the mic — choose Stop Dictation when you're done.",
-        )
+
+        threading.Thread(target=self._dict_live_loop, args=(recorder,), daemon=True).start()
+        threading.Thread(target=self._dict_silence_loop, args=(recorder,), daemon=True).start()
+
+        if save_note:
+            subtitle = "Speak into the mic — it stops when you do, or choose Stop Dictation."
+        else:
+            subtitle = "Nothing will be saved — the text only lands in the focused app."
+        _notify("Trnscrb", f"{d.preset_label(preset)} dictation started", subtitle)
+
+    def _dict_live_loop(self, recorder):
+        """Background live transcription feeding the HUD. Display only."""
+        import trnscrb.dictation as d
+
+        try:
+            d.live_transcribe(recorder, self._dict_live_stop, on_text=self._on_live_text)
+        except Exception:
+            _log.warning("Dictation live display loop failed", exc_info=True)
+
+    def _on_live_text(self, text: str) -> None:
+        """Accumulate live chunks (background thread); the HUD timer displays."""
+        self._dict_live_text = f"{self._dict_live_text} {text}".strip()
+
+    def _dict_silence_loop(self, recorder):
+        """Background auto-stop: end the dictation when the speaker is done."""
+        import trnscrb.dictation as d
+
+        try:
+            d.silence_watchdog(recorder, self._dict_live_stop, on_stop=self._request_dict_stop)
+        except Exception:
+            _log.warning("Dictation silence watchdog failed", exc_info=True)
+
+    def _request_dict_stop(self) -> None:
+        """Watchdog hook (background thread): the main-thread timer acts on it."""
+        self._dict_stop_requested = True
 
     def stop_dictation(self, _):
-        """Finish the active dictation: transcribe, save, copy (message)."""
+        """Finish the active dictation: transcribe, save (unless no-save), paste."""
         preset = self._dict_preset
         if not preset:
             return
         recorder = self._recorder
         started_at = self._dict_started_at or datetime.now()
+        save_note = getattr(self, "_dict_save_note", True)
         self._recorder = None
         self._dict_preset = None
         self._dict_started_at = None
+        self._dict_live_stop.set()
+        self._dict_stop_requested = False
+        self._hide_dictation_hud()
         self._set_state("transcribing")
         self._process_thread = threading.Thread(
             target=self._process_dictation,
-            args=(recorder, started_at, preset),
+            args=(recorder, started_at, preset, save_note),
             daemon=True,
         )
         self._process_thread.start()
 
-    def _process_dictation(self, recorder, started_at, preset):
+    def _process_dictation(self, recorder, started_at, preset, save_note: bool = True):
         """Background tail of a dictation: transcribe → save → clipboard.
+
+        With ``save_note`` False nothing is written to disk or mirrored —
+        the text only reaches the clipboard / focused app.
 
         For ``"command"`` preset the transcript is matched against the command
         table and the matched action is executed (stop meeting, bookmark, etc.).
@@ -608,7 +668,13 @@ class TrnscrbApp(rumps.App):
                 _notify("Trnscrb", "Dictation", "No audio captured.")
                 return
             try:
-                result = d.finish(preset, started_at, audio_path, inject_meeting=inject_meeting)
+                result = d.finish(
+                    preset,
+                    started_at,
+                    audio_path,
+                    inject_meeting=inject_meeting,
+                    save_note=save_note,
+                )
             except Exception as e:
                 _log.error("Dictation transcription failed", exc_info=True)
                 _notify("Trnscrb", "Dictation failed", str(e)[:180])
@@ -617,45 +683,149 @@ class TrnscrbApp(rumps.App):
             if result.get("error"):
                 _notify("Trnscrb", "Dictation failed", result["error"][:180])
                 return
+            plain = result.get("plain", "")
             path = result.get("path")
-            if not path:
+
+            if preset == "command":
+                self._run_command(plain)
+                return
+
+            if not plain and not path:
                 _notify("Trnscrb", d.preset_label(preset), "Nothing was said.")
                 return
 
-            if preset == "command":
-                self._run_command(result.get("plain", ""))
-                return
-
-            msg = f"~/meeting-notes/{Path(path).name}"
-            if result.get("injected"):
-                msg += " — also appended to the meeting transcript"
             if preset == "message":
                 if result.get("pasted"):
-                    msg += f" — pasted into active app ({result.get('paste_detail', '')})"
+                    detail = f"pasted into active app ({result.get('paste_detail', '')})"
                 elif result.get("on_clipboard"):
-                    msg += " — copied to clipboard"
+                    detail = "copied to clipboard"
                 else:
-                    msg += " — clipboard copy failed, see the note"
-            _notify("Trnscrb", f"{d.preset_label(preset)} saved", msg)
+                    detail = "clipboard copy failed"
+            else:
+                detail = ""
 
-            # Auto-draft brain-dump notes when the setting is on.
-            enrich = settings.get("auto_enrich_dictation")
-            if preset == "brain-dump" and result.get("path") and enrich:
-                try:
-                    note_path = Path(result["path"])
-                    note_text = note_path.read_text(encoding="utf-8")
-                    body = d.note_body(note_text)
-                    if body:
-                        from trnscrb.enricher import draft_dictation
+            if path:
+                msg = f"~/meeting-notes/{Path(path).name}"
+                if result.get("injected"):
+                    msg += " — also appended to the meeting transcript"
+                if detail:
+                    msg += f" — {detail}"
+                _notify("Trnscrb", f"{d.preset_label(preset)} saved", msg)
 
-                        draft = draft_dictation(body)
-                        draft_path = note_path.parent / (note_path.stem + "-draft.txt")
-                        draft_path.write_text(draft["draft"], encoding="utf-8")
-                        _log.info("Auto-drafted brain-dump → %s", draft_path)
-                except Exception:
-                    _log.warning("Auto-enrich brain-dump failed", exc_info=True)
+                # Auto-draft brain-dump notes when the setting is on.
+                enrich = settings.get("auto_enrich_dictation")
+                if preset == "brain-dump" and enrich:
+                    try:
+                        note_path = Path(result["path"])
+                        note_text = note_path.read_text(encoding="utf-8")
+                        body = d.note_body(note_text)
+                        if body:
+                            from trnscrb.enricher import draft_dictation
+
+                            draft = draft_dictation(body)
+                            draft_path = note_path.parent / (note_path.stem + "-draft.txt")
+                            draft_path.write_text(draft["draft"], encoding="utf-8")
+                            _log.info("Auto-drafted brain-dump → %s", draft_path)
+                    except Exception:
+                        _log.warning("Auto-enrich brain-dump failed", exc_info=True)
+            else:
+                suffix = f" — {detail}" if detail else ""
+                _notify("Trnscrb", f"{d.preset_label(preset)} done, no note saved", suffix)
         finally:
             self._restore_idle()
+
+    # ── dictation HUD (floating live-transcription overlay) ──────────────────
+
+    def _show_dictation_hud(self) -> None:
+        """Create and show the floating live-transcription overlay.
+
+        A borderless floating window that shows words as you speak — the
+        "normal app" way to see a live dictation. Runs on the main thread
+        (menu clicks and the SIGUSR2 handler are both main-thread); when it
+        can't be created (headless, AppKit unavailable) the dictation simply
+        proceeds without it — the HUD is a convenience, never a requirement.
+        """
+        if self._hud_window is not None:
+            return
+        try:
+            import AppKit
+            from Foundation import NSMakeRect
+
+            width, height = 560.0, 96.0
+            screen = AppKit.NSScreen.mainScreen()
+            frame = screen.frame()
+            x = (frame.size.width - width) / 2.0
+            y = frame.origin.y + 150.0  # bottom-center, above the dock
+            window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+                NSMakeRect(x, y, width, height),
+                0,  # borderless
+                AppKit.NSWindowBackingBuffered,
+                False,
+            )
+            window.setLevel_(AppKit.NSStatusLevel)  # above normal windows
+            window.setIgnoresMouseEvents_(True)
+            window.setOpaque_(False)
+            window.setHasShadow_(True)
+            window.setHidesOnDeactivate_(False)
+            window.setBackgroundColor_(AppKit.NSColor.clearColor())
+            content = window.contentView()
+            content.setWantsLayer_(True)
+            content.layer().setCornerRadius_(16)
+            content.layer().setBackgroundColor_(
+                AppKit.NSColor.windowBackgroundColor().colorWithAlphaComponent_(0.92).CGColor()
+            )
+            label = AppKit.NSTextField.alloc().initWithFrame_(
+                NSMakeRect(18, 18, width - 36, height - 36)
+            )
+            label.setBordered_(False)
+            label.setBezelBorder_(False)
+            label.setEditable_(False)
+            label.setSelectable_(False)
+            label.setDrawsBackground_(False)
+            label.setWraps_(True)
+            label.setLineBreakMode_(AppKit.NSTextFieldLineBreakModeByWordWrapping)
+            label.cell().setWraps_(True)
+            label.setFont_(AppKit.NSFont.systemFontOfSize_(14))
+            label.setStringValue_("…")
+            content.addSubview_(label)
+            window.orderFrontRegardless()  # show without stealing focus
+            self._hud_window = window
+            self._hud_label = label
+            self._hud_shown_text = ""
+        except Exception:
+            _log.warning("Could not show the dictation HUD", exc_info=True)
+            self._hud_window = None
+
+    def _hide_dictation_hud(self) -> None:
+        if self._hud_window is not None:
+            try:
+                self._hud_window.orderOut_(None)
+            except Exception:
+                _log.debug("Could not hide the dictation HUD", exc_info=True)
+        self._hud_shown_text = ""
+
+    def _update_hud(self, _timer):
+        """Refresh the HUD and act on the auto-stop flag. Main thread only.
+
+        The live loop and the silence watchdog run in background threads;
+        this timer (rumps.Timer runs on the main thread) is where their
+        effects reach the UI — the HUD text and the actual stop call.
+        """
+        if self._current_state != "dictating":
+            if self._hud_window is not None:
+                self._hide_dictation_hud()
+            return
+        if self._dict_stop_requested:
+            self.stop_dictation(None)
+            return
+        if self._hud_window is None or not self._dict_live_text:
+            return
+        if self._dict_live_text != self._hud_shown_text:
+            self._hud_shown_text = self._dict_live_text
+            try:
+                self._hud_label.setStringValue_(self._dict_live_text)
+            except Exception:
+                _log.debug("Could not update the dictation HUD", exc_info=True)
 
     def _run_command(self, plain_text: str) -> None:
         """Match a dictation transcript against commands and execute the result."""
@@ -1131,21 +1301,24 @@ class TrnscrbApp(rumps.App):
     def _on_dictation_signal(self) -> None:
         """Handle a SIGUSR2 dictation request.
 
-        Reads the preset from the request file, then toggles dictation:
-        if a dictation is active, stop it; otherwise start with the preset.
-        Falls back to ``"message"`` when no request file is found.
+        Reads the preset (and whether to save) from the request file, then
+        toggles dictation: if a dictation is active, stop it; otherwise
+        start with the preset. Falls back to ``"message"`` (saving) when
+        no request file is found.
         """
         from trnscrb import dictation as d
 
-        preset = d.read_start_request() or "message"
+        request = d.read_start_request()
+        preset = request["preset"] if request else "message"
+        save_note = request["save_note"] if request else True
         try:
             if getattr(self, "_dict_preset", None):
                 # A dictation is running → stop it (toggle-off).
                 _log.info("SIGUSR2 dictation: stopping active dictation")
                 self.stop_dictation(None)
             else:
-                _log.info("SIGUSR2 dictation: starting %s", preset)
-                self._start_dictation(preset)
+                _log.info("SIGUSR2 dictation: starting %s (save_note=%s)", preset, save_note)
+                self._start_dictation(preset, save_note)
                 d.clear_start_request()
         except Exception:
             _log.warning("Dictation signal handler failed", exc_info=True)
