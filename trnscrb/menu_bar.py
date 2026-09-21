@@ -43,6 +43,12 @@ _log = get_logger("trnscrb.menu_bar")
 _EMOJI_IDLE = "🎙"
 _EMOJI_RECORDING = "🔴"
 
+# Dictation HUD: the window is a fixed 560×96 pill, so only show this much
+# live text (the tail of it) — a 3-minute dictation would otherwise overflow.
+_HUD_MAX_CHARS = 300
+_HUD_LISTENING = "Listening…"
+_HUD_PAUSED = "Live updates paused on battery — full transcript when it stops"
+
 
 def _notify(title: str, subtitle: str, message: str) -> None:
     """Best-effort notification; some non-bundle launches lack Info.plist metadata."""
@@ -199,14 +205,20 @@ class TrnscrbApp(rumps.App):
             "Message to Clipboard", callback=self.start_dictation_message
         )
         self._dict_brain_item = rumps.MenuItem("Brain Dump", callback=self.start_dictation_brain)
+        self._dict_autostop_item = rumps.MenuItem(
+            "Auto-stop on silence: On ✓", callback=self.toggle_dictation_auto_stop
+        )
         self._stop_dict_item = rumps.MenuItem("Stop Dictation", callback=None)
         self._dict_command_item = rumps.MenuItem("Command")
         self._dictation_menu.add(self._dict_message_item)
         self._dictation_menu.add(self._dict_brain_item)
+        self._dictation_menu.add(self._dict_autostop_item)
         self._dictation_menu.add(None)
         self._dictation_menu.add(self._dict_command_item)
         self._dictation_menu.add(None)
         self._dictation_menu.add(self._stop_dict_item)
+        if not get_setting("dictation_auto_stop"):
+            self._dict_autostop_item.title = "Auto-stop on silence: Off"
         self._voices_item = rumps.MenuItem("Label Voices…", callback=self.label_voices)
         # Standing state, not a notification: a component that has been broken
         # all week should be readable from the menu at any moment, rather than
@@ -258,6 +270,7 @@ class TrnscrbApp(rumps.App):
         self._dict_live_text = ""
         self._dict_live_stop = threading.Event()
         self._dict_stop_requested = False
+        self._dict_live_paused = False  # True when live loop is paused (on battery)
         self._hud_timer = rumps.Timer(self._update_hud, 0.5)
         self._hud_timer.start()
 
@@ -466,6 +479,20 @@ class TrnscrbApp(rumps.App):
                 "Will start when mic is active for 5+ seconds",
             )
 
+    def toggle_dictation_auto_stop(self, sender):
+        if get_setting("dictation_auto_stop"):
+            put_setting("dictation_auto_stop", False)
+            sender.title = "Auto-stop on silence: Off"
+            _notify(
+                "Trnscrb",
+                "Dictation auto-stop off",
+                "Dictations now run until you choose Stop Dictation.",
+            )
+        else:
+            put_setting("dictation_auto_stop", True)
+            sender.title = "Auto-stop on silence: On ✓"
+            _notify("Trnscrb", "Dictation auto-stop on", "")
+
     def add_bookmark(self, _):
         """Mark the current moment so it can be found in the transcript."""
         offset = storage.add_bookmark()
@@ -586,6 +613,7 @@ class TrnscrbApp(rumps.App):
         self._dict_live_text = ""
         self._dict_live_stop.clear()
         self._dict_stop_requested = False
+        self._dict_live_paused = _on_battery() and not get_setting("live_on_battery")
         self._show_dictation_hud()
         self._set_state("dictating")
 
@@ -599,9 +627,16 @@ class TrnscrbApp(rumps.App):
         _notify("Trnscrb", f"{d.preset_label(preset)} dictation started", subtitle)
 
     def _dict_live_loop(self, recorder):
-        """Background live transcription feeding the HUD. Display only."""
+        """Background live transcription feeding the HUD. Display only.
+
+        Paused on battery unless ``live_on_battery`` is on (same policy as
+        meeting live transcription); the silence watchdog keeps running.
+        """
         import trnscrb.dictation as d
 
+        if _on_battery() and not get_setting("live_on_battery"):
+            _log.debug("Dictation live display paused (on battery)")
+            return
         try:
             d.live_transcribe(recorder, self._dict_live_stop, on_text=self._on_live_text)
         except Exception:
@@ -612,11 +647,26 @@ class TrnscrbApp(rumps.App):
         self._dict_live_text = f"{self._dict_live_text} {text}".strip()
 
     def _dict_silence_loop(self, recorder):
-        """Background auto-stop: end the dictation when the speaker is done."""
+        """Background auto-stop: end the dictation when the speaker is done.
+
+        Honors the ``dictation_auto_stop`` and ``dictation_auto_stop_silence_secs``
+        settings so the user can disable or tune the silence threshold from the
+        menu bar.
+        """
         import trnscrb.dictation as d
 
+        if not get_setting("dictation_auto_stop"):
+            return
         try:
-            d.silence_watchdog(recorder, self._dict_live_stop, on_stop=self._request_dict_stop)
+            silence_secs = float(
+                get_setting("dictation_auto_stop_silence_secs") or d._DICTATION_SILENCE_SECS
+            )
+            d.silence_watchdog(
+                recorder,
+                self._dict_live_stop,
+                on_stop=self._request_dict_stop,
+                silence_secs=silence_secs,
+            )
         except Exception:
             _log.warning("Dictation silence watchdog failed", exc_info=True)
 
@@ -729,7 +779,7 @@ class TrnscrbApp(rumps.App):
                     except Exception:
                         _log.warning("Auto-enrich brain-dump failed", exc_info=True)
             else:
-                suffix = f" — {detail}" if detail else ""
+                suffix = f" — {detail}" if detail else "Nothing was saved (no-save)."
                 _notify("Trnscrb", f"{d.preset_label(preset)} done, no note saved", suffix)
         finally:
             self._restore_idle()
@@ -786,7 +836,7 @@ class TrnscrbApp(rumps.App):
             label.setLineBreakMode_(AppKit.NSTextFieldLineBreakModeByWordWrapping)
             label.cell().setWraps_(True)
             label.setFont_(AppKit.NSFont.systemFontOfSize_(14))
-            label.setStringValue_("…")
+            label.setStringValue_(_HUD_LISTENING)
             content.addSubview_(label)
             window.orderFrontRegardless()  # show without stealing focus
             self._hud_window = window
@@ -818,12 +868,28 @@ class TrnscrbApp(rumps.App):
         if self._dict_stop_requested:
             self.stop_dictation(None)
             return
-        if self._hud_window is None or not self._dict_live_text:
+        if self._hud_window is None:
             return
-        if self._dict_live_text != self._hud_shown_text:
-            self._hud_shown_text = self._dict_live_text
+        # When live updates are paused (on battery), show the reason until
+        # the dictation stops — prevents the user from thinking the HUD froze.
+        if self._dict_live_paused and not self._dict_live_text:
+            if self._hud_shown_text != _HUD_PAUSED:
+                self._hud_shown_text = _HUD_PAUSED
+                try:
+                    self._hud_label.setStringValue_(_HUD_PAUSED)
+                except Exception:
+                    _log.debug("Could not update the dictation HUD", exc_info=True)
+            return
+        if not self._dict_live_text:
+            return
+        # Truncate long transcripts so they fit inside the fixed-width HUD.
+        text = self._dict_live_text
+        if len(text) > _HUD_MAX_CHARS:
+            text = "…" + text[-(_HUD_MAX_CHARS - 1) :]
+        if text != self._hud_shown_text:
+            self._hud_shown_text = text
             try:
-                self._hud_label.setStringValue_(self._dict_live_text)
+                self._hud_label.setStringValue_(text)
             except Exception:
                 _log.debug("Could not update the dictation HUD", exc_info=True)
 

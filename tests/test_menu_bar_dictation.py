@@ -24,6 +24,7 @@ def _app():
     app._dict_live_text = ""
     app._dict_live_stop = threading.Event()
     app._dict_stop_requested = False
+    app._dict_live_paused = False
     app._hud_window = None
     app._hud_label = None
     app._hud_shown_text = ""

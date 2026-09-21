@@ -281,7 +281,7 @@ Short voice notes, kept exactly as you spoke them — no filler removal, no AI s
 
 | Preset | On stop |
 |--------|---------|
-| `message` | Verbatim text copied to the clipboard (pbcopy) and saved as `message-<HHMM>.txt` |
+| `message` | Verbatim text copied to the clipboard (pbcopy), optionally pasted into the focused app, and saved as `message-<HHMM>.txt` |
 | `brain-dump` | Raw text saved as `brain-dump-<HHMM>.txt`; optionally drafted later |
 
 ```bash
@@ -290,14 +290,28 @@ trnscrb dictation start                # background dictation (runs detached)
 trnscrb dictation stop                 # finish it — transcribes and copies
 trnscrb dictation status               # running? last result?
 trnscrb dictation draft brain-dump-1035   # LLM pass over a saved note
+trnscrb dictate message --no-save      # voice note without saving anything
 ```
 
 Notes are saved as `message-<HHMM>.txt` / `brain-dump-<HHMM>.txt` in the same
 folder as your transcripts (`~/meeting-notes` unless [Configuration](#configuration)
 changes it). `message` also copies the verbatim text to the clipboard when you
-stop.
+stop, and when `paste_on_dictation` is on (the default) it pastes directly into
+the currently focused text field.
 
-Dictation only uses the microphone (no system audio), matches your glossary terms, and refuses to start — with a warning notification — while a meeting is recording. From the menu bar: **Dictation ▸ Message to Clipboard / Brain Dump / Stop Dictation**. The draft pass reads the prompt template at `~/.config/trnscrb/prompts/draft.md` when present (see [Configuration](#configuration)).
+`--no-save` skips writing a note file entirely: the text only reaches the
+clipboard (or is pasted). This is the "normal app" flow — focus a text box,
+invoke `trnscrb dictate message --no-save`, speak, and it disappears into your
+editor. The menu-bar app also honours `--no-save` via hotkeys.
+
+Dictation auto-stops when you stop talking (after ~1.5 s of silence, configurable
+via `dictation_auto_stop_silence_secs`; disable with `dictation_auto_stop off`).
+When a dictation is active you see a floating HUD that shows your words in
+real time — the same live loop that meets the meeting's transcription. The HUD
+is display-only; the saved note always comes from the full recording, so a live
+hiccup can never corrupt your words.
+
+Dictation only uses the microphone (no system audio), matches your glossary terms, and refuses to start — with a warning notification — while a meeting is recording. From the menu bar: **Dictation ▸ Message to Clipboard / Brain Dump / Auto-stop on silence / Command / Stop Dictation**. The draft pass reads the prompt template at `~/.config/trnscrb/prompts/draft.md` when present (see [Configuration](#configuration)).
 
 Dictating from a noisy room (fan, traffic, café)? Both dictation and meetings share the same transcription pipeline, so a single toggle cleans the audio first: `trnscrb config set denoise true`. It runs a fully local noise filter (noisereduce spectral gating) before the model decodes, which helps most in steady background hiss — at the cost of extra pre-processing time. Off by default.
 
@@ -322,7 +336,7 @@ After `trnscrb install`, OpenCode has these tools:
 | `get_weekly_summaries` | All weekly summaries for a year |
 | `get_calendar_context` | Current/upcoming calendar event |
 | `enrich_transcript` | Summary + action items via LLM |
-| `start_dictation` | Start a mic-only dictation (`message` or `brain-dump`) |
+| `start_dictation` | Start a mic-only dictation (`message` or `brain-dump`); auto-stops on silence; `save_note=False` skips the saved note |
 | `stop_dictation` | Stop it; transcribe, save, and copy a message to the clipboard |
 | `list_glossary` | Show all glossary terms |
 | `add_glossary_terms` | Add custom vocabulary terms |

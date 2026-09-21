@@ -352,6 +352,11 @@ def live_transcribe(
 _DICTATION_MIN_SECS = 3.0
 _DICTATION_SILENCE_SECS = 1.5
 _DICTATION_MAX_SECS = 180.0
+# _STALE_AUDIO_SECS — the mic stopped *delivering* audio (device swap, driver
+#      wedge), which is different from the user being quiet. Deliberately
+#      longer than the recorder's own ~3s stream-recovery window, so a
+#      transient device swap that recovers does not end a dictation.
+_STALE_AUDIO_SECS = 5.0
 
 # Energy thresholds on the recorder's per-block mic mean-square timeline
 # (one block every 1024 frames ≈ 64 ms at 16 kHz).
@@ -367,6 +372,7 @@ def silence_watchdog(
     min_secs: float = _DICTATION_MIN_SECS,
     silence_secs: float = _DICTATION_SILENCE_SECS,
     max_secs: float = _DICTATION_MAX_SECS,
+    stale_secs: float = _STALE_AUDIO_SECS,
 ) -> None:
     """End a dictation on its own when the speaker stops talking.
 
@@ -377,9 +383,16 @@ def silence_watchdog(
     Silence is detected adaptively: below the absolute floor, or a 20 dB drop
     from the loudest speech heard so far, so quiet speakers and loud rooms
     both work without per-user tuning.
+
+    A third stop path covers mic death: if the timeline stopped *growing*
+    (audio no longer arriving) for ``stale_secs`` after audio had been
+    flowing, the dictation is ended so a wedged mic cannot burn the whole
+    ``max_secs`` budget on dead audio.
     """
     start = time.monotonic()
     silent_since: float | None = None
+    stale_since: float | None = None
+    last_block_count = 0
     stopped = False
     blocks_per_sec = max(1, int(SAMPLE_RATE / 1024))
 
@@ -394,6 +407,23 @@ def silence_watchdog(
         if len(mic) == 0:
             continue
         now = time.monotonic()
+        if len(mic) > last_block_count:
+            last_block_count = len(mic)
+            stale_since = None
+        elif last_block_count > 0 and stale_secs > 0:
+            # Audio was flowing and then stopped arriving: the mic stream is
+            # wedged (or the device is gone). The recorder's own watchdog
+            # reopens a stalled stream after ~3s, so only treat it as a hard
+            # stall past that recovery window.
+            stale_since = stale_since or now
+            if now - stale_since >= stale_secs:
+                _log.warning(
+                    "Dictation auto-stopped: mic stopped delivering audio for %.0fs",
+                    stale_secs,
+                )
+                on_stop()
+                stopped = True
+                break
         elapsed = now - start
         if elapsed >= max_secs:
             _log.info("Dictation auto-stopped after %.0fs (max duration)", elapsed)
@@ -420,6 +450,32 @@ def silence_watchdog(
                 break
         else:
             silent_since = None
+
+
+def _start_dictation_watchdog(recorder: Recorder, stop_event: threading.Event) -> threading.Event:
+    """Start the settings-driven silence watchdog for a dictation.
+
+    ``stop_event`` is set when the watchdog decides the dictation has ended
+    (continuous silence, mic stall, or the max-duration cap). Returns an
+    event the caller must set when the dictation ends by other means (stop
+    button, SIGUSR1) so the watchdog thread can shut down. No-op when the
+    ``dictation_auto_stop`` setting is off.
+    """
+    watchdog_stop = threading.Event()
+    if not settings.get("dictation_auto_stop"):
+        watchdog_stop.set()
+        return watchdog_stop
+    silence_secs = float(
+        settings.get("dictation_auto_stop_silence_secs") or _DICTATION_SILENCE_SECS
+    )
+    threading.Thread(
+        target=silence_watchdog,
+        args=(recorder, watchdog_stop),
+        kwargs={"on_stop": stop_event.set, "silence_secs": silence_secs},
+        daemon=True,
+        name="dictation-silence-watchdog",
+    ).start()
+    return watchdog_stop
 
 
 def note_body(note: str) -> str:
@@ -600,8 +656,10 @@ def finish(
 ) -> dict:
     """Transcribe, save the note, and copy the text for a message preset.
 
-    The audio file is always cleaned up — the note and clipboard are the
-    product, and a few seconds of dictation is cheap to redo. When
+    The audio file is cleaned up after a successful transcription — the note
+    and clipboard are the product, and a few seconds of dictation is cheap to
+    redo. If the transcription itself fails, the audio is preserved in the
+    notes folder (like a failed meeting) rather than thrown away. When
     ``save_note`` is False no note file is written and nothing is mirrored
     into the Obsidian vault — the text only reaches the clipboard / pasted
     field. Returns:
@@ -612,7 +670,18 @@ def finish(
         segments = transcriber.transcribe(audio_path)
     except Exception as e:
         _log.error("Dictation transcription failed: %s", e, exc_info=True)
-        _cleanup_audio(audio_path)
+        # A transient model failure must not cost the user their words:
+        # preserve the audio the way a failed meeting does, then re-raise.
+        preserved = storage.preserve_audio(
+            audio_path,
+            f"dictation-{preset}",
+            started_at,
+            reason="Dictation transcription failed — audio preserved",
+        )
+        if preserved:
+            _log.error("Dictation audio preserved for retry: %s", preserved)
+        else:
+            _cleanup_audio(audio_path)
         raise
     _cleanup_audio(audio_path)
 
@@ -772,12 +841,14 @@ def wait_for_stop(timeout: float = 180.0) -> dict | None:
 
 
 def run_background(preset: str, save_note: bool = True) -> None:
-    """Child entry point: record until SIGUSR1, then finish and report.
+    """Child entry point: record until SIGUSR1 or the silence auto-stop, then finish and report.
 
     Launched detached by `trnscrb dictation start` as
     `python -m trnscrb.dictation <preset>`. stdout is /dev/null, so the
     outcome lands in dictation_result.json for `trnscrb dictation stop` to
-    read (and the app log carries any failure).
+    read (and the app log carries any failure). The silence auto-stop runs
+    in this child too (honoring the ``dictation_auto_stop`` settings), so
+    the flow is the same with or without the menu-bar app.
     """
     if not is_preset(preset):
         sys.exit(2)
@@ -793,10 +864,15 @@ def run_background(preset: str, save_note: bool = True) -> None:
 
     signal.signal(signal.SIGUSR1, _stop)
     signal.signal(signal.SIGINT, _stop)
+    # The child gets the same auto-stop as the menu-bar app: when the user
+    # stops talking the dictation finishes itself, so the fallback path
+    # (menu-bar app not running) is still the normal flow.
+    watchdog_stop = _start_dictation_watchdog(recorder, stop_event)
     try:
         while not stop_event.wait(1.0):
             pass
     finally:
+        watchdog_stop.set()
         remove_pid()
 
     _log.info("Dictation child finishing (preset=%s)", preset)

@@ -43,6 +43,12 @@ _state_lock = threading.Lock()
 # Preset of the active dictation ("message" | "brain-dump"), or None. Shares
 # _recorder with meetings — the two never overlap.
 _dictation_active: str | None = None
+# Whether the active dictation should save a note (set by start_dictation's
+# save_note param; defaults to True for backward compatibility).
+_dictation_save_note: bool = True
+# Events to stop the auto-stop watchdog and the dictation itself.
+_dictation_stop_event: threading.Event | None = None
+_dictation_watchdog_stop: threading.Event | None = None
 
 # Background processing state
 _processing = False  # True while transcription/diarization is running
@@ -112,6 +118,69 @@ def start_recording() -> str:
     )
 
 
+def _watch_dictation_stop() -> None:
+    """Wait for the auto-stop event, then finish the dictation."""
+    if _dictation_stop_event is None:
+        return
+    _dictation_stop_event.wait()
+    _finish_active_dictation("auto-stopped on silence")
+
+
+def _finish_active_dictation(reason: str = "manual stop") -> str | None:
+    """Run the dictation tail (stop recorder, transcribe, save/paste).
+
+    Shared by the explicit stop_dictation tool and the auto-stop thread.
+    Returns the user-facing result string, or None if no dictation was active.
+    """
+    global _recorder, _recording_started_at, _dictation_active, _dictation_save_note
+    global _dictation_watchdog_stop
+
+    with _state_lock:
+        if not _dictation_active or not _recorder or not _recorder.is_recording:
+            return None
+        preset = _dictation_active
+        save_note = _dictation_save_note
+        started_at = _recording_started_at or datetime.now()
+        recorder = _recorder
+        _recorder = None
+        _recording_started_at = None
+        _dictation_active = None
+        _dictation_save_note = True
+        if _dictation_watchdog_stop is not None:
+            _dictation_watchdog_stop.set()
+            _dictation_watchdog_stop = None
+    _log.info("dictation finishing (preset=%s, reason=%s)", preset, reason)
+    audio_path = None
+    try:
+        audio_path = recorder.stop()
+        if not audio_path:
+            return "Dictation stopped but no audio was captured."
+        result = dictation.finish(preset, started_at, audio_path, save_note=save_note)
+    except Exception as e:
+        _log.error("Dictation failed", exc_info=True)
+        return f"Dictation failed: {e}"
+    if result.get("error"):
+        return f"Dictation failed: {result['error']}"
+    path = result.get("path")
+    plain = result.get("plain", "")
+    if not plain and not path:
+        return "Nothing was said."
+    if not path:
+        return "Done — no note saved" + (
+            f" ({result.get('paste_detail', '')})" if result.get("paste_detail") else ""
+        )
+    lines = [f"Saved: {Path(path).name}"]
+    if preset == "message":
+        lines.append(
+            "Copied to clipboard (verbatim)."
+            if result.get("on_clipboard")
+            else "Clipboard copy failed — see the saved note."
+        )
+    if plain:
+        lines += ["", plain]
+    return "\n".join(lines)
+
+
 @mcp.tool()
 def stop_recording(meeting_name: str = "") -> str:
     """
@@ -161,20 +230,25 @@ def stop_recording(meeting_name: str = "") -> str:
 
 
 @mcp.tool()
-def start_dictation(preset: str = "message") -> str:
+def start_dictation(preset: str = "message", save_note: bool = True) -> str:
     """
     Start a mic-only dictation for a short voice note.
 
     Captures only the microphone — no system audio, no diarization, no
     enrichment. The transcript keeps your exact phrasing (filler words
     included). Refuses while any recording (meeting or dictation) is running.
+    Auto-stops on silence (honoring the ``dictation_auto_stop`` setting).
 
     Args:
         preset: "message" — verbatim text goes to the clipboard on stop, plus a
                 saved note; "brain-dump" — saved note only, can be drafted
                 later. Defaults to "message".
+        save_note: when True (default) a note file is written on stop; when
+                   False nothing is saved — the text only reaches the clipboard.
     """
-    global _recorder, _recording_started_at, _dictation_active
+    global _recorder, _recording_started_at, _dictation_active, _dictation_save_note
+    global _dictation_stop_event, _dictation_watchdog_stop
+
     if preset not in dictation.PRESETS:
         return f"Unknown preset '{preset}'. Use one of: {', '.join(dictation.PRESETS)}."
     with _state_lock:
@@ -186,9 +260,19 @@ def start_dictation(preset: str = "message") -> str:
         _recorder.start()
         _recording_started_at = datetime.now()
         _dictation_active = preset
-    _log.info("start_dictation: preset=%s", preset)
+        _dictation_save_note = save_note
+    _log.info("start_dictation: preset=%s, save_note=%s", preset, save_note)
+    # Start auto-stop watchdog (honors dictation_auto_stop setting).
+    _dictation_stop_event = threading.Event()
+    _dictation_watchdog_stop = dictation._start_dictation_watchdog(_recorder, _dictation_stop_event)
+    threading.Thread(
+        target=_watch_dictation_stop,
+        daemon=True,
+        name="mcp-dictation-watcher",
+    ).start()
     return (
         _stale_notice() + f"{dictation.preset_label(preset)} dictation started — "
+        f"{'saves a note' if save_note else 'no note saved'}; "
         "speak into the mic, then call stop_dictation."
     )
 
@@ -203,45 +287,8 @@ def stop_dictation() -> str:
     verbatim dictation. A "message" preset copies the text to the clipboard
     (pbcopy) as well as saving a note.
     """
-    global _recorder, _recording_started_at, _dictation_active
-    with _state_lock:
-        if not _dictation_active or not _recorder or not _recorder.is_recording:
-            return "No dictation is in progress."
-        preset = _dictation_active
-        started_at = _recording_started_at or datetime.now()
-        recorder = _recorder
-        _recorder = None
-        _recording_started_at = None
-        _dictation_active = None
-
-    _log.info("stop_dictation: preset=%s", preset)
-    audio_path = None
-    try:
-        audio_path = recorder.stop()
-        if not audio_path:
-            return "Dictation stopped but no audio was captured."
-        result = dictation.finish(preset, started_at, audio_path)
-    except Exception as e:
-        _log.error("Dictation failed", exc_info=True)
-        return f"Dictation failed: {e}"
-
-    if result.get("error"):
-        return f"Dictation failed: {result['error']}"
-    path = result.get("path")
-    if not path:
-        return "Nothing was said."
-
-    lines = [f"Saved: {Path(path).name}"]
-    if preset == "message":
-        lines.append(
-            "Copied to clipboard (verbatim)."
-            if result.get("on_clipboard")
-            else "Clipboard copy failed — see the saved note."
-        )
-    plain = result.get("plain") or ""
-    if plain:
-        lines += ["", plain]
-    return "\n".join(lines)
+    result = _finish_active_dictation("manual stop")
+    return result or "No dictation is in progress."
 
 
 @mcp.tool()
