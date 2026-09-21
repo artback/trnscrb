@@ -1873,8 +1873,15 @@ def devices():
 
 
 @cli.command()
+@click.option(
+    "--no-save",
+    is_flag=True,
+    default=False,
+    help="Do not save a note — the text only lands on the clipboard / active field "
+    "(fallback path only; the menu-bar app always saves).",
+)
 @click.argument("preset", type=click.Choice(("message", "brain-dump")))
-def dictate(preset):
+def dictate(preset, no_save):
     """Signal the menu-bar app to start a dictation of the given preset.
 
     Bind this to a hotkey (Shortcuts, Raycast, Skim) for quick access. Sends
@@ -1910,6 +1917,8 @@ def dictate(preset):
 
     d.clear_result()
     child_cmd = [sys.executable, "-m", "trnscrb.dictation", preset]
+    if no_save:
+        child_cmd.append("--no-save")
     try:
         subprocess.Popen(
             child_cmd,
@@ -1957,7 +1966,13 @@ def dictation():
     show_default=True,
     help="message copies the spoken text to the clipboard (and saves a note).",
 )
-def dictation_record(preset):
+@click.option(
+    "--no-save",
+    is_flag=True,
+    default=False,
+    help="Do not save a note — the text only lands on the clipboard / active field.",
+)
+def dictation_record(preset, no_save):
     """Record a dictation in the foreground; press Enter when you are done.
 
     Ctrl+C cancels without saving (the captured audio is discarded).
@@ -1991,7 +2006,7 @@ def dictation_record(preset):
 
     click.echo("  Transcribing…")
     try:
-        result = d.finish(preset, started_at, audio_path)
+        result = d.finish(preset, started_at, audio_path, save_note=not no_save)
     except Exception as e:
         click.echo(f"  Dictation failed: {e}", err=True)
         sys.exit(1)
@@ -2022,7 +2037,13 @@ def dictation_record(preset):
     default="message",
     show_default=True,
 )
-def dictation_start(preset):
+@click.option(
+    "--no-save",
+    is_flag=True,
+    default=False,
+    help="Do not save a note — the text only lands on the clipboard / active field.",
+)
+def dictation_start(preset, no_save):
     """Start a background dictation; finish it with `trnscrb dictation stop`.
 
     Runs detached, so you can start it from one terminal — or later bind the
@@ -2043,6 +2064,8 @@ def dictation_start(preset):
     d.clear_result()
 
     child_cmd = [sys.executable, "-m", "trnscrb.dictation", preset]
+    if no_save:
+        child_cmd.append("--no-save")
     try:
         subprocess.Popen(
             child_cmd,
@@ -2447,19 +2470,24 @@ def _print_dictation_result(result: dict) -> None:
         sys.exit(1)
     preset = result.get("preset") or "message"
     path = result.get("path")
-    if not path:
+    plain = result.get("plain") or ""
+    if not path and not plain:
         click.echo("  Nothing was said.")
         return
-    click.echo(f"  ✓ Saved → ~/meeting-notes/{Path(path).name}")
+    if path:
+        click.echo(f"  ✓ Saved → ~/meeting-notes/{Path(path).name}")
+    else:
+        click.echo("  ✓ No note saved (dictate-without-saving).")
     if preset == "message":
         if result.get("pasted"):
             detail = result.get("paste_detail", "")
             click.echo(f"  ✎ {detail} (verbatim).")
         elif result.get("on_clipboard"):
             click.echo("  📋 Copied to the clipboard (verbatim).")
-        else:
+        elif path:
             click.echo("  ⚠  Clipboard copy failed — the text is in the saved note.")
-    plain = result.get("plain") or ""
+        else:
+            click.echo("  ⚠  Clipboard copy failed — no note was saved either.")
     if plain:
         click.echo("")
         click.echo(plain)

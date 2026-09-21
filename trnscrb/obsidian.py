@@ -152,6 +152,42 @@ def mirror_transcript(
         return None
 
 
+def build_dictation_note(preset: str, started_at: datetime, text: str) -> str:
+    """A dictation note wrapped in the frontmatter Obsidian builds a graph from.
+
+    Same shape as meeting notes, typed ``dictation`` with the preset recorded,
+    so dictations and transcripts stay distinguishable in the vault.
+    """
+    lines = ["---", f"date: {started_at.strftime('%Y-%m-%d')}"]
+    lines.append(f"time: {_quote(started_at.strftime('%H:%M'))}")
+    lines.append(f"preset: {_quote(preset)}")
+    lines.append("tags:")
+    lines.append("  - dictation")
+    lines.append("---")
+    lines.append("")
+    return "\n".join(lines) + "\n" + text
+
+
+def mirror_dictation_note(preset: str, started_at: datetime, text: str) -> str | None:
+    """Write a dictation note as a vault note. Returns its note name for backlinks.
+
+    A no-op when no vault is configured — dictations mirror exactly like
+    meeting transcripts (there is no separate setting to forget).
+    """
+    directory = meetings_dir()
+    if not directory:
+        return None
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        name = note_name(f"{preset} {started_at.strftime('%H%M')}", started_at)
+        note = build_dictation_note(preset, started_at, text)
+        _atomic_write(directory / f"{name}.md", note)
+        return name
+    except OSError:
+        _log.warning("Could not mirror dictation into the Obsidian vault", exc_info=True)
+        return None
+
+
 def write_note(filename: str, text: str) -> Path | None:
     """Write an arbitrary note (e.g. the action-items index) into the vault."""
     directory = meetings_dir()

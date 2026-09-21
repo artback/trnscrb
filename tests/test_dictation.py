@@ -88,6 +88,8 @@ class DictationEngineTest(unittest.TestCase):
         patchers = [
             mock.patch.object(d, "_PID_FILE", self.pid_file),
             mock.patch.object(d, "_RESULT_FILE", self.result_file),
+            # Keep finish() tests from writing into a real Obsidian vault.
+            mock.patch.object(d, "_mirror_note", return_value=None),
         ]
         for p in patchers:
             p.start()
@@ -178,6 +180,54 @@ class DictationEngineTest(unittest.TestCase):
             result = d.finish("brain-dump", datetime(2026, 9, 20, 10, 5), wav)
         self.assertTrue(result["path"].endswith("brain-dump-1005.txt"))
         clip.assert_not_called()
+
+    def test_finish_no_save_copies_but_writes_no_note(self):
+        wav = self.tmp / "audio.wav"
+        wav.write_bytes(b"RIFF")
+        segs = [_seg(0.0, 3.0, "email the report by five")]
+        with (
+            mock.patch.object(d, "save_note", return_value=(None, "")) as save,
+            mock.patch.object(d, "copy_to_clipboard", return_value=True) as clip,
+            mock.patch.object(d.transcriber, "transcribe", return_value=segs),
+        ):
+            result = d.finish("message", datetime(2026, 9, 20, 9, 41), wav, save_note=False)
+        self.assertIsNone(result["path"])
+        self.assertEqual(result["plain"], "email the report by five")
+        self.assertTrue(result["on_clipboard"])
+        save.assert_not_called()
+        clip.assert_called_once_with("email the report by five")
+        self.assertFalse(wav.exists(), "audio cleaned up after finishing")
+
+    def test_finish_mirrors_dictation_note_when_saved(self):
+        wav = self.tmp / "audio.wav"
+        wav.write_bytes(b"RIFF")
+        segs = [_seg(0.0, 2.0, "draft the outline now")]
+        with (
+            mock.patch.object(d.transcriber, "transcribe", return_value=segs),
+            mock.patch.object(d, "copy_to_clipboard", return_value=True),
+            mock.patch.object(d, "_mirror_note") as mirror,
+        ):
+            result = d.finish("brain-dump", datetime(2026, 9, 20, 10, 5), wav)
+        self.assertTrue(result["path"].endswith("brain-dump-1005.txt"))
+        mirror.assert_called_once()
+        preset, started, text = mirror.call_args.args
+        self.assertEqual(preset, "brain-dump")
+        self.assertEqual(started, datetime(2026, 9, 20, 10, 5))
+        self.assertIn("draft the outline now", text)
+
+    def test_finish_no_save_skips_obsidian_mirror(self):
+        wav = self.tmp / "audio.wav"
+        wav.write_bytes(b"RIFF")
+        segs = [_seg(0.0, 2.0, "just paste this")]
+        with (
+            mock.patch.object(d.transcriber, "transcribe", return_value=segs),
+            mock.patch.object(d, "copy_to_clipboard", return_value=True),
+            mock.patch.object(d, "_mirror_note") as mirror,
+        ):
+            result = d.finish("message", datetime(2026, 9, 20, 10, 5), wav, save_note=False)
+        self.assertIsNone(result["path"])
+        self.assertTrue(result["on_clipboard"])
+        mirror.assert_not_called()
 
     def test_refusing_reason_when_meeting_recording(self):
         with (
@@ -290,6 +340,53 @@ class DictationCliTest(unittest.TestCase):
         self.assertIn("Copied to the clipboard", result.output)
         self.assertIn("cancel the subscription", result.output)
 
+    def test_record_no_save_flow(self):
+        wav = self._tmp_wav()
+        with (
+            mock.patch.object(d, "refusing_reason", return_value=None),
+            mock.patch.object(d, "new_recorder", return_value=_FakeRecorder(wav)),
+            mock.patch("click.pause"),
+            mock.patch.object(
+                d,
+                "finish",
+                return_value={
+                    "preset": "message",
+                    "path": None,
+                    "plain": "paste this only",
+                    "on_clipboard": True,
+                    "duration_secs": 1.0,
+                },
+            ) as finish,
+        ):
+            result = self.runner.invoke(cli.cli, ["dictation", "record", "--no-save"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("No note saved", result.output)
+        self.assertIn("Copied to the clipboard", result.output)
+        self.assertIn("paste this only", result.output)
+        self.assertEqual(finish.call_args.kwargs["save_note"], False)
+
+    def test_record_saves_note_by_default(self):
+        wav = self._tmp_wav()
+        with (
+            mock.patch.object(d, "refusing_reason", return_value=None),
+            mock.patch.object(d, "new_recorder", return_value=_FakeRecorder(wav)),
+            mock.patch("click.pause"),
+            mock.patch.object(
+                d,
+                "finish",
+                return_value={
+                    "preset": "message",
+                    "path": "/tmp/notes/message-0941.txt",
+                    "plain": "say it and save it",
+                    "on_clipboard": True,
+                    "duration_secs": 1.0,
+                },
+            ) as finish,
+        ):
+            result = self.runner.invoke(cli.cli, ["dictation", "record"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(finish.call_args.kwargs.get("save_note"), True)
+
     @mock.patch("trnscrb.cli.subprocess.Popen")
     def test_start_spawns_detached_child(self, popen):
         with (
@@ -305,6 +402,19 @@ class DictationCliTest(unittest.TestCase):
         self.assertEqual(args[3], "brain-dump")
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
         wait.assert_called_once()
+
+    @mock.patch("trnscrb.cli.subprocess.Popen")
+    def test_start_no_save_passes_flag_to_child(self, popen):
+        with (
+            mock.patch.object(d, "refusing_reason", return_value=None),
+            mock.patch.object(d, "running_pid", return_value=None),
+            mock.patch.object(d, "wait_for_pid", return_value=5678),
+        ):
+            result = self.runner.invoke(cli.cli, ["dictation", "start", "--no-save"])
+        self.assertEqual(result.exit_code, 0)
+        args = popen.call_args.args[0]
+        self.assertEqual(args[3], "message")
+        self.assertEqual(args[4:], ["--no-save"])
 
     def test_start_refuses_when_already_running(self):
         with (

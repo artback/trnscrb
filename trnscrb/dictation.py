@@ -387,6 +387,29 @@ def save_note(
     return path, text
 
 
+def _save_and_mirror(
+    preset: str,
+    started_at: datetime,
+    segments: list[dict],
+    meeting_name: str | None = None,
+) -> tuple[Path | None, str]:
+    """Save the dictation note, then mirror it into the Obsidian vault."""
+    path, text = save_note(preset, started_at, segments, meeting_name=meeting_name)
+    if path:
+        _mirror_note(preset, started_at, text)
+    return path, text
+
+
+def _mirror_note(preset: str, started_at: datetime, text: str) -> None:
+    """Mirror a saved dictation note into the Obsidian vault (best-effort)."""
+    try:
+        from trnscrb import obsidian
+
+        obsidian.mirror_dictation_note(preset, started_at, text)
+    except Exception:
+        _log.warning("Could not mirror dictation note into Obsidian", exc_info=True)
+
+
 def inject_into_meeting_transcript(text: str, meeting_path: Path) -> bool:
     """Append dictated text to a live meeting transcript.
 
@@ -409,11 +432,15 @@ def finish(
     started_at: datetime,
     audio_path: Path,
     inject_meeting: bool = False,
+    save_note: bool = True,
 ) -> dict:
     """Transcribe, save the note, and copy the text for a message preset.
 
     The audio file is always cleaned up — the note and clipboard are the
-    product, and a few seconds of dictation is cheap to redo. Returns:
+    product, and a few seconds of dictation is cheap to redo. When
+    ``save_note`` is False no note file is written and nothing is mirrored
+    into the Obsidian vault — the text only reaches the clipboard / pasted
+    field. Returns:
       {preset, path, text, plain, on_clipboard, duration_secs, injected}
     """
     _log.info("Dictation finishing (preset=%s, audio=%s)", preset, audio_path)
@@ -433,7 +460,8 @@ def finish(
     if plain:
         meeting_ctx = get_meeting_context() if inject_meeting else None
         meeting_name = meeting_ctx["meeting"] if meeting_ctx else None
-        path, text = save_note(preset, started_at, segments, meeting_name=meeting_name)
+        if save_note:
+            path, text = _save_and_mirror(preset, started_at, segments, meeting_name=meeting_name)
 
         # Inject into the meeting transcript if requested and a meeting is live.
         if inject_meeting and meeting_ctx and meeting_ctx.get("path"):
@@ -579,7 +607,7 @@ def wait_for_stop(timeout: float = 180.0) -> dict | None:
     return None  # still finishing — the caller can check `status` again
 
 
-def run_background(preset: str) -> None:
+def run_background(preset: str, save_note: bool = True) -> None:
     """Child entry point: record until SIGUSR1, then finish and report.
 
     Launched detached by `trnscrb dictation start` as
@@ -614,7 +642,7 @@ def run_background(preset: str) -> None:
         if not audio_path:
             write_result({"preset": preset, "error": "No audio captured."})
             return
-        result = finish(preset, started_at, audio_path)
+        result = finish(preset, started_at, audio_path, save_note=save_note)
         result["preset"] = preset
         write_result(result)
     except Exception as e:
@@ -630,8 +658,14 @@ def _main(argv=None) -> None:
 
     parser = argparse.ArgumentParser(prog="trnscrb.dictation")
     parser.add_argument("preset", choices=PRESETS)
+    parser.add_argument(
+        "--no-save",
+        action="store_true",
+        default=False,
+        help="Do not write a note file — copy/paste the spoken text only.",
+    )
     args = parser.parse_args(argv)
-    run_background(args.preset)
+    run_background(args.preset, save_note=not args.no_save)
 
 
 if __name__ == "__main__":

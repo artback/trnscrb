@@ -54,5 +54,35 @@ class MirrorTest(unittest.TestCase):
         self.assertTrue(written.endswith("hello world"))
 
 
+class DictationMirrorTest(unittest.TestCase):
+    def test_writes_note_and_returns_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            with patch.object(obsidian, "meetings_dir", return_value=Path(d)):
+                name = obsidian.mirror_dictation_note(
+                    "message", datetime(2026, 9, 20, 9, 41), "hello body"
+                )
+                written = (Path(d) / f"{name}.md").read_text()
+        self.assertEqual(name, "2026-09-20 message 0941")
+        self.assertTrue(written.startswith("---\n"))
+        self.assertTrue(written.endswith("hello body"))
+        self.assertIn('preset: "message"', written)
+        self.assertIn("  - dictation", written)
+
+    def test_noop_without_vault(self):
+        with patch.object(obsidian, "meetings_dir", return_value=None):
+            self.assertIsNone(
+                obsidian.mirror_dictation_note("message", datetime(2026, 9, 20, 9, 41), "x")
+            )
+
+    def test_build_dictation_note_frontmatter(self):
+        note = obsidian.build_dictation_note(
+            "brain-dump", datetime(2026, 9, 20, 10, 5), "body here"
+        )
+        self.assertTrue(note.startswith("---\n"))
+        self.assertIn('preset: "brain-dump"', note)
+        self.assertIn("  - dictation", note)
+        self.assertTrue(note.endswith("body here"))
+
+
 if __name__ == "__main__":
     unittest.main()
