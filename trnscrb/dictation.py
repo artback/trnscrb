@@ -345,12 +345,12 @@ def live_transcribe(
 # _DICTATION_MIN_SECS — a leading pause (hotkey pressed before starting to
 #      speak) must not kill a dictation that hasn't started yet.
 # _DICTATION_SILENCE_SECS — continuous quiet that counts as "done talking".
-#      Aggressive enough to feel instant, conservative enough that a natural
-#      mid-sentence pause doesn't cut you off.
+#      Short enough to feel instant (the HUD already shows your words), long
+#      enough that a natural mid-sentence breath doesn't cut you off.
 # _DICTATION_MAX_SECS — safety net so a forgotten dictation never records
 #      the whole afternoon.
 _DICTATION_MIN_SECS = 3.0
-_DICTATION_SILENCE_SECS = 2.0
+_DICTATION_SILENCE_SECS = 1.5
 _DICTATION_MAX_SECS = 180.0
 
 # Energy thresholds on the recorder's per-block mic mean-square timeline
