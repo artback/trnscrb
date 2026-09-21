@@ -1,10 +1,12 @@
 """Tests for Phase 1 dictation: raw formatting, the engine, CLI commands,
 MCP tools, and the LLM draft pass."""
 
+import json
 import os
 import signal
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -79,6 +81,17 @@ class RawFormattingTest(unittest.TestCase):
         self.assertNotIn("um let me", meeting)
         self.assertIn("um let me check the billing", message)  # kept verbatim
 
+    def test_dictation_body_is_one_flowing_passage(self):
+        segs = [
+            _seg(0.0, 1.0, "I"),
+            _seg(1.0, 4.0, "hope testing if the microphone is working."),
+        ]
+        out = storage.format_transcript(
+            segs, datetime(2026, 9, 21, 16, 2), "message-1602", kind="message"
+        )
+        body = out.split("=" * 60 + "\n\n", 1)[1]
+        self.assertEqual(body, "I hope testing if the microphone is working.")
+
 
 class DictationEngineTest(unittest.TestCase):
     def setUp(self):
@@ -103,7 +116,9 @@ class DictationEngineTest(unittest.TestCase):
 
     def test_plain_text_is_verbatim(self):
         segs = [_seg(0, 1, "um first"), _seg(1, 2, "then, like, second"), _seg(2, 3, "")]
-        self.assertEqual(d.plain_text(segs), "um first\nthen, like, second")
+        # One flowing passage: the transcriber's pause-splits must not break
+        # the dictation into mid-sentence line breaks.
+        self.assertEqual(d.plain_text(segs), "um first then, like, second")
 
     def test_note_body_extracts_after_separator(self):
         note = (
@@ -135,6 +150,21 @@ class DictationEngineTest(unittest.TestCase):
         content = path.read_text(encoding="utf-8")
         self.assertIn("um and eggs", content)
         self.assertTrue(content.startswith("Message"))
+        # The shell prints a stray "%" when a file lacks a final newline.
+        self.assertTrue(content.endswith("\n"))
+
+    def test_start_request_roundtrip_honors_no_save(self):
+        with mock.patch.object(d, "_START_REQUEST_FILE", self.tmp / "dictation_request.json"):
+            d.write_start_request("message", save_note=False)
+            self.assertEqual(d.read_start_request(), {"preset": "message", "save_note": False})
+            d.write_start_request("brain-dump")
+            self.assertEqual(d.read_start_request(), {"preset": "brain-dump", "save_note": True})
+
+    def test_start_request_legacy_payload_defaults_to_save(self):
+        request_file = self.tmp / "dictation_request.json"
+        request_file.write_text(json.dumps({"preset": "brain-dump"}), encoding="utf-8")
+        with mock.patch.object(d, "_START_REQUEST_FILE", request_file):
+            self.assertEqual(d.read_start_request(), {"preset": "brain-dump", "save_note": True})
 
     def test_save_note_empty_segments_saves_nothing(self):
         path, text = d.save_note("message", datetime(2026, 9, 20, 9, 41), [])
@@ -289,6 +319,169 @@ class DictationEngineTest(unittest.TestCase):
         self.assertIsNone(d.resolve_note("message-9999"))
 
 
+class LiveTranscribeTest(unittest.TestCase):
+    """live_transcribe: the display-only loop that emits words as they land."""
+
+    class _Recorder:
+        """Feeds one snapshot, then silence."""
+
+        def __init__(self, frames: int):
+            self._frames = frames
+            self._done = False
+            self.snapshots: list[Path] = []
+
+        def snapshot_since(self, start_frame: int):
+            if self._done or start_frame >= self._frames:
+                return None
+            fd, name = tempfile.mkstemp(suffix=".snap.wav", prefix="trnscrb-live-")
+            os.close(fd)
+            path = Path(name)
+            path.write_bytes(b"RIFF")
+            self.snapshots.append(path)
+            self._done = True
+            return path, self._frames
+
+    def test_emits_new_chunk_then_stops(self):
+        rec = self._Recorder(16_000)
+        emitted: list[str] = []
+        stop = threading.Event()
+
+        def on_text(text):
+            emitted.append(text)
+            stop.set()
+
+        with (
+            mock.patch.object(d.transcriber, "preload"),
+            mock.patch.object(
+                d.transcriber, "transcribe", return_value=[_seg(0, 1, "I hope testing")]
+            ),
+        ):
+            segments = d.live_transcribe(rec, stop, interval=0.01, on_text=on_text)
+
+        self.assertEqual(emitted, ["I hope testing"])
+        self.assertEqual(segments, [_seg(0, 1, "I hope testing")])
+        for snap in rec.snapshots:
+            self.assertFalse(snap.exists(), "snapshot WAV must be cleaned up")
+
+    def test_already_stopped_returns_immediately(self):
+        rec = self._Recorder(16_000)
+        stop = threading.Event()
+        stop.set()
+        with (
+            mock.patch.object(d.transcriber, "preload"),
+            mock.patch.object(d.transcriber, "transcribe") as t,
+        ):
+            segments = d.live_transcribe(rec, stop, interval=0.01)
+        self.assertEqual(segments, [])
+        t.assert_not_called()
+
+    def test_failed_pass_does_not_kill_the_loop(self):
+        rec = self._Recorder(16_000)
+        stop = threading.Event()
+        threading.Timer(0.15, stop.set).start()
+        with (
+            mock.patch.object(d.transcriber, "preload"),
+            mock.patch.object(d.transcriber, "transcribe", side_effect=RuntimeError("model busy")),
+        ):
+            segments = d.live_transcribe(rec, stop, interval=0.05)
+        self.assertEqual(segments, [])
+        for snap in rec.snapshots:
+            self.assertFalse(snap.exists())
+
+
+class SilenceWatchdogTest(unittest.TestCase):
+    """silence_watchdog: the dictation ends when the speaker stops talking."""
+
+    class _Recorder:
+        """Plays back a mic-energy script as if audio were arriving live.
+
+        Script entries are ``(seconds, energy)``; the timeline grows in real
+        time at 16 blocks per second (1024 frames @ 16 kHz).
+        """
+
+        BLOCKS_PER_SEC = 16
+
+        def __init__(self, script):
+            self._script = script
+            self._t0 = time.monotonic()
+
+        def attribution_timeline(self):
+            import numpy as np
+
+            elapsed = time.monotonic() - self._t0
+            blocks: list[float] = []
+            t = 0.0
+            for secs, energy in self._script:
+                for _ in range(int(secs * self.BLOCKS_PER_SEC)):
+                    if t <= elapsed:
+                        blocks.append(energy)
+                    t += 1.0 / self.BLOCKS_PER_SEC
+            n = len(blocks)
+            offsets = np.arange(n, dtype=np.int64) * 1024
+            energies = np.array(blocks, dtype=np.float32)
+            return offsets, energies, np.zeros(n, dtype=np.float32)
+
+    def test_stops_after_silence_following_speech(self):
+        rec = self._Recorder([(1.5, 1e-2), (5.0, 1e-9)])
+        stopped: list = []
+        d.silence_watchdog(
+            rec,
+            threading.Event(),
+            on_stop=lambda: stopped.append(True),
+            interval=0.05,
+            min_secs=1.0,
+            silence_secs=0.3,
+            max_secs=60.0,
+        )
+        self.assertEqual(len(stopped), 1)
+
+    def test_keeps_running_while_speech_continues(self):
+        rec = self._Recorder([(4.0, 1e-2)])
+        stopped: list = []
+        stop = threading.Event()
+        threading.Timer(1.0, stop.set).start()
+        d.silence_watchdog(
+            rec,
+            stop,
+            on_stop=lambda: stopped.append(True),
+            interval=0.05,
+            min_secs=0.5,
+            silence_secs=0.3,
+            max_secs=60.0,
+        )
+        self.assertEqual(stopped, [])
+
+    def test_leading_silence_cannot_stop_before_min_duration(self):
+        rec = self._Recorder([(5.0, 1e-9)])
+        stopped: list = []
+        stop = threading.Event()
+        threading.Timer(1.0, stop.set).start()
+        d.silence_watchdog(
+            rec,
+            stop,
+            on_stop=lambda: stopped.append(True),
+            interval=0.05,
+            min_secs=1.5,
+            silence_secs=0.3,
+            max_secs=60.0,
+        )
+        self.assertEqual(stopped, [])
+
+    def test_max_duration_forces_stop(self):
+        rec = self._Recorder([(30.0, 1e-2)])
+        stopped: list = []
+        d.silence_watchdog(
+            rec,
+            threading.Event(),
+            on_stop=lambda: stopped.append(True),
+            interval=0.05,
+            min_secs=0.0,
+            silence_secs=60.0,
+            max_secs=0.5,
+        )
+        self.assertEqual(len(stopped), 1)
+
+
 class DictationCliTest(unittest.TestCase):
     def setUp(self):
         self.runner = CliRunner()
@@ -323,6 +516,7 @@ class DictationCliTest(unittest.TestCase):
             mock.patch.object(d, "refusing_reason", return_value=None),
             mock.patch.object(d, "new_recorder", return_value=_FakeRecorder(wav)),
             mock.patch("click.pause"),
+            mock.patch.object(d, "live_transcribe"),
             mock.patch.object(
                 d,
                 "finish",
@@ -346,6 +540,7 @@ class DictationCliTest(unittest.TestCase):
             mock.patch.object(d, "refusing_reason", return_value=None),
             mock.patch.object(d, "new_recorder", return_value=_FakeRecorder(wav)),
             mock.patch("click.pause"),
+            mock.patch.object(d, "live_transcribe"),
             mock.patch.object(
                 d,
                 "finish",
@@ -371,6 +566,7 @@ class DictationCliTest(unittest.TestCase):
             mock.patch.object(d, "refusing_reason", return_value=None),
             mock.patch.object(d, "new_recorder", return_value=_FakeRecorder(wav)),
             mock.patch("click.pause"),
+            mock.patch.object(d, "live_transcribe"),
             mock.patch.object(
                 d,
                 "finish",
@@ -386,6 +582,55 @@ class DictationCliTest(unittest.TestCase):
             result = self.runner.invoke(cli.cli, ["dictation", "record"])
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(finish.call_args.kwargs.get("save_note"), True)
+
+    def test_record_starts_live_transcription(self):
+        wav = self._tmp_wav()
+        with (
+            mock.patch.object(d, "refusing_reason", return_value=None),
+            mock.patch.object(d, "new_recorder", return_value=_FakeRecorder(wav)),
+            mock.patch("click.pause"),
+            mock.patch.object(d, "live_transcribe") as live,
+            mock.patch.object(
+                d,
+                "finish",
+                return_value={
+                    "preset": "message",
+                    "path": None,
+                    "plain": "words on screen",
+                    "on_clipboard": True,
+                    "duration_secs": 1.0,
+                },
+            ),
+        ):
+            result = self.runner.invoke(cli.cli, ["dictation", "record"])
+        self.assertEqual(result.exit_code, 0)
+        live.assert_called_once()
+        recorder_arg, stop_event = live.call_args.args
+        self.assertIsInstance(recorder_arg, _FakeRecorder)
+        self.assertIsInstance(stop_event, threading.Event)
+        self.assertTrue(stop_event.is_set(), "the live loop must be stopped before finishing")
+        self.assertTrue(callable(live.call_args.kwargs.get("on_text")))
+
+    @mock.patch("os.kill")
+    def test_dictate_no_save_signals_app_with_flag(self, kill):
+        with (
+            mock.patch.object(cli, "_running_app_pid", return_value=12345),
+            mock.patch.object(d, "write_start_request") as write,
+        ):
+            result = self.runner.invoke(cli.cli, ["dictate", "message", "--no-save"])
+        self.assertEqual(result.exit_code, 0)
+        write.assert_called_once_with("message", save_note=False)
+        kill.assert_called_once_with(12345, signal.SIGUSR2)
+
+    @mock.patch("os.kill")
+    def test_dictate_default_signals_app_with_save(self, kill):
+        with (
+            mock.patch.object(cli, "_running_app_pid", return_value=12345),
+            mock.patch.object(d, "write_start_request") as write,
+        ):
+            result = self.runner.invoke(cli.cli, ["dictate", "message"])
+        self.assertEqual(result.exit_code, 0)
+        write.assert_called_once_with("message", save_note=True)
 
     @mock.patch("trnscrb.cli.subprocess.Popen")
     def test_start_spawns_detached_child(self, popen):

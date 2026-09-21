@@ -17,6 +17,7 @@ import json
 import re
 import subprocess
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -1878,7 +1879,7 @@ def devices():
     is_flag=True,
     default=False,
     help="Do not save a note — the text only lands on the clipboard / active field "
-    "(fallback path only; the menu-bar app always saves).",
+    "(honored by the menu-bar app too, not just the fallback child).",
 )
 @click.argument("preset", type=click.Choice(("message", "brain-dump")))
 def dictate(preset, no_save):
@@ -1886,7 +1887,9 @@ def dictate(preset, no_save):
 
     Bind this to a hotkey (Shortcuts, Raycast, Skim) for quick access. Sends
     SIGUSR2 to the running app along with the preset — the menu-bar app
-    records in-process, so you can stop it from the menu bar.
+    records in-process, so you can stop it from the menu bar. With
+    ``--no-save`` nothing is written: the text only lands in the focused
+    app (and the dictation auto-stops when you stop talking).
 
     If the menu-bar app is not running, falls back to ``trnscrb dictation start``
     which launches a detached child process.
@@ -1896,7 +1899,7 @@ def dictate(preset, no_save):
     pid = _running_app_pid()
     if pid:
         # Try the signal-channel first.
-        d.write_start_request(preset)
+        d.write_start_request(preset, save_note=not no_save)
         try:
             import os
             import signal
@@ -1975,7 +1978,9 @@ def dictation():
 def dictation_record(preset, no_save):
     """Record a dictation in the foreground; press Enter when you are done.
 
-    Ctrl+C cancels without saving (the captured audio is discarded).
+    Words appear on the screen as you speak (live transcription). The saved
+    note is still produced from the full recording when you stop. Ctrl+C
+    cancels without saving (the captured audio is discarded).
     """
     from trnscrb import dictation as d
     from trnscrb import settings
@@ -1990,12 +1995,27 @@ def dictation_record(preset, no_save):
     )
     recorder = d.new_recorder()
     started_at = datetime.now()
+
+    def _print_live(text: str) -> None:
+        click.echo(click.style("  · ", dim=True) + text)
+
+    stop_event = threading.Event()
+    live = threading.Thread(
+        target=d.live_transcribe,
+        args=(recorder, stop_event),
+        kwargs={"on_text": _print_live},
+        daemon=True,
+    )
     cancelled = False
     try:
+        live.start()
         click.pause(info="")
     except (KeyboardInterrupt, click.Abort):
         click.echo("\n  ⏹  Recording stopped early.")
         cancelled = True
+    finally:
+        stop_event.set()
+        live.join(timeout=15)
     audio_path = recorder.stop()
     if not audio_path:
         click.echo("  No audio captured.", err=True)

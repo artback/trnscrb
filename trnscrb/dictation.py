@@ -29,17 +29,23 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
 from trnscrb import settings, storage, transcriber
 from trnscrb.log import get_logger
-from trnscrb.recorder import Recorder
+from trnscrb.recorder import SAMPLE_RATE, Recorder
 
 _log = get_logger("trnscrb.dictation")
 
 PRESETS = ("message", "brain-dump")
 PRESET_LABELS = {"message": "Message", "brain-dump": "Brain dump"}
+
+# How often the dictation live display emits newly transcribed words.
+# Dictation is short and mic-only, so updates run far tighter than the
+# meeting live loop (which ticks every 60s).
+_LIVE_INTERVAL = 3.0
 
 _CONTROL_DIR = Path.home() / ".config" / "trnscrb"
 _PID_FILE = _CONTROL_DIR / "dictation.pid"
@@ -53,21 +59,28 @@ _RESULT_FILE = _CONTROL_DIR / "dictation_result.json"
 _START_REQUEST_FILE = _CONTROL_DIR / "dictation_request.json"
 
 
-def write_start_request(preset: str) -> None:
+def write_start_request(preset: str, save_note: bool = True) -> None:
     """Write a dictation-start request for the menu-bar app to pick up."""
     _CONTROL_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        _START_REQUEST_FILE.write_text(json.dumps({"preset": preset}), encoding="utf-8")
+        payload = {"preset": preset, "save_note": bool(save_note)}
+        _START_REQUEST_FILE.write_text(json.dumps(payload), encoding="utf-8")
     except Exception:
         _log.debug("Could not write dictation request", exc_info=True)
 
 
-def read_start_request() -> str | None:
-    """Return the preset from the latest request, or None."""
+def read_start_request() -> dict | None:
+    """The latest request as ``{"preset": ..., "save_note": ...}``, or None.
+
+    Legacy request files without the ``save_note`` key read as save — a
+    missing flag must never silently turn saving off.
+    """
     try:
         payload = json.loads(_START_REQUEST_FILE.read_text())
         preset = payload.get("preset") if isinstance(payload, dict) else None
-        return preset if is_preset(preset) else None
+        if not is_preset(preset):
+            return None
+        return {"preset": preset, "save_note": bool(payload.get("save_note", True))}
     except Exception:
         return None
 
@@ -252,10 +265,161 @@ def new_recorder() -> Recorder:
 
 
 def plain_text(segments: list[dict]) -> str:
-    """The verbatim dictation: segment text joined with newlines, unedited."""
-    return "\n".join(
+    """The verbatim dictation: segment text joined into one flowing passage.
+
+    The transcriber splits speech into segments at pauses, but a dictation is
+    a single continuous utterance — joining with spaces keeps it reading
+    exactly as spoken instead of breaking mid-sentence ("I / hope testing…").
+    """
+    return " ".join(
         str(seg.get("text") or "").strip() for seg in segments if str(seg.get("text") or "").strip()
     )
+
+
+def _noop(_text: str) -> None:
+    """No-op sink for live text when the caller does not display it."""
+
+
+def live_transcribe(
+    recorder: Recorder,
+    stop_event: threading.Event,
+    interval: float = _LIVE_INTERVAL,
+    on_text: Callable[[str], None] | None = None,
+) -> list[dict]:
+    """Transcribe newly captured audio and hand each chunk to ``on_text``.
+
+    A display-only loop for the foreground CLI: run it in its own thread
+    while the user speaks, and each pass transcribes only the audio captured
+    since the previous pass (the same incremental pattern as the meeting
+    live loop), so the work per tick stays constant. ``on_text`` receives
+    each new chunk's plain text; pass None to collect silently.
+
+    The model is preloaded first, in parallel with the opening seconds of
+    speech, so the first update is not gated on a model load. The saved note
+    is still produced by ``finish()`` from the full recording, so a dropped
+    or late pass can never affect the transcript. Returns the segments seen
+    so far (timestamps relative to each snapshot).
+    """
+    if on_text is None:
+        on_text = _noop
+
+    try:
+        transcriber.preload()
+    except Exception:
+        _log.debug("Live display could not preload the transcription model", exc_info=True)
+
+    transcribed_frames = 0
+    segments_acc: list[dict] = []
+
+    while not stop_event.is_set():
+        if stop_event.wait(interval):
+            break
+        result = recorder.snapshot_since(transcribed_frames)
+        if not result:
+            continue
+        snap, end_frame = result
+        try:
+            new_segments = transcriber.transcribe(snap)
+            segments_acc.extend(new_segments)
+            transcribed_frames = end_frame
+            plain = plain_text(new_segments)
+            if plain:
+                on_text(plain)
+        except Exception:
+            # A failed pass (model hiccup, busy GPU) must not kill the loop;
+            # the same audio is retried next tick and the final note comes
+            # from finish() regardless.
+            _log.debug("Dictation live transcription update failed", exc_info=True)
+        finally:
+            try:
+                snap.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    return segments_acc
+
+
+# ── auto-stop on silence ──────────────────────────────────────────────────────
+# The "normal app" end of a dictation: you stop talking, the dictation stops.
+#
+# _DICTATION_MIN_SECS — a leading pause (hotkey pressed before starting to
+#      speak) must not kill a dictation that hasn't started yet.
+# _DICTATION_SILENCE_SECS — continuous quiet that counts as "done talking".
+#      Aggressive enough to feel instant, conservative enough that a natural
+#      mid-sentence pause doesn't cut you off.
+# _DICTATION_MAX_SECS — safety net so a forgotten dictation never records
+#      the whole afternoon.
+_DICTATION_MIN_SECS = 3.0
+_DICTATION_SILENCE_SECS = 2.0
+_DICTATION_MAX_SECS = 180.0
+
+# Energy thresholds on the recorder's per-block mic mean-square timeline
+# (one block every 1024 frames ≈ 64 ms at 16 kHz).
+_SILENCE_ENERGY = 2e-5  # ≈ -47 dBFS: below this the mic is effectively silent
+_SPEECH_PEAK = 1e-4  # ≈ -40 dBFS: typical speech level on a laptop mic
+
+
+def silence_watchdog(
+    recorder: Recorder,
+    stop_event: threading.Event,
+    on_stop,
+    interval: float = 0.5,
+    min_secs: float = _DICTATION_MIN_SECS,
+    silence_secs: float = _DICTATION_SILENCE_SECS,
+    max_secs: float = _DICTATION_MAX_SECS,
+) -> None:
+    """End a dictation on its own when the speaker stops talking.
+
+    Runs in its own thread while a dictation is active. Each pass reads the
+    recorder's per-block mic-energy timeline and calls ``on_stop`` — exactly
+    once — after ``silence_secs`` of continuous quiet (only once at least
+    ``min_secs`` of audio exist) or after ``max_secs`` as a safety net.
+    Silence is detected adaptively: below the absolute floor, or a 20 dB drop
+    from the loudest speech heard so far, so quiet speakers and loud rooms
+    both work without per-user tuning.
+    """
+    start = time.monotonic()
+    silent_since: float | None = None
+    stopped = False
+    blocks_per_sec = max(1, int(SAMPLE_RATE / 1024))
+
+    while not stop_event.is_set():
+        if stopped or stop_event.wait(interval):
+            break
+        try:
+            _offsets, mic, _sys = recorder.attribution_timeline()
+        except Exception:
+            _log.debug("Silence watchdog: could not read the energy timeline", exc_info=True)
+            continue
+        if len(mic) == 0:
+            continue
+        now = time.monotonic()
+        elapsed = now - start
+        if elapsed >= max_secs:
+            _log.info("Dictation auto-stopped after %.0fs (max duration)", elapsed)
+            on_stop()
+            stopped = True
+            break
+        if elapsed < min_secs:
+            silent_since = None
+            continue
+        recent = mic[-blocks_per_sec:]
+        if len(recent) < blocks_per_sec // 2:
+            continue  # not enough timeline yet to judge the last second
+        recent_ms = sum(recent) / len(recent)
+        peak_ms = max(mic)
+        silent = recent_ms < _SILENCE_ENERGY or (
+            peak_ms > _SPEECH_PEAK and recent_ms < 0.1 * peak_ms
+        )
+        if silent:
+            silent_since = silent_since or now
+            if now - silent_since >= silence_secs:
+                _log.info("Dictation auto-stopped after %.1fs of silence", now - silent_since)
+                on_stop()
+                stopped = True
+                break
+        else:
+            silent_since = None
 
 
 def note_body(note: str) -> str:

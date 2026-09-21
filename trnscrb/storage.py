@@ -321,6 +321,10 @@ def save_transcript(path: Path, content: str) -> None:
         _log.warning("Skipping save_transcript: empty content")
         return
     _log.info("Saving transcript to %s", path)
+    # A trailing newline keeps `cat` from printing the shell's "no newline at
+    # end" marker (the stray %) when a note is read back in a terminal.
+    if not content.endswith("\n"):
+        content += "\n"
     path.write_text(content, encoding="utf-8")
 
 
@@ -612,9 +616,9 @@ _DICTATION_LABELS = {"message": "Message", "brain-dump": "Brain dump"}
 def _format_dictation(segments: list[dict], started_at: datetime, kind: str) -> str:
     """Raw dictation formatting: minimal header, then the unedited text.
 
-    Each spoken segment is its own line, untouched by the readability pass —
-    a dictated message or brain dump is the user's own phrasing, and nothing
-    here gets to rewrite it.
+    The segments join into one flowing passage, untouched by the
+    readability pass — a dictated message or brain dump is the user's own
+    phrasing, and nothing here gets to rewrite it.
     """
     duration = _fmt_time(segments[-1]["end"]) if segments else "00:00"
     label = _DICTATION_LABELS.get(kind) or kind.replace("-", " ").title()
@@ -626,10 +630,11 @@ def _format_dictation(segments: list[dict], started_at: datetime, kind: str) -> 
         _SEPARATOR,
         "",
     ]
-    for seg in segments:
-        text = str(seg.get("text") or "").strip()
-        if text:
-            lines.append(text)
+    body = " ".join(
+        str(seg.get("text") or "").strip() for seg in segments if str(seg.get("text") or "").strip()
+    )
+    if body:
+        lines.append(body)
     return "\n".join(lines)
 
 
