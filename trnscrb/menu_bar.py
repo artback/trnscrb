@@ -352,17 +352,34 @@ class TrnscrbApp(rumps.App):
         The stale process keeps working for everything already imported, so
         waiting is safe — it is only the *next* import that would fail.
         """
+        from importlib.metadata import version
+
         from trnscrb import rollout
 
+        running = version("trnscrb")
         if not rollout.is_stale():
-            return
-        if not self._stale_notified:
-            self._stale_notified = True
-            _log.warning(
-                "Running from %s, which no longer exists — trnscrb was upgraded "
-                "underneath this process; restarting when idle",
-                rollout.install_root(),
-            )
+            # The tree still exists (symlink redirect case) — check if a newer
+            # version is on disk via the PATH binary.
+            installed = rollout.installed_version()
+            if installed and installed != running:
+                _log.info("New version on disk: %s (running %s)", installed, running)
+                if not self._stale_notified:
+                    self._stale_notified = True
+                    _log.warning(
+                        "Upgrade to %s found on disk while running %s",
+                        installed,
+                        running,
+                    )
+            else:
+                return
+        else:
+            if not self._stale_notified:
+                self._stale_notified = True
+                _log.warning(
+                    "Running from %s, which no longer exists — trnscrb was upgraded "
+                    "underneath this process; restarting when idle",
+                    rollout.install_root(),
+                )
         busy = (self._recorder and self._recorder.is_recording) or (
             self._process_thread and self._process_thread.is_alive()
         )
