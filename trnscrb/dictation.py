@@ -444,7 +444,17 @@ def silence_watchdog(
         if silent:
             silent_since = silent_since or now
             if now - silent_since >= silence_secs:
-                _log.info("Dictation auto-stopped after %.1fs of silence", now - silent_since)
+                # Log the measured energy at the decision point so the user
+                # can diagnose auto-stop misfires (quiet rooms, loud mics)
+                # without re-reading the source.
+                _log.info(
+                    "Dictation auto-stopped after %.1fs of silence "
+                    "(recent_energy=%.6g peak=%.6g threshold=%.1fs)",
+                    now - silent_since,
+                    recent_ms,
+                    peak_ms,
+                    silence_secs,
+                )
                 on_stop()
                 stopped = True
                 break
