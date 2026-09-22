@@ -14,6 +14,12 @@ from pathlib import Path
 
 import rumps
 
+# AppKit is optional — headless environments (CI, servers) don't have it.
+try:
+    import AppKit  # noqa: F401
+except ImportError:
+    AppKit = None  # type: ignore[misc,assignment]
+
 from trnscrb import (
     action_items,
     analytics,
@@ -801,6 +807,19 @@ class TrnscrbApp(rumps.App):
             import AppKit
             from Foundation import NSMakeRect
 
+            # Tap-to-stop view — a thin clickable strip at the bottom of
+            # the HUD that triggers the same stop logic as the menu/hotkey
+            # without stealing focus from the target app.
+            class _DictationStopView(AppKit.NSView):  # noqa: E306
+                """Thin clickable strip at the bottom of the dictation HUD."""
+
+                controller = None  # set to the TrnscrbApp instance after init
+
+                def mouseDown_(self, event):
+                    """Stop the dictation when the user clicks this strip."""
+                    if self.controller is not None:
+                        self.controller._request_dict_stop()
+
             width, height = 560.0, 96.0
             screen = AppKit.NSScreen.mainScreen()
             frame = screen.frame()
@@ -838,6 +857,33 @@ class TrnscrbApp(rumps.App):
             label.setFont_(AppKit.NSFont.systemFontOfSize_(14))
             label.setStringValue_(_HUD_LISTENING)
             content.addSubview_(label)
+            # Tap-to-stop pill at the bottom — a thin clickable strip that
+            # triggers the same stop logic as the menu / hotkey, without
+            # stealing focus from the app the user is dictating into.
+            try:
+                stop_view = _DictationStopView.alloc().initWithFrame_(NSMakeRect(0, 0, width, 18))
+                stop_view.setTranslatesAutoresizingMaskIntoConstraints_(False)
+                stop_view.setWantsLayer_(True)
+                stop_view.layer().setBackgroundColor_(
+                    AppKit.NSColor.controlAccentColor().colorWithAlphaComponent_(0.15).CGColor()
+                )
+                stop_view.controller = self  # callback
+                content.addSubview_(stop_view)
+                # Pin to bottom of the window
+                stop_view.leadingAnchor.constraintEqualToAnchor_(content.leadingAnchor).isActive_(
+                    True
+                )
+                stop_view.trailingAnchor.constraintEqualToAnchor_(content.trailingAnchor).isActive_(
+                    True
+                )
+                stop_view.bottomAnchor.constraintEqualToAnchor_(content.bottomAnchor).isActive_(
+                    True
+                )
+                stop_view.heightAnchor.constraintEqualToConstant_(18).isActive_(True)
+                self._hud_stop_view = stop_view
+            except Exception:
+                _log.debug("HUD stop view creation failed", exc_info=True)
+                self._hud_stop_view = None
             window.orderFrontRegardless()  # show without stealing focus
             self._hud_window = window
             self._hud_label = label
@@ -853,6 +899,7 @@ class TrnscrbApp(rumps.App):
             except Exception:
                 _log.debug("Could not hide the dictation HUD", exc_info=True)
         self._hud_shown_text = ""
+        self._hud_stop_view = None
 
     def _update_hud(self, _timer):
         """Refresh the HUD and act on the auto-stop flag. Main thread only.
