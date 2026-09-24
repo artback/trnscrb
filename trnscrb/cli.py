@@ -268,6 +268,31 @@ def install(force: bool):
     # ── Defaults ─────────────────────────────────────────────────────────────
     settings = load_settings()
     changed = False
+
+    # Push-to-talk — the default ("ctrl+alt+f8") works out of the box, so only
+    # offer if the user wants to customise or disable it.
+    ptt_default = settings.get("dictation_ptt_key")
+    if ptt_default is None or ptt_default.strip() == "":
+        if click.confirm(
+            "  Push-to-talk: hold a key to dictate, release to stop and paste "
+            "into the focused field? (ctrl+alt+F8)",
+            default=True,
+        ):
+            ptt_key = click.prompt(
+                "  Key combo (e.g. ctrl+alt+f8, cmd+shift+d, empty to disable)",
+                default="ctrl+alt+f8",
+                show_default=False,
+            ).strip()
+            if ptt_key:
+                settings["dictation_ptt_key"] = ptt_key
+                changed = True
+                click.echo(click.style("  PTT key set.", fg="green"))
+            else:
+                settings["dictation_ptt_key"] = ""
+                changed = True
+                click.echo(click.style("  PTT disabled.", fg="yellow"))
+        click.echo()
+
     if settings.get("auto_record") is not True:
         settings["auto_record"] = True
         changed = True
