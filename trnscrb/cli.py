@@ -265,14 +265,25 @@ def install(force: bool):
             else:
                 click.echo(click.style("  Could not set up login item.", fg="yellow"))
 
-    # ── Defaults ─────────────────────────────────────────────────────────────
-    settings = load_settings()
-    changed = False
+    # ── Push-to-talk ─────────────────────────────────────────────────────────
+    # Offer to configure the PTT key during install. The default is
+    # "ctrl+alt+f8", so only ask if the stored settings file has no PTT
+    # key yet — which is true on a fresh install.
+    from trnscrb.settings import _SETTINGS_FILE
 
-    # Push-to-talk — the default ("ctrl+alt+f8") works out of the box, so only
-    # offer if the user wants to customise or disable it.
-    ptt_default = settings.get("dictation_ptt_key")
-    if ptt_default is None or ptt_default.strip() == "":
+    try:
+        stored = (
+            json.loads(_SETTINGS_FILE.read_text(encoding="utf-8"))
+            if _SETTINGS_FILE.exists()
+            else {}
+        )
+        ptt_has_it = (
+            "dictation_ptt_key" in stored
+            and str(stored["dictation_ptt_key"]).strip() != ""
+        )
+    except Exception:
+        ptt_has_it = True
+    if not ptt_has_it:
         if click.confirm(
             "  Push-to-talk: hold a key to dictate, release to stop and paste "
             "into the focused field? (ctrl+alt+F8)",
