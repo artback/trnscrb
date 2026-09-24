@@ -3796,6 +3796,7 @@ dependencies = [
     { name = "sentence-transformers" },
     { name = "sounddevice" },
     { name = "soundfile" },
+    { name = "torchcodec" },
 ]
 
 [package.metadata]
@@ -3821,6 +3822,7 @@ requires-dist = [
     { name = "sentence-transformers", specifier = ">=3.0" },
     { name = "sounddevice", specifier = ">=0.4.6" },
     { name = "soundfile", specifier = ">=0.12" },
+    { name = "torchcodec", specifier = ">=0.1" },
 ]
 
 [[package]]
