@@ -52,5 +52,31 @@ class ConfigCommandTest(unittest.TestCase):
         self.assertNotIn("  enrich =", listed.output)  # nested dict settings are excluded
 
 
+class PttKeyConfigTest(unittest.TestCase):
+    """The push-to-talk combo is a plain CLI-settable setting."""
+
+    def setUp(self):
+        self.runner = CliRunner()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        patch.object(settings, "_SETTINGS_FILE", Path(self._tmp.name) / "s.json").start()
+        self.addCleanup(patch.stopall)
+
+    def test_ptt_key_default(self):
+        # Ships on, so `brew install trnscrb` gives hold-to-dictate with no setup.
+        self.assertEqual(settings.get("dictation_ptt_key"), "ctrl+alt+f8")
+
+    def test_ptt_key_set_and_disable(self):
+        r = self.runner.invoke(cli.cli, ["config", "set", "dictation_ptt_key", "ctrl+alt+d"])
+        self.assertEqual(r.exit_code, 0, r.output)
+        self.assertEqual(settings.get("dictation_ptt_key"), "ctrl+alt+d")
+        self.runner.invoke(cli.cli, ["config", "set", "dictation_ptt_key", ""])
+        self.assertEqual(settings.get("dictation_ptt_key"), "")
+        # An empty string turns PTT off (hotkey.parse("") is None).
+        from trnscrb import hotkey
+
+        self.assertIsNone(hotkey.parse(settings.get("dictation_ptt_key")))
+
+
 if __name__ == "__main__":
     unittest.main()
