@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trnscrb"
-version = "0.67.6"
+version = "0.67.7"
 description = "Offline meeting transcription for macOS — auto-detects meetings, transcribes locally with Parakeet or Whisper, saves to Claude Desktop via MCP"
 readme = "README.md"
 license = "MIT"
@@ -59,6 +59,7 @@ dependencies = [
     "pyobjc-framework-Quartz>=10.3",
     "pyobjc-framework-libdispatch>=10.3",
     "noisereduce>=3.0.3",
+    "torchcodec>=0.10.0",
 ]
 
 [project.urls]

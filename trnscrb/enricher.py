@@ -116,6 +116,7 @@ SPEAKER MAPPING:
 
 PROVIDER_ORDER = (
     "claude_code",
+    "opencode",
     "ollama",
     "llama_cpp",
     "lmstudio",
@@ -125,6 +126,7 @@ PROVIDER_ORDER = (
 OPENAI_COMPATIBLE_PROVIDERS = {"llama_cpp", "lmstudio", "openai"}
 DEFAULT_ENDPOINTS = {
     "claude_code": "",
+    "opencode": "",
     "ollama": "http://127.0.0.1:11434",
     "llama_cpp": "http://127.0.0.1:8080",
     "lmstudio": "http://127.0.0.1:1234",
@@ -133,6 +135,7 @@ DEFAULT_ENDPOINTS = {
 }
 PROVIDER_LABELS = {
     "claude_code": "Claude Code",
+    "opencode": "OpenCode",
     "ollama": "Ollama API",
     "llama_cpp": "llama.cpp",
     "lmstudio": "LM Studio",
@@ -192,6 +195,94 @@ class ClaudeCodeAdapter:
             raise RuntimeError(f"Claude Code CLI failed: {err}")
         if not content:
             raise RuntimeError("Claude Code CLI returned an empty response.")
+        return content
+
+
+class OpenCodeAdapter:
+    """Uses the locally installed `opencode` CLI as an enrichment backend."""
+
+    @staticmethod
+    def _find_cli() -> str | None:
+        import shutil
+
+        return shutil.which("opencode")
+
+    def test_connection(self, config: dict) -> tuple[bool, str]:
+        cli = self._find_cli()
+        if not cli:
+            return False, "`opencode` CLI not found on PATH"
+        try:
+            import subprocess
+
+            r = subprocess.run(
+                [cli, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            version = r.stdout.strip() or "unknown"
+            return True, f"OpenCode CLI found ({version})"
+        except Exception as exc:
+            return False, str(exc)
+
+    def list_models(self, config: dict) -> list[str]:
+        import subprocess
+
+        cli = self._find_cli()
+        if not cli:
+            raise RuntimeError("`opencode` CLI not found on PATH")
+        result = subprocess.run(
+            [cli, "models"],
+            capture_output=True,
+            text=True,
+            timeout=_CONNECT_TIMEOUT,
+        )
+        models = []
+        for line in (result.stdout or "").splitlines():
+            model = line.strip()
+            if model:
+                models.append(model)
+        return models
+
+    def enrich(self, prompt: str, config: dict) -> str:
+        import subprocess
+
+        cli = self._find_cli()
+        if not cli:
+            raise RuntimeError(
+                "`opencode` CLI not found on PATH. Install it from https://opencode.ai"
+            )
+        model = config.get("model")
+        args = [cli, "run", "--format", "json", "--log-level", "none", prompt]
+        if model:
+            args.extend(["--model", model])
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=_ENRICH_TIMEOUT,
+        )
+        # Parse JSON Lines output: extract text from part.text entries
+        text_parts: list[str] = []
+        for line in (result.stdout or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+                if entry.get("type") == "text":
+                    part = entry.get("part", {})
+                    content = str(part.get("text", "") or "").strip()
+                    if content:
+                        text_parts.append(content)
+            except json.JSONDecodeError:
+                continue
+        content = " ".join(text_parts).strip()
+        if result.returncode != 0 and not content:
+            err = result.stderr.strip() or "unknown error"
+            raise RuntimeError(f"OpenCode CLI failed: {err}")
+        if not content:
+            raise RuntimeError("OpenCode CLI returned an empty response.")
         return content
 
 
@@ -332,6 +423,7 @@ class AnthropicAdapter:
 
 _ADAPTERS = {
     "claude_code": ClaudeCodeAdapter(),
+    "opencode": OpenCodeAdapter(),
     "ollama": OllamaAdapter(),
     "llama_cpp": OpenAICompatibleAdapter("llama_cpp"),
     "lmstudio": OpenAICompatibleAdapter("lmstudio"),
@@ -353,7 +445,7 @@ def normalize_provider(provider: str | None) -> str:
 
 def normalize_endpoint(provider: str, endpoint: str | None) -> str:
     normalized_provider = normalize_provider(provider)
-    if normalized_provider == "claude_code":
+    if normalized_provider in ("claude_code", "opencode"):
         return ""
     value = str(endpoint or DEFAULT_ENDPOINTS[normalized_provider]).strip().rstrip("/")
     if normalized_provider in OPENAI_COMPATIBLE_PROVIDERS and not value.endswith("/v1"):
@@ -476,17 +568,20 @@ def summarize_for_auto(
 ) -> Optional[dict]:
     """Enrich for the automatic post-call summary, or return None if unavailable.
 
-    Tries the user's configured provider first. If that fails and the `claude`
-    CLI is on PATH, retries through it — so anyone with Claude Code installed
-    gets summaries with zero configuration. Never raises: a missing or
-    unreachable LLM simply means no summary, not a failed meeting.
+    Tries the user's configured provider first. If that fails and a local CLI-based
+    provider (Claude Code or OpenCode) is available, retries through it — so anyone
+    with a local LLM CLI installed gets summaries with zero configuration.  Never
+    raises: a missing or unreachable LLM simply means no summary, not a failed meeting.
     """
     import shutil
 
     configured, _ = get_active_provider_config()
     attempts = [configured]
-    if configured != "claude_code" and shutil.which("claude"):
-        attempts.append("claude_code")
+    if configured not in ("claude_code", "opencode"):
+        if shutil.which("claude"):
+            attempts.append("claude_code")
+        if shutil.which("opencode"):
+            attempts.append("opencode")
 
     last_error: Exception | None = None
     for provider in attempts:

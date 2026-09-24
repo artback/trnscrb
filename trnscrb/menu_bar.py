@@ -380,17 +380,19 @@ class TrnscrbApp(rumps.App):
             # The tree still exists (symlink redirect case) — check if a newer
             # version is on disk via the PATH binary.
             installed = rollout.installed_version()
-            if installed and installed != running:
-                _log.info("New version on disk: %s (running %s)", installed, running)
-                if not self._stale_notified:
-                    self._stale_notified = True
-                    _log.warning(
-                        "Upgrade to %s found on disk while running %s",
-                        installed,
-                        running,
-                    )
-            else:
+            if not (installed and installed != running):
+                # Same version on disk (or no binary on PATH): healthy install,
+                # nothing to do. Only a newer version falls through to a restart.
                 return
+            _log.info("New version on disk: %s (running %s)", installed, running)
+            if not self._stale_notified:
+                self._stale_notified = True
+                _notify("Trnscrb", "Updating", f"Update to {installed} found — starting now.")
+                _log.warning(
+                    "Upgrade to %s found on disk while running %s",
+                    installed,
+                    running,
+                )
         else:
             if not self._stale_notified:
                 self._stale_notified = True
