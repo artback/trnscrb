@@ -30,6 +30,10 @@ dependencies = [
     "numpy>=1.24",
     "faster-whisper>=1.0.0",
     "pyannote.audio>=3.1",
+    # TorchCodec extension for pyannote's fast audio-decode path (in-memory
+    # tensors instead of file I/O). Previously transitive via librosa; added
+    # explicitly because the librosa path was removed in newer pyannote.
+    "torchcodec>=0.1",
     # Decodes recordings for the diarizer without FFmpeg, which is what keeps
     # speaker labels working when pyannote's own torchcodec backend cannot
     # load (was only transitive via librosa).
