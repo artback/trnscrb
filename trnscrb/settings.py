@@ -77,6 +77,14 @@ _DEFAULTS: dict = {
     # auto-stop above. 1.5 is the tuned default: shorter clips mid-sentence
     # breaths on many mics, longer makes the end feel sluggish.
     "dictation_auto_stop_silence_secs": 1.5,
+    # Push-to-talk: hold this key combo to dictate, release to stop and paste
+    # into the focused field. The menu-bar app arms a listen-only event tap
+    # for it (re-armed within ~5s of a change, including via
+    # `trnscrb config set dictation_ptt_key …`; "Record PTT key…" in the
+    # Dictation menu captures a combo without typing it). An empty string
+    # turns it off. Needs the Input Monitoring grant, like the auto-paste;
+    # the menu bar shows "grant Input Monitoring" until it is given.
+    "dictation_ptt_key": "ctrl+alt+f8",
     "auto_integrate": False,  # push transcripts into notes via the Claude Code CLI
     # Prompt for note integration. {transcript_path} is the saved transcript;
     # {notes_dir} is the vault (or notes folder) the agent runs inside.

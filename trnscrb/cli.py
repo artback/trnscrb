@@ -1415,6 +1415,27 @@ def status():
         _row("Auto-enrich dictation", True, "drafts brain-dump notes")
     else:
         _row("Auto-enrich dictation", False, "off — use ``trnscrb dictation enrich``")
+
+    # Push-to-talk: where the hold-to-dictate combo stands.
+    from trnscrb import hotkey
+
+    ptt_spec = str(settings.get("dictation_ptt_key") or "").strip()
+    ptt_key = hotkey.parse(ptt_spec) if ptt_spec else None
+    if ptt_key:
+        _row(
+            "Push-to-talk",
+            True,
+            f"{hotkey.display_spec(ptt_key.key_code, ptt_key.flags)} — hold to "
+            "dictate, release to stop",
+        )
+    elif ptt_spec:
+        _row("Push-to-talk", False, f"unrecognized key spec '{ptt_spec}'")
+    else:
+        _row(
+            "Push-to-talk",
+            False,
+            "off — `trnscrb config set dictation_ptt_key ctrl+alt+f8`",
+        )
     click.echo()
 
     binary = _sh.which("trnscrb") or sys.executable

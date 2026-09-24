@@ -27,7 +27,9 @@ from trnscrb import (
     diarizer,
     enricher,
     health,
+    hotkey,
     obsidian,
+    ptt,
     storage,
     titles,
     transcriber,
@@ -223,6 +225,11 @@ class TrnscrbApp(rumps.App):
         self._dictation_menu.add(self._dict_command_item)
         self._dictation_menu.add(None)
         self._dictation_menu.add(self._stop_dict_item)
+        self._ptt_item = rumps.MenuItem("PTT: off")
+        self._ptt_record_item = rumps.MenuItem("Record PTT key…", callback=self.record_ptt_key)
+        self._dictation_menu.add(None)
+        self._dictation_menu.add(self._ptt_item)
+        self._dictation_menu.add(self._ptt_record_item)
         if not get_setting("dictation_auto_stop"):
             self._dict_autostop_item.title = "Auto-stop on silence: Off"
         self._voices_item = rumps.MenuItem("Label Voices…", callback=self.label_voices)
@@ -282,6 +289,18 @@ class TrnscrbApp(rumps.App):
 
         self._set_state("idle")
         self._install_signal_handlers()
+
+        # Push-to-talk: hold the configured combo to dictate, release to stop
+        # and paste. _ptt_check (re)arms the listen-only event tap and runs
+        # on a 5s timer so a changed setting — or a freshly granted Input
+        # Monitoring permission — applies without a restart.
+        self._ptt_monitor = None
+        self._ptt_capture = None
+        self._ptt_armed_spec: str | None = None
+        self._ptt_notified = False
+        self._ptt_timer = rumps.Timer(self._ptt_check, 5.0)
+        self._ptt_timer.start()
+        self._ptt_check()
 
         if get_setting("auto_record"):
             self._start_watcher()
@@ -593,7 +612,7 @@ class TrnscrbApp(rumps.App):
             "Say a command — choose Stop Dictation when you're done.",
         )
 
-    def _start_dictation(self, preset: str, save_note: bool = True):
+    def _start_dictation(self, preset: str, save_note: bool = True, ptt: bool = False) -> bool:
         """Start a mic-only dictation, refusing loudly if a meeting runs.
 
         Dictation is refused only while a meeting is actively recording
@@ -604,6 +623,11 @@ class TrnscrbApp(rumps.App):
         feeding the floating HUD (words appear as you speak) and the
         silence watchdog (the dictation ends when you stop talking). Both
         are display/UX only — Stop Dictation always works regardless.
+
+        A ``ptt`` session (push-to-talk, key held down) skips the silence
+        cutoff — the user ends it by releasing the key — but keeps the
+        max-duration and wedged-mic safety net. Returns True when the
+        dictation started (the PTT press state depends on it).
         """
         from trnscrb import dictation as d
 
@@ -613,21 +637,21 @@ class TrnscrbApp(rumps.App):
                 f"{d.preset_label(preset)} refused",
                 "A dictation is already running — stop it first.",
             )
-            return
+            return False
         if self._current_state == "recording":
             _notify(
                 "Trnscrb",
                 f"{d.preset_label(preset)} refused",
                 "A meeting is recording. Stop the meeting first.",
             )
-            return
+            return False
 
         recorder = rec_module.Recorder(system_audio=False)
         try:
             recorder.start()
         except Exception as e:
             _notify("Trnscrb", "Dictation failed to start", str(e)[:180])
-            return
+            return False
 
         self._recorder = recorder
         self._dict_preset = preset
@@ -641,13 +665,18 @@ class TrnscrbApp(rumps.App):
         self._set_state("dictating")
 
         threading.Thread(target=self._dict_live_loop, args=(recorder,), daemon=True).start()
-        threading.Thread(target=self._dict_silence_loop, args=(recorder,), daemon=True).start()
+        threading.Thread(
+            target=self._dict_silence_loop, args=(recorder, ptt), daemon=True
+        ).start()
 
-        if save_note:
+        if ptt:
+            subtitle = "Release the key when you're done — it transcribes and pastes."
+        elif save_note:
             subtitle = "Speak into the mic — it stops when you do, or choose Stop Dictation."
         else:
             subtitle = "Nothing will be saved — the text only lands in the focused app."
         _notify("Trnscrb", f"{d.preset_label(preset)} dictation started", subtitle)
+        return True
 
     def _dict_live_loop(self, recorder):
         """Background live transcription feeding the HUD. Display only.
@@ -669,15 +698,31 @@ class TrnscrbApp(rumps.App):
         """Accumulate live chunks (background thread); the HUD timer displays."""
         self._dict_live_text = f"{self._dict_live_text} {text}".strip()
 
-    def _dict_silence_loop(self, recorder):
+    def _dict_silence_loop(self, recorder, ptt: bool = False):
         """Background auto-stop: end the dictation when the speaker is done.
 
         Honors the ``dictation_auto_stop`` and ``dictation_auto_stop_silence_secs``
         settings so the user can disable or tune the silence threshold from the
         menu bar.
+
+        A ``ptt`` session (key held down) has no silence cutoff — the user
+        ends it by releasing the key, and a mid-sentence pause must not cut
+        the dictation off. Only the max-duration and wedged-mic safety net
+        runs, so a forgotten held key still ends the session.
         """
         import trnscrb.dictation as d
 
+        if ptt:
+            try:
+                d.silence_watchdog(
+                    recorder,
+                    self._dict_live_stop,
+                    on_stop=self._request_dict_stop,
+                    silence_secs=float("inf"),
+                )
+            except Exception:
+                _log.warning("PTT safety watchdog failed", exc_info=True)
+            return
         if not get_setting("dictation_auto_stop"):
             return
         try:
@@ -718,6 +763,108 @@ class TrnscrbApp(rumps.App):
             daemon=True,
         )
         self._process_thread.start()
+
+    # ── push-to-talk: hold a key to dictate, release to stop ─────────────────
+
+    def _ptt_check(self, _timer=None):
+        """(Re)arm the PTT monitor for the current ``dictation_ptt_key``.
+
+        Runs on a 5s timer, so a changed setting — or a freshly granted
+        Input Monitoring permission — applies without a restart. Cheap
+        no-op when the armed combo already matches.
+        """
+        spec = str(get_setting("dictation_ptt_key") or "").strip()
+        key = hotkey.parse(spec)
+        if key is None:
+            if self._ptt_monitor is not None:
+                self._ptt_monitor.stop()
+                self._ptt_monitor = None
+            self._ptt_armed_spec = None
+            self._ptt_item.title = "PTT: off"
+            return
+        display = hotkey.display_spec(key.key_code, key.flags)
+        if (
+            self._ptt_monitor is not None
+            and self._ptt_monitor.active
+            and self._ptt_armed_spec == spec
+        ):
+            self._ptt_item.title = f"PTT: {display}"
+            return
+        if self._ptt_monitor is not None:
+            self._ptt_monitor.stop()
+        monitor = ptt.PTTMonitor(key, on_start=self._ptt_start, on_stop=self._ptt_stop)
+        if monitor.start():
+            self._ptt_monitor = monitor
+            self._ptt_armed_spec = spec
+            self._ptt_notified = False
+            self._ptt_item.title = f"PTT: {display}"
+            _log.info("PTT armed: %s", spec)
+        else:
+            self._ptt_item.title = f"PTT: {display} (grant Input Monitoring)"
+            if not self._ptt_notified:
+                self._ptt_notified = True
+                _notify(
+                    "Trnscrb",
+                    "Push-to-talk needs Input Monitoring",
+                    f"Hold {display} to dictate, release to stop. Grant "
+                    "Trnscrb under System Settings → Privacy & Security → "
+                    "Input Monitoring — it is retried automatically.",
+                )
+
+    def _ptt_start(self) -> bool:
+        """PTT key-down: start a message dictation; the release stops it."""
+        return self._start_dictation("message", ptt=True)
+
+    def _ptt_stop(self) -> None:
+        """PTT key-up: stop and finish the dictation this press started."""
+        self.stop_dictation(None)
+
+    def record_ptt_key(self, _):
+        """Capture the next key press as the PTT combo — no typing required.
+
+        Works for keys the text spec cannot name (stored as ``keycode:N``).
+        Shift is dropped from the captured combo: it is noise in a
+        push-to-talk press.
+        """
+        if self._ptt_capture is not None and self._ptt_capture.active:
+            return
+
+        # Suspend the live monitor for the capture: the recorded press must
+        # not also start a dictation. _ptt_check re-arms right after.
+        suspended = self._ptt_monitor
+        if suspended is not None:
+            suspended.stop()
+            self._ptt_monitor = None
+
+        def _captured(key_code: int, flags: int) -> None:
+            self._ptt_capture = None
+            name = hotkey.key_name(key_code)
+            spec = hotkey.canonical_spec(name if name else f"keycode:{key_code}", flags)
+            put_setting("dictation_ptt_key", spec)
+            self._ptt_check()  # re-arm for the (possibly new) combo
+            _notify(
+                "Trnscrb",
+                "PTT key recorded",
+                f"{hotkey.display_spec(key_code, flags)} — hold to dictate, "
+                "release to stop. (Shift is ignored.)",
+            )
+
+        self._ptt_capture = ptt.PTTCapture(on_capture=_captured)
+        if self._ptt_capture.start():
+            _notify("Trnscrb", "Record PTT key", "Press the combo you want to hold…")
+        else:
+            self._ptt_capture = None
+            # No permission: restore what was armed (the 5s tick would too,
+            # but don't make the user wait five seconds for it).
+            if suspended is not None:
+                suspended.start()
+                self._ptt_monitor = suspended
+            _notify(
+                "Trnscrb",
+                "PTT recording unavailable",
+                "Input Monitoring permission is required — grant it to "
+                "Trnscrb and try again.",
+            )
 
     def _process_dictation(self, recorder, started_at, preset, save_note: bool = True):
         """Background tail of a dictation: transcribe → save → clipboard.
