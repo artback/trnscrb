@@ -84,6 +84,8 @@ _DEFAULTS: dict = {
     # Dictation menu captures a combo without typing it). An empty string
     # turns it off. Needs the Input Monitoring grant, like the auto-paste;
     # the menu bar shows "grant Input Monitoring" until it is given.
+    # Caps lock may appear as a modifier ("caps+t"): it matches the physical
+    # hold (its down/up pair), not the latched toggle state.
     "dictation_ptt_key": "ctrl+alt+f8",
     "auto_integrate": False,  # push transcripts into notes via the Claude Code CLI
     # Prompt for note integration. {transcript_path} is the saved transcript;

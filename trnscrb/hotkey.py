@@ -11,6 +11,14 @@ early Mac OS X. The table deliberately lists only keys whose codes are
 trusted; the menu bar's "Record PTT key…" captures whatever the user
 actually presses, so a spec naming an unsupported key is rejected rather
 than guessed at.
+
+Caps lock is a modifier, not a key (``"caps+f8"`` is a valid spec; the bare
+caps-lock key is not). It is the only "modifier" that is really a toggle
+key: it emits a genuine key-down/key-up pair (keycode ``CAPS_LOCK_CODE``),
+and the alpha-shift flag bit it leaves in key-event flags *latches* — it
+reflects "caps lock is on", not "the finger is on caps lock". Matching
+therefore tracks the physical down/up pair, never the flag bit (see
+``trnscrb.ptt``).
 """
 
 from __future__ import annotations
@@ -23,11 +31,28 @@ FLAG_SHIFT = 1 << 17  # kCGEventFlagMaskShift
 FLAG_CONTROL = 1 << 18  # kCGEventFlagMaskControl
 FLAG_OPTION = 1 << 19  # kCGEventFlagMaskAlternate
 FLAG_COMMAND = 1 << 20  # kCGEventFlagMaskCommand
+# Caps lock (alpha shift). PyObjC's Quartz exposes it as
+# kCGEventFlagMaskAlphaShift (CoreGraphics aliases kCGEventFlagMaskCapsLock
+# to the same bit). Latched, not held: once caps lock is on the bit stays set
+# on every following key event until the lock flips, so a PTT combo that
+# requires it is matched against the physical key-down/key-up of
+# CAPS_LOCK_CODE instead — the bit is the spec's identity, never its
+# evidence.
+FLAG_CAPS_LOCK = 1 << 16  # kCGEventFlagMaskAlphaShift
 
 # Modifiers that count as "held" when recording a PTT combo. Shift is
 # deliberately excluded: it is noise in a push-to-talk combo (finger slips
-# while reaching for the key), so the recorder drops it.
-FLAG_PTT_MODS = FLAG_CONTROL | FLAG_OPTION | FLAG_COMMAND
+# while reaching for the key), so the recorder drops it. Caps lock is kept:
+# it is a deliberate hold (tracked via its down/up pair in trnscrb.ptt),
+# and dropping it there would make "Record PTT key…" unable to capture it.
+FLAG_PTT_MODS = FLAG_CONTROL | FLAG_OPTION | FLAG_COMMAND | FLAG_CAPS_LOCK
+
+# Apple virtual keycode for caps lock (kVK_CapsLock). PyObjC's Quartz does
+# not expose it, so the value is spelled out from Apple's virtual-keycode
+# table. Caps lock is a toggle key — the only "modifier" that emits a real
+# key-down/key-up pair — and that pair is how PTT tells "finger on caps
+# lock" apart from the latched alpha-shift flag.
+CAPS_LOCK_CODE = 57
 
 _MODIFIER_NAMES: dict[str, int] = {
     "shift": FLAG_SHIFT,
@@ -44,12 +69,22 @@ _MODIFIER_NAMES: dict[str, int] = {
     "command": FLAG_COMMAND,
     "meta": FLAG_COMMAND,
     "\u2318": FLAG_COMMAND,  # ⌘
+    "caps": FLAG_CAPS_LOCK,
+    "capslock": FLAG_CAPS_LOCK,
+    "caps lock": FLAG_CAPS_LOCK,
+    "\u21ea": FLAG_CAPS_LOCK,  # ⇪
 }
 
 # Apple virtual key codes for the keys a PTT spec may name. Only codes this
 # project trusts: function keys, the two main letter rows, digits, and a
 # handful of special keys. See the module docstring for why the list is
 # conservative — "Record PTT key…" covers everything else.
+#
+# The letter/digit codes below were verified against the OS's own compiled
+# layout (UCKeyTranslate on com.apple.keylayout.ABC), which is the ground
+# truth for the keycode a press produces. They deliberately do NOT match the
+# kVK_ANSI_* table circulating in old headers and blog posts, which is wrong
+# for j/k/l/z, y/u/i/o/p and 7/8 — do not "fix" them back.
 KEY_CODES: dict[str, int] = {
     # Function keys
     "f1": 96,
@@ -74,21 +109,25 @@ KEY_CODES: dict[str, int] = {
     "f": 3,
     "h": 4,
     "g": 5,
-    "j": 6,
-    "k": 7,
-    "l": 8,
-    "z": 10,
+    "z": 6,
+    "x": 7,
+    "c": 8,
+    "v": 9,
+    "b": 11,
+    "l": 37,
+    "j": 38,
+    "k": 40,
     # QWERTY row
     "q": 12,
     "w": 13,
     "e": 14,
     "r": 15,
+    "y": 16,
     "t": 17,
-    "y": 18,
-    "u": 19,
-    "i": 20,
-    "o": 21,
-    "p": 22,
+    "u": 32,
+    "i": 34,
+    "o": 31,
+    "p": 35,
     # Number row
     "1": 18,
     "2": 19,
@@ -96,8 +135,8 @@ KEY_CODES: dict[str, int] = {
     "4": 21,
     "5": 23,
     "6": 22,
-    "7": 27,
-    "8": 26,
+    "7": 26,
+    "8": 28,
     "9": 25,
     "0": 29,
     # Special keys
@@ -118,8 +157,9 @@ _CODE_TO_KEY: dict[int, str] = {}
 for _name, _code in KEY_CODES.items():
     _CODE_TO_KEY.setdefault(_code, _name)
 
-# Canonical modifier order for specs and display: ⌃⌥⇧⌘.
+# Canonical modifier order for specs and display: ⇪⌃⌥⇧⌘.
 _CANONICAL_MODS: list[tuple[int, str, str]] = [
+    (FLAG_CAPS_LOCK, "caps", "\u21ea"),
     (FLAG_CONTROL, "ctrl", "\u2303"),
     (FLAG_OPTION, "alt", "\u2325"),
     (FLAG_SHIFT, "shift", "\u21e7"),
@@ -145,6 +185,11 @@ def parse(spec: str) -> PTTKey | None:
     for a raw Apple virtual key code — the record mode stores combos this
     way when the pressed key is not in the named table. Returns None for
     anything else, including an empty spec (the "off" setting).
+
+    ``caps`` is accepted as a modifier ("caps+f8") but never as the key:
+    caps lock is a toggle key, and a combo whose main key were the one that
+    flips the lock would leave the lock state in the user's lap after every
+    dictation.
     """
     if not isinstance(spec, str):
         return None
@@ -158,7 +203,12 @@ def parse(spec: str) -> PTTKey | None:
         raw = key_token.split(":", 1)[1]
         if not raw.isdigit():
             return None
-        key_code, key_name = int(raw), key_token
+        key_code = int(raw)
+        if key_code == CAPS_LOCK_CODE:
+            # Caps lock is a modifier in PTT (hold-tracked, see the module
+            # docstring), not a main key.
+            return None
+        key_name = key_token
     else:
         return None
     flags = 0

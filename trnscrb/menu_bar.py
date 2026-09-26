@@ -826,7 +826,9 @@ class TrnscrbApp(rumps.App):
 
         Works for keys the text spec cannot name (stored as ``keycode:N``).
         Shift is dropped from the captured combo: it is noise in a
-        push-to-talk press.
+        push-to-talk press. Caps lock, pressed as part of the combo, is
+        recorded as a modifier (``caps+…``) — tracked via its physical
+        down/up pair, since the toggle's flag bit latches.
         """
         if self._ptt_capture is not None and self._ptt_capture.active:
             return
