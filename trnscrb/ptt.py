@@ -172,23 +172,29 @@ class EventTap:
             self._source = None
             return False
 
-    def _c_callback(self, _refcon, event, _user_info) -> None:
-        """CFEventCallback shim (main run loop); never raises across the bridge."""
+    def _c_callback(self, _proxy, event_type, event, _user_data) -> None:
+        """CFEventCallback shim (main run loop); never raises across the bridge.
+
+        PyObjC's CGEventCallback trampoline for ``kCGHIDEventTap`` passes
+        *(proxy, event_type, event, user_data)* — ``event_type`` is an int,
+        ``event`` is a CGEvent.  This is different from the
+        ``(refcon, event, *args)`` layout some taps use, so we match the
+        actual signature rather than relying on *args.
+        """
         try:
             import Quartz
 
-            etype = int(Quartz.CGEventGetType(event))
-            if etype in _TAP_DISABLED_TYPES:
+            if event_type in _TAP_DISABLED_TYPES:
                 # The system disabled the tap (stall or revoked grant).
                 # Re-enable best-effort; the owner's re-arm loop notices via
                 # `disabled_reason` / a failed restart.
-                self.disabled_reason = "timeout" if etype == 4294967294 else "user-input"
+                self.disabled_reason = "timeout" if event_type == 4294967294 else "user-input"
                 if self._tap is not None:
                     Quartz.CGEventTapEnable(self._tap, True)
                 return
             code = int(Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode))
             flags = int(Quartz.CGEventGetFlags(event))
-            if etype == int(Quartz.kCGEventKeyDown):
+            if event_type == int(Quartz.kCGEventKeyDown):
                 autorepeat = bool(
                     Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventAutorepeat)
                 )
