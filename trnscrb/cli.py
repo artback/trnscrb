@@ -289,12 +289,30 @@ def install(force: bool):
             "into the focused field? (ctrl+alt+F8)",
             default=True,
         ):
-            ptt_key = click.prompt(
-                "  Key combo (e.g. ctrl+alt+f8, cmd+shift+d, empty to disable)",
-                default="ctrl+alt+f8",
-                show_default=False,
-            ).strip()
-            if ptt_key:
+            from trnscrb import hotkey
+
+            ptt_key, valid = "", False
+            for _attempt in range(3):
+                ptt_key = click.prompt(
+                    "  Key combo (e.g. ctrl+alt+f8, cmd+shift+d, caps+t, "
+                    "empty to disable)",
+                    default="ctrl+alt+f8",
+                    show_default=False,
+                ).strip()
+                # A non-empty combo must parse: an unparseable spec would be
+                # stored fine, then the menu bar would quietly show
+                # "PTT: off" with no trace of why.
+                valid = not ptt_key or hotkey.parse(ptt_key) is not None
+                if valid:
+                    break
+                click.echo(
+                    click.style(
+                        f"  '{ptt_key}' is not a valid combo — type it as in "
+                        "the examples, or leave it empty to disable.",
+                        fg="yellow",
+                    )
+                )
+            if valid and ptt_key:
                 settings["dictation_ptt_key"] = ptt_key
                 changed = True
                 click.echo(click.style("  PTT key set.", fg="green"))
@@ -1858,6 +1876,17 @@ def config_set(key, value):
 
     if key not in settings.scalar_keys():
         raise click.ClickException(f"Unknown setting '{key}'. See `trnscrb config list`.")
+    if key == "dictation_ptt_key":
+        # Validate the PTT spec here: an unparseable value would be stored
+        # fine, then the menu bar would quietly show "PTT: off" with no
+        # trace of why.
+        from trnscrb import hotkey
+
+        if value and hotkey.parse(value) is None:
+            raise click.ClickException(
+                f"'{value}' is not a valid PTT combo — e.g. ctrl+alt+f8 or "
+                "caps+t; empty turns PTT off."
+            )
     coerced = _coerce_setting(value, settings.default_for(key))
     settings.put(key, coerced)
     click.echo(f"  {key} = {json.dumps(coerced)}")
