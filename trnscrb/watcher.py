@@ -38,7 +38,7 @@ import os
 import subprocess
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable
 
 from trnscrb.log import get_logger
@@ -53,6 +53,12 @@ POLL_SECS = 1.0  # how often we check mic (fast CoreAudio call)
 APP_POLL_EVERY = 4  # run the slow meeting-app check every N mic polls (~4s)
 APP_GONE_POLLS = 3  # N consecutive app-gone checks → start cooling (~12s)
 IDLE_FALLBACK_SECS = 30.0  # safety re-poll while idle in event-driven mode
+# After the no-meeting-app gate sends us back to idle, don't re-warm for
+# this long. Without it, a continuously active mic (ambient noise, a stuck
+# recorder) ping-pongs idle→warming→idle every WARMUP_SECS forever, with a
+# slow meeting-app check and a mic re-arm on every cycle. A meeting that
+# starts within the window is picked up when the cooldown ends.
+NO_APP_COOLDOWN_SECS = 60.0
 # Silence this long ends the recording even with a meeting tab still open.
 #
 # Measured against 9 real recordings (35–219 min): a five-minute silence
@@ -159,6 +165,7 @@ class MicWatcher:
         self._since: datetime | None = None
         self._rec_started: datetime | None = None
         self._no_app_polls = 0  # consecutive polls without a meeting app
+        self._no_app_until: datetime | None = None  # re-warm suppression
         self._wake = threading.Event()
         self._listener: _MicActivityListener | None = None
         self._event_driven = False
@@ -181,6 +188,7 @@ class MicWatcher:
         self._state = "idle"
         self._since = None
         self._no_app_polls = 0
+        self._no_app_until = None
         self._suppressed = False
         self._cooling_on_silence = False
         # Event-driven idle: CoreAudio wakes us on mic/device changes so the
@@ -305,6 +313,7 @@ class MicWatcher:
                 self._rec_started = None
                 self._no_app_polls = 0
                 self._cooling_on_silence = False
+                self._no_app_until = None
                 _app_counter = 0
                 _app_running = False
                 # Stopping mid-call is a deliberate act ("stop recording this
@@ -324,7 +333,9 @@ class MicWatcher:
                 self._suppressed = False
 
             if self._state == "idle":
-                if active:
+                if active and (
+                    self._no_app_until is None or now >= self._no_app_until
+                ):
                     _log.debug("state %s → %s", "idle", "warming")
                     self._state = "warming"
                     self._since = now
@@ -348,6 +359,12 @@ class MicWatcher:
                         )
                         self._state = "idle"
                         self._since = None
+                        # The mic is still active: without a cooldown the next
+                        # poll re-warms and this gate rejects again — a 6s
+                        # idle↔warming loop with an app check per cycle.
+                        self._no_app_until = now + timedelta(
+                            seconds=NO_APP_COOLDOWN_SECS
+                        )
                         continue
 
                     _log.debug("state %s → %s", "warming", "recording")

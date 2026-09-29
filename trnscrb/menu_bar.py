@@ -51,11 +51,8 @@ _log = get_logger("trnscrb.menu_bar")
 _EMOJI_IDLE = "🎙"
 _EMOJI_RECORDING = "🔴"
 
-# Dictation HUD: the window is a fixed 560×96 pill, so only show this much
-# live text (the tail of it) — a 3-minute dictation would otherwise overflow.
-_HUD_MAX_CHARS = 300
-_HUD_LISTENING = "Listening…"
-_HUD_PAUSED = "Live updates paused on battery — full transcript when it stops"
+# Dictation HUD: a small 64×64 dark chip with a native spinning indicator —
+# no live text, so there is nothing to truncate or update.
 
 
 def _notify(title: str, subtitle: str, message: str) -> None:
@@ -278,7 +275,7 @@ class TrnscrbApp(rumps.App):
         # HUD timer; the silence watchdog sets _dict_stop_requested and the
         # same timer acts on it, so all UI mutation stays on the main thread.
         self._hud_window = None
-        self._hud_label = None
+        self._hud_spinner = None
         self._hud_shown_text = ""
         self._dict_live_text = ""
         self._dict_live_stop = threading.Event()
@@ -814,8 +811,13 @@ class TrnscrbApp(rumps.App):
                 )
 
     def _ptt_start(self) -> bool:
-        """PTT key-down: start a message dictation; the release stops it."""
-        return self._start_dictation("message", ptt=True)
+        """PTT key-down: start a dictation that pastes, never saves a note.
+
+        PTT is a dictation-to-textbox flow: the words land in the focused
+        field, nothing is written to ~/meeting-notes (menu "Message" keeps
+        the save-note behavior).
+        """
+        return self._start_dictation("message", save_note=False, ptt=True)
 
     def _ptt_stop(self) -> None:
         """PTT key-up: stop and finish the dictation this press started."""
@@ -922,7 +924,15 @@ class TrnscrbApp(rumps.App):
                 if result.get("pasted"):
                     detail = f"pasted into active app ({result.get('paste_detail', '')})"
                 elif result.get("on_clipboard"):
-                    detail = "copied to clipboard"
+                    # pbcopy succeeded but the delivery did not land (usually a
+                    # missing Accessibility grant) — say it plainly instead of
+                    # reporting a plain "copied to clipboard" that hides the
+                    # real problem. paste_detail carries the exact reason
+                    # (e.g. the grant instructions when the AX paths failed).
+                    detail = result.get("paste_detail") or (
+                        "auto-paste didn't land (check Accessibility "
+                        "permission) — text is on the clipboard"
+                    )
                 else:
                     detail = "clipboard copy failed"
             else:
@@ -958,16 +968,18 @@ class TrnscrbApp(rumps.App):
         finally:
             self._restore_idle()
 
-    # ── dictation HUD (floating live-transcription overlay) ──────────────────
+    # ── dictation HUD (floating activity indicator) ─────────────────────────
 
     def _show_dictation_hud(self) -> None:
-        """Create and show the floating live-transcription overlay.
+        """Create and show the floating dictation indicator.
 
-        A borderless floating window that shows words as you speak — the
-        "normal app" way to see a live dictation. Runs on the main thread
-        (menu clicks and the SIGUSR2 handler are both main-thread); when it
-        can't be created (headless, AppKit unavailable) the dictation simply
-        proceeds without it — the HUD is a convenience, never a requirement.
+        A small dark chip with a native spinning indicator, centred on the
+        screen. No text, no controls — dictation is driven by the PTT key
+        (release to stop) or the menu, so the HUD only says "it's
+        listening". Runs on the main thread (menu clicks and the SIGUSR2
+        handler are both main-thread); when it can't be created (headless,
+        AppKit unavailable) the dictation simply proceeds without it — the
+        HUD is a convenience, never a requirement.
         """
         if self._hud_window is not None:
             return
@@ -975,86 +987,62 @@ class TrnscrbApp(rumps.App):
             import AppKit
             from Foundation import NSMakeRect
 
-            # Tap-to-stop view — a thin clickable strip at the bottom of
-            # the HUD that triggers the same stop logic as the menu/hotkey
-            # without stealing focus from the target app.
-            class _DictationStopView(AppKit.NSView):  # noqa: E306
-                """Thin clickable strip at the bottom of the dictation HUD."""
-
-                controller = None  # set to the TrnscrbApp instance after init
-
-                def mouseDown_(self, event):
-                    """Stop the dictation when the user clicks this strip."""
-                    if self.controller is not None:
-                        self.controller._request_dict_stop()
-
-            width, height = 560.0, 96.0
+            # ── dimensions & positioning ────────────────────────────────
+            width, height = 64.0, 64.0
             screen = AppKit.NSScreen.mainScreen()
             frame = screen.frame()
             x = (frame.size.width - width) / 2.0
-            y = frame.origin.y + 150.0  # bottom-center, above the dock
+            y = (frame.size.height - height) / 2.0 + frame.origin.y
+
+            # ── window ──────────────────────────────────────────────────
             window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
                 NSMakeRect(x, y, width, height),
                 0,  # borderless
-                AppKit.NSWindowBackingBuffered,
+                AppKit.NSBackingStoreBuffered,
                 False,
             )
-            window.setLevel_(AppKit.NSStatusLevel)  # above normal windows
-            window.setIgnoresMouseEvents_(True)
+            window.setLevel_(AppKit.NSStatusWindowLevel)
+            window.setIgnoresMouseEvents_(True)  # clicks pass through to the app below
             window.setOpaque_(False)
             window.setHasShadow_(True)
             window.setHidesOnDeactivate_(False)
+            window.setAlphaValue_(1.0)
             window.setBackgroundColor_(AppKit.NSColor.clearColor())
+
             content = window.contentView()
             content.setWantsLayer_(True)
-            content.layer().setCornerRadius_(16)
-            content.layer().setBackgroundColor_(
-                AppKit.NSColor.windowBackgroundColor().colorWithAlphaComponent_(0.92).CGColor()
+            content.layer().setCornerRadius_(14)
+            content.layer().setMasksToBounds_(True)
+
+            # Dark rounded chip with a subtle border
+            bgLayer = AppKit.CALayer.layer()
+            bgLayer.setFrame_(NSMakeRect(0, 0, width, height))
+            bgLayer.setCornerRadius_(14)
+            bgLayer.setBackgroundColor_(
+                AppKit.NSColor.colorWithSRGBRed_green_blue_alpha_(0.10, 0.10, 0.12, 0.95).CGColor()
             )
-            label = AppKit.NSTextField.alloc().initWithFrame_(
-                NSMakeRect(18, 18, width - 36, height - 36)
+            bgLayer.setBorderWidth_(1.0)
+            bgLayer.setBorderColor_(
+                AppKit.NSColor.colorWithSRGBRed_green_blue_alpha_(0.25, 0.25, 0.28, 0.5).CGColor()
             )
-            label.setBordered_(False)
-            label.setBezelBorder_(False)
-            label.setEditable_(False)
-            label.setSelectable_(False)
-            label.setDrawsBackground_(False)
-            label.setWraps_(True)
-            label.setLineBreakMode_(AppKit.NSTextFieldLineBreakModeByWordWrapping)
-            label.cell().setWraps_(True)
-            label.setFont_(AppKit.NSFont.systemFontOfSize_(14))
-            label.setStringValue_(_HUD_LISTENING)
-            content.addSubview_(label)
-            # Tap-to-stop pill at the bottom — a thin clickable strip that
-            # triggers the same stop logic as the menu / hotkey, without
-            # stealing focus from the app the user is dictating into.
-            try:
-                stop_view = _DictationStopView.alloc().initWithFrame_(NSMakeRect(0, 0, width, 18))
-                stop_view.setTranslatesAutoresizingMaskIntoConstraints_(False)
-                stop_view.setWantsLayer_(True)
-                stop_view.layer().setBackgroundColor_(
-                    AppKit.NSColor.controlAccentColor().colorWithAlphaComponent_(0.15).CGColor()
-                )
-                stop_view.controller = self  # callback
-                content.addSubview_(stop_view)
-                # Pin to bottom of the window
-                stop_view.leadingAnchor.constraintEqualToAnchor_(content.leadingAnchor).isActive_(
-                    True
-                )
-                stop_view.trailingAnchor.constraintEqualToAnchor_(content.trailingAnchor).isActive_(
-                    True
-                )
-                stop_view.bottomAnchor.constraintEqualToAnchor_(content.bottomAnchor).isActive_(
-                    True
-                )
-                stop_view.heightAnchor.constraintEqualToConstant_(18).isActive_(True)
-                self._hud_stop_view = stop_view
-            except Exception:
-                _log.debug("HUD stop view creation failed", exc_info=True)
-                self._hud_stop_view = None
+            content.layer().addSublayer_(bgLayer)
+
+            # ── native spinning indicator ───────────────────────────────
+            # NSProgressIndicator (spinning style) is the OS's own
+            # spinner — no custom drawing, no Core Animation, and it
+            # animates itself as long as the main run loop is running.
+            spinSize = 24.0
+            spinFrame = NSMakeRect(
+                (width - spinSize) / 2.0, (height - spinSize) / 2.0, spinSize, spinSize
+            )
+            spinner = AppKit.NSProgressIndicator.alloc().initWithFrame_(spinFrame)
+            spinner.setStyle_(2)  # NSProgressIndicatorStyleSpinning
+            content.addSubview_(spinner)
+            spinner.startAnimation_(None)
+
             window.orderFrontRegardless()  # show without stealing focus
             self._hud_window = window
-            self._hud_label = label
+            self._hud_spinner = spinner
             self._hud_shown_text = ""
         except Exception:
             _log.warning("Could not show the dictation HUD", exc_info=True)
@@ -1063,18 +1051,29 @@ class TrnscrbApp(rumps.App):
     def _hide_dictation_hud(self) -> None:
         if self._hud_window is not None:
             try:
+                if self._hud_spinner is not None:
+                    self._hud_spinner.stopAnimation_(None)
+            except Exception:
+                _log.debug("Could not stop the HUD spinner", exc_info=True)
+            try:
                 self._hud_window.orderOut_(None)
             except Exception:
                 _log.debug("Could not hide the dictation HUD", exc_info=True)
         self._hud_shown_text = ""
-        self._hud_stop_view = None
+        self._hud_spinner = None
+        # Drop the window ref so the next dictation builds a fresh HUD —
+        # orderOut_ alone leaves the window hidden but still "existing",
+        # which used to suppress every subsequent HUD.
+        self._hud_window = None
 
     def _update_hud(self, _timer):
-        """Refresh the HUD and act on the auto-stop flag. Main thread only.
+        """Act on the auto-stop flag. Main thread only.
 
         The live loop and the silence watchdog run in background threads;
         this timer (rumps.Timer runs on the main thread) is where their
-        effects reach the UI — the HUD text and the actual stop call.
+        effects reach the UI — the actual stop call. The HUD indicator
+        animates on its own (native spinner), so there is no per-tick
+        text to refresh.
         """
         if self._current_state != "dictating":
             if self._hud_window is not None:
@@ -1082,31 +1081,6 @@ class TrnscrbApp(rumps.App):
             return
         if self._dict_stop_requested:
             self.stop_dictation(None)
-            return
-        if self._hud_window is None:
-            return
-        # When live updates are paused (on battery), show the reason until
-        # the dictation stops — prevents the user from thinking the HUD froze.
-        if self._dict_live_paused and not self._dict_live_text:
-            if self._hud_shown_text != _HUD_PAUSED:
-                self._hud_shown_text = _HUD_PAUSED
-                try:
-                    self._hud_label.setStringValue_(_HUD_PAUSED)
-                except Exception:
-                    _log.debug("Could not update the dictation HUD", exc_info=True)
-            return
-        if not self._dict_live_text:
-            return
-        # Truncate long transcripts so they fit inside the fixed-width HUD.
-        text = self._dict_live_text
-        if len(text) > _HUD_MAX_CHARS:
-            text = "…" + text[-(_HUD_MAX_CHARS - 1) :]
-        if text != self._hud_shown_text:
-            self._hud_shown_text = text
-            try:
-                self._hud_label.setStringValue_(text)
-            except Exception:
-                _log.debug("Could not update the dictation HUD", exc_info=True)
 
     def _run_command(self, plain_text: str) -> None:
         """Match a dictation transcript against commands and execute the result."""
@@ -2165,6 +2139,55 @@ def _startup_is_sane() -> bool:
     return False
 
 
+def _log_accessibility_trust() -> None:
+    """Ensure this process may perform Accessibility actions (auto-paste).
+
+    Both the AX menu-paste path and synthetic keystrokes need the
+    Accessibility grant. When it's missing, ask macOS for the standard
+    "would like to control this computer" dialog once at startup — a
+    background launchd agent cannot prompt mid-paste, which is how the
+    grant silently went absent in the first place. No TCC API is called
+    (TCCAccessRequest SIGTRAPs unsigned processes on this machine); the
+    AXIsProcessTrusted* calls are plain HIServices checks, loaded through
+    PyObjC's loadBundleFunctions (name: str, signature: bytes).
+    """
+    try:
+        import objc
+        from Foundation import NSBundle
+
+        bundle = NSBundle.bundleWithPath_(
+            "/System/Library/Frameworks/ApplicationServices.framework"
+        )
+        if bundle is None or not bundle.load():
+            _log.info(
+                "Accessibility trust: could not load ApplicationServices — skipping check"
+            )
+            return
+        g = {}
+        objc.loadBundleFunctions(
+            bundle,
+            g,
+            [
+                ("AXIsProcessTrusted", b"i"),
+                ("AXIsProcessTrustedWithOptions", b"i@"),
+            ],
+        )
+        if g["AXIsProcessTrusted"]():
+            _log.info("Accessibility trust: granted — auto-paste can act on the frontmost app")
+            return
+        _log.info("Accessibility trust: missing — showing system prompt")
+        g["AXIsProcessTrustedWithOptions"]({"AXTrustedCheckOptionPrompt": True})
+        _notify(
+            "Trnscrb",
+            "Accessibility needed for auto-paste",
+            "Approve the dialog (or enable the entry under System Settings → "
+            "Privacy & Security → Accessibility) so dictation can paste "
+            "directly into your text box.",
+        )
+    except Exception:
+        _log.debug("Accessibility trust check failed", exc_info=True)
+
+
 def main():
     import AppKit
 
@@ -2182,6 +2205,8 @@ def main():
 
     if not _startup_is_sane():
         return  # exit 0 — the one status KeepAlive-on-failure will not restart
+
+    _log_accessibility_trust()
 
     app = TrnscrbApp()
     AppKit.NSApplication.sharedApplication().setActivationPolicy_(
