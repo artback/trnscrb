@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -506,19 +507,466 @@ def copy_to_clipboard(text: str) -> bool:
         return False
 
 
-def paste_text_to_active_app(text: str) -> tuple[bool, str]:
-    """Copy text to clipboard and paste it into the currently focused text field.
+def _post_keystroke(keycode: int, modifiers: int = 0) -> bool:
+    """Post a physical keystroke via CoreGraphics (⌘V = keycode 9, cmd = 1<<20).
 
-    Uses AppleScript to paste into the frontmost application. Requires
-    Accessibility permissions on macOS. Returns (success, detail).
+    Needs only the Accessibility grant — the same permission class trnscrb
+    already holds — and nothing per-app: no Apple Events, no System Events,
+    no automation prompts. A missing grant drops the event silently, which
+    is why callers pre-check with ``_tcc_accessibility_allowed``.
+    """
+    import ctypes
+
+    try:
+        cg = ctypes.cdll.LoadLibrary(
+            "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"
+        )
+        cf = ctypes.cdll.LoadLibrary(
+            "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+        )
+        cg.CGEventCreateKeyboardEvent.restype = ctypes.c_void_p
+        cg.CGEventCreateKeyboardEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_bool]
+        cg.CGEventSetFlags.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        cg.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+        cf.CFRelease.argtypes = [ctypes.c_void_p]
+        for is_down in (True, False):
+            event = cg.CGEventCreateKeyboardEvent(None, keycode, is_down)
+            if not event:
+                return False
+            if modifiers:
+                cg.CGEventSetFlags(event, modifiers)
+            cg.CGEventPost(0, event)  # kCGHIDEventTap
+            cf.CFRelease(event)
+            time.sleep(0.05)
+        return True
+    except Exception:
+        _log.debug("CoreGraphics keystroke failed", exc_info=True)
+        return False
+
+
+# ── Accessibility (AX) paste: the frontmost app performs its own Paste ──────
+#
+# On some macOS builds (seen on macOS 27.0) the synthetic-event injection
+# path is dead: CGEventPost ⌘V returns success but the event is silently
+# dropped, and AppleScript keystrokes fail the same way — while the
+# Accessibility API keeps working. Pressing the frontmost app's own
+# "Edit > Paste" menu item via AXUIElementPerformAction makes the app run
+# its normal paste handler (identical to a real ⌘V) without injecting any
+# key events. Verified working on the affected build.
+
+
+def _ax_paste_frontmost() -> tuple[bool, int | None]:
+    """Press Edit > Paste in the frontmost app via the Accessibility API.
+
+    Returns (performed, ax_error): performed=True when the app ran its own
+    paste action (err 0 / kAXSuccess). The error code is surfaced so callers
+    can distinguish a missing Accessibility grant (kAXErrorAPIDisabled,
+    -25211) from "this app has no Edit > Paste menu item".
+    """
+    import ctypes
+
+    try:
+        from AppKit import NSWorkspace
+    except Exception:
+        _log.debug("AppKit unavailable — Accessibility paste skipped", exc_info=True)
+        return False, None
+
+    try:
+        as_ = ctypes.cdll.LoadLibrary(
+            "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+        )
+        cf = ctypes.cdll.LoadLibrary(
+            "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+        )
+        # Pure ctypes for the CF/AX layer: PyObjC objects passed into ctypes
+        # args crash (SIGBUS) — keep every CF value a raw pointer.
+        cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+        cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint]
+        cf.CFStringGetCString.restype = ctypes.c_bool
+        cf.CFStringGetCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint]
+        cf.CFArrayGetCount.restype = ctypes.c_long
+        cf.CFArrayGetCount.argtypes = [ctypes.c_void_p]
+        cf.CFArrayGetValueAtIndex.restype = ctypes.c_void_p
+        cf.CFArrayGetValueAtIndex.argtypes = [ctypes.c_void_p, ctypes.c_long]
+        as_.AXUIElementCreateApplication.restype = ctypes.c_void_p
+        as_.AXUIElementCreateApplication.argtypes = [ctypes.c_uint32]
+        as_.AXUIElementCopyAttributeValue.restype = ctypes.c_int
+        as_.AXUIElementCopyAttributeValue.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        as_.AXUIElementPerformAction.restype = ctypes.c_int
+        as_.AXUIElementPerformAction.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+
+        def cfstr(s: str) -> int:
+            return cf.CFStringCreateWithCString(None, s.encode("utf-8"), 0x08000100)
+
+        def cf_to_pystring(ref) -> str | None:
+            if not ref:
+                return None
+            buf = ctypes.create_string_buffer(4096)
+            if cf.CFStringGetCString(ref, buf, 4096, 0x08000100):
+                return buf.value.decode("utf-8")
+            return None
+
+        def attr(el, name):
+            out = ctypes.c_void_p()
+            err = as_.AXUIElementCopyAttributeValue(el, cfstr(name), ctypes.byref(out))
+            if err != 0:
+                return None, err
+            return out.value, err
+
+        def title_of(el):
+            ref, _err = attr(el, "AXTitle")
+            return cf_to_pystring(ref)
+
+        def children_of(el):
+            ref, _err = attr(el, "AXChildren")
+            if not ref:
+                return []
+            n = cf.CFArrayGetCount(ref)
+            return [cf.CFArrayGetValueAtIndex(ref, i) for i in range(n)]
+
+        def menu_items(el):
+            """Items of a menu-bar item: direct children, one level deeper if
+            the child is an untitled menu container, else via AXMenu."""
+            kids = children_of(el)
+            items = []
+            for k in kids:
+                if title_of(k) is not None:
+                    items.append(k)
+                else:
+                    sub = children_of(k)
+                    if sub:
+                        items.extend(sub)
+            if items:
+                return items
+            menu, _err = attr(el, "AXMenu")
+            if menu:
+                return children_of(menu)
+            return []
+
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        if app is None:
+            return False, None
+        pid = app.processIdentifier()
+        name = app.localizedName()
+
+        app_el = as_.AXUIElementCreateApplication(pid)
+        menu_bar, err = attr(app_el, "AXMenuBar")
+        if not menu_bar:
+            _log.info("AX paste: no menu bar on %s (pid %s), err=%s", name, pid, err)
+            return False, err
+        edit = None
+        for el in children_of(menu_bar):
+            if title_of(el) == "Edit":
+                edit = el
+                break
+        if edit is None:
+            _log.info("AX paste: no Edit menu in %s", name)
+            return False, None
+        paste_item = None
+        paste_fallback = None
+        for el in menu_items(edit):
+            t = title_of(el)
+            if t is None:
+                continue
+            if t == "Paste":
+                paste_item = el
+                break
+            # Some apps title it "Paste as Plain Text" or "Paste and Match
+            # Style" — an exact "Paste" always wins, but any title starting
+            # with "Paste" beats having no paste at all.
+            if paste_fallback is None and t.startswith("Paste"):
+                paste_fallback = el
+        if paste_item is None:
+            paste_item = paste_fallback
+        if paste_item is None:
+            _log.info("AX paste: no Paste item in %s's Edit menu", name)
+            return False, None
+        err = as_.AXUIElementPerformAction(paste_item, cfstr("AXPress"))
+        if err == 0:
+            _log.info("AX paste: performed Edit>Paste on %s (pid %s)", name, pid)
+            return True, err
+        _log.info("AX paste: AXPress on %s failed with err=%s", name, err)
+        return False, err
+    except Exception:
+        _log.debug("Accessibility paste failed", exc_info=True)
+        return False, None
+
+
+# ── Direct AX insertion: text goes straight to the focused field ────────────
+#
+# AXUIElementSetAttributeValue(focused element, AXSelectedText) inserts text
+# at the caret — or replaces the selection, exactly like a real paste — with
+# no clipboard and no synthetic events. It is the first-choice delivery path:
+# whatever the user had on the clipboard is left untouched.
+
+
+def _ax_insert_text(text: str) -> bool:
+    """Insert ``text`` at the caret of the focused text field.
+
+    Sets AXSelectedText on the frontmost app's focused UI element via the
+    Accessibility API — no clipboard, no synthetic events. Works for
+    standard text fields (NSTextView/NSTextField and similar); when the
+    focused element does not support writing the attribute the call fails
+    gracefully and callers fall back to the clipboard-based paths.
+
+    The focused element is queried on the frontmost app's AXUIElement, not
+    the system-wide element: on the affected macOS 27.0 build the
+    system-wide AXFocusedUIElement query returns kAXErrorCannotComplete
+    (-25204) while the per-app query works.
+    """
+    import ctypes
+
+    try:
+        from AppKit import NSWorkspace
+    except Exception:
+        _log.debug("AppKit unavailable — AX insert skipped", exc_info=True)
+        return False
+
+    try:
+        as_ = ctypes.cdll.LoadLibrary(
+            "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+        )
+        cf = ctypes.cdll.LoadLibrary(
+            "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+        )
+        # Pure ctypes for the CF/AX layer (PyObjC objects crash in ctypes
+        # args — keep every CF value a raw pointer).
+        cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+        cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint]
+        as_.AXUIElementCreateApplication.restype = ctypes.c_void_p
+        as_.AXUIElementCreateApplication.argtypes = [ctypes.c_uint32]
+        as_.AXUIElementCopyAttributeValue.restype = ctypes.c_int
+        as_.AXUIElementCopyAttributeValue.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        as_.AXUIElementSetAttributeValue.restype = ctypes.c_int
+        as_.AXUIElementSetAttributeValue.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        if app is None:
+            _log.info("AX insert: no frontmost app")
+            return False
+        pid = app.processIdentifier()
+        name = app.localizedName()
+
+        focused = ctypes.c_void_p()
+        err = as_.AXUIElementCopyAttributeValue(
+            as_.AXUIElementCreateApplication(pid),
+            cf.CFStringCreateWithCString(None, b"AXFocusedUIElement", 0x08000100),
+            ctypes.byref(focused),
+        )
+        if err != 0 or not focused.value:
+            _log.info("AX insert: no focused UI element on %s (err=%s)", name, err)
+            return False
+        err = as_.AXUIElementSetAttributeValue(
+            focused.value,
+            cf.CFStringCreateWithCString(None, b"AXSelectedText", 0x08000100),
+            cf.CFStringCreateWithCString(None, text.encode("utf-8"), 0x08000100),
+        )
+        if err == 0:
+            _log.info(
+                "AX insert: text set directly in %s's focused field (clipboard untouched)",
+                name,
+            )
+            return True
+        _log.info("AX insert: AXSelectedText write failed on %s (err=%s) — falling back", name, err)
+        return False
+    except Exception:
+        _log.debug("AX insert failed", exc_info=True)
+        return False
+
+
+def _pasteboard_has_items() -> bool | None:
+    """True when the pasteboard holds items, False when empty, None when the
+    state could not be determined (AppKit unavailable)."""
+    try:
+        from AppKit import NSPasteboard
+
+        return bool(NSPasteboard.generalPasteboard().pasteboardItems())
+    except Exception:
+        return None
+
+
+def _restore_clipboard_if_ours(text: str, old: bytes) -> None:
+    """Put the clipboard back to ``old`` after a clipboard-based paste.
+
+    Only when the clipboard still holds exactly ``text`` — if the user
+    copied something new while the paste was in flight, that must win.
+    And only when ``old`` fully represents the previous contents: pbpaste
+    is text-only, so a non-text clipboard (image, file) is left alone
+    rather than clobbered with an empty string.
+    """
+    try:
+        cur = subprocess.run(["pbpaste"], capture_output=True, timeout=2).stdout
+    except Exception:
+        return
+    if cur != text.encode("utf-8"):
+        return  # the user copied something new — keep it
+    if old or _pasteboard_has_items() is False:
+        try:
+            subprocess.run(["pbcopy"], input=old, timeout=2)
+        except Exception:
+            _log.debug("clipboard restore failed", exc_info=True)
+    else:
+        _log.warning(
+            "clipboard held non-text data — dictation text left on the clipboard "
+            "instead of restoring the previous contents"
+        )
+
+
+# Throttle for the on-failure re-prompt: a burst of test presses must not
+# stack system dialogs.
+_last_ax_prompt = 0.0
+
+
+def _prompt_accessibility_if_missing() -> None:
+    """Re-show the system Accessibility dialog after a -25211 paste failure.
+
+    The startup prompt is easy to miss (the app starts in the background
+    before the user has even tried dictation); prompting again at the
+    moment the paste actually fails puts the dialog on screen when it
+    matters. Plain HIServices calls via loadBundleFunctions — no TCC API
+    (TCCAccessRequest SIGTRAPs unsigned processes on this machine).
+    """
+    global _last_ax_prompt
+    now = time.time()
+    if now - _last_ax_prompt < 300:
+        return
+    _last_ax_prompt = now
+    try:
+        import objc
+        from Foundation import NSBundle
+
+        bundle = NSBundle.bundleWithPath_(
+            "/System/Library/Frameworks/ApplicationServices.framework"
+        )
+        if bundle is None or not bundle.load():
+            return
+        g = {}
+        objc.loadBundleFunctions(
+            bundle, g, [("AXIsProcessTrustedWithOptions", b"i@")]
+        )
+        g["AXIsProcessTrustedWithOptions"]({"AXTrustedCheckOptionPrompt": True})
+        _log.info("Accessibility: re-prompted system dialog after paste failure")
+    except Exception:
+        _log.debug("Accessibility re-prompt failed", exc_info=True)
+
+
+# Terminal emulators: their text views accept an AXSelectedText write and
+# report success while silently dropping the text (the terminal buffer is
+# not a real editable field). They take the Edit > Paste path instead, which
+# runs the terminal's own paste handler — exactly what ⌘V would do.
+_TERMINAL_BUNDLE_IDS = {
+    "com.mitchellh.ghostty",   # Ghostty
+    "com.calyx.terminal",      # Calyx (where the OpenCode TUI runs)
+    "com.apple.Terminal",      # Terminal.app
+    "com.googlecode.iterm2",   # iTerm2
+    "org.alacritty",           # Alacritty
+    "net.kovidgoyal.kitty",    # kitty
+    "com.github.wez.wezterm",  # WezTerm
+    "co.zeit.hyper",           # Hyper
+    "io.tabby",                # Tabby
+    "com.waveterm.waveterm",   # Wave
+}
+
+
+def _frontmost_is_terminal() -> bool:
+    """True when the frontmost app is a terminal emulator (see above)."""
+    try:
+        from AppKit import NSWorkspace
+
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        if app is None:
+            return False
+        return (app.bundleIdentifier() or "") in _TERMINAL_BUNDLE_IDS
+    except Exception:
+        _log.debug("frontmost-terminal check failed", exc_info=True)
+        return False
+
+
+def paste_text_to_active_app(text: str) -> tuple[bool, str]:
+    """Deliver text to the currently focused text field.
+
+    Paths, in order:
+    1. Direct Accessibility insertion — set AXSelectedText on the focused
+       field. Inserts at the caret like a real paste and touches the
+       clipboard not at all.
+    2. Accessibility menu action — the clipboard holds the text while the
+       frontmost app performs its own Edit > Paste (works while macOS's
+       synthetic event injection is broken); the previous clipboard
+       contents are restored afterwards.
+    3. CoreGraphics ⌘V keystroke — works when event injection is healthy.
+    4. AppleScript keystroke — last resort when Apple Events are granted.
+    Paths 3-4 leave the text on the clipboard (their delivery cannot be
+    verified, so the text is never lost). When every path fails the text
+    is also left on the clipboard so a manual ⌘V still works.
+    Returns (success, detail).
     """
     if not text:
         return False, "empty text"
-    # Copy to clipboard first.
-    ok = copy_to_clipboard(text)
-    if not ok:
+    # 1) Direct insertion: no clipboard involved at all. Terminals are
+    # skipped — their text views report success for an AXSelectedText write
+    # while silently dropping the text, so they take the Edit > Paste path
+    # below (the terminal's own paste handler, with the clipboard restored
+    # straight after).
+    if _frontmost_is_terminal():
+        _log.info("paste: frontmost app is a terminal — using Edit > Paste path")
+    elif _ax_insert_text(text):
+        return True, "pasted directly into text field (clipboard untouched)"
+    # The clipboard-based paths: snapshot the clipboard so it can be
+    # restored after a verified paste.
+    old_clip = b""
+    try:
+        old_clip = subprocess.run(["pbpaste"], capture_output=True, timeout=2).stdout
+    except Exception:
+        pass
+    if not copy_to_clipboard(text):
         return False, "could not copy to clipboard"
-    # Paste via AppleScript (System Events → keystroke v with command).
+    # 2) Accessibility menu action: the frontmost app performs its own
+    # paste (synchronous — the clipboard is read within the action, so the
+    # restore below is safe). Works even while synthetic injection is dead.
+    performed, ax_err = _ax_paste_frontmost()
+    if performed:
+        _restore_clipboard_if_ours(text, old_clip)
+        return True, "pasted into active text field (Accessibility)"
+    if ax_err == -25211:  # kAXErrorAPIDisabled — no Accessibility grant
+        # Both synthetic paths below need that same grant, and this macOS
+        # build silently drops posted events without it — attempting would
+        # only report a fake success. The text stays on the clipboard so a
+        # manual ⌘V still works.
+        _log.info(
+            "paste: Accessibility grant missing (-25211) — skipping "
+            "synthetic input paths"
+        )
+        _prompt_accessibility_if_missing()
+        return (
+            False,
+            "Accessibility grant missing — enable it in System Settings → "
+            "Privacy & Security → Accessibility (the entry may be named "
+            "'Python' or 'Trnscrb'); text is on the clipboard for a manual ⌘V",
+        )
+    # 3) CoreGraphics keystroke: no Apple Events, no System Events, no
+    # per-app automation prompts — just the Accessibility grant. (No TCC API
+    # is called to pre-check it: on this machine TCCAccessRequest SIGTRAPs
+    # unsigned processes, and the grant itself was verified in the system
+    # log — io.trnscrb.app, authValue=allowed.) The post is async and can be
+    # silently dropped (macOS 27 input-stack bug), so the text is left on
+    # the clipboard rather than restored — worst case the user pastes
+    # manually.
+    if _post_keystroke(9, 1 << 20):  # kVK_ANSI_V with the command flag
+        return True, "pasted into active text field (CoreGraphics)"
+    _log.info("CoreGraphics paste unavailable — falling back to AppleScript")
+    # Fallback: paste via AppleScript (System Events → keystroke v with command).
     try:
         script = """
             tell application "System Events"
@@ -530,6 +978,11 @@ def paste_text_to_active_app(text: str) -> tuple[bool, str]:
         proc = subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)
         if proc.returncode == 0:
             return True, "pasted into active text field"
+        _log.info(
+            "AppleScript paste failed (rc=%s): %s",
+            proc.returncode,
+            (proc.stderr or proc.stdout or "").strip()[:200],
+        )
         # Fallback: try pasting via target app.
         try:
             script2 = f"""
@@ -543,9 +996,20 @@ def paste_text_to_active_app(text: str) -> tuple[bool, str]:
             proc2 = subprocess.run(["osascript", "-e", script2], capture_output=True, timeout=5)
             if proc2.returncode == 0:
                 return True, "pasted into active text field"
+            _log.info(
+                "AppleScript paste fallback failed (rc=%s): %s",
+                proc2.returncode,
+                (proc2.stderr or proc2.stdout or "").strip()[:200],
+            )
         except Exception:
             pass
-        return False, "paste failed (Accessibility permissions?)"
+        grant_hint = (
+            " (Accessibility grant missing — enable Trnscrb in System Settings → "
+            "Privacy & Security → Accessibility)"
+            if ax_err == -25211  # kAXErrorAPIDisabled
+            else ""
+        )
+        return False, f"paste failed{grant_hint} — text is on the clipboard"
     except Exception as e:
         _log.debug("paste_text_to_active_app failed: %s", e, exc_info=True)
         return False, "paste failed — clipboard still has text"
@@ -657,6 +1121,122 @@ def inject_into_meeting_transcript(text: str, meeting_path: Path) -> bool:
         return False
 
 
+# ── voice symbols: spoken word → typed character ─────────────────────────────
+# The ASR writes down what you say; this pass turns the words you say for
+# symbols into the symbols themselves ("at sign" → @, "new line" → a real
+# newline in the pasted text). Matches are word-boundary anchored so ordinary
+# prose is left alone ("the period between shots" keeps its period word).
+# The built-in map is extended or overridden by the ``voice_symbol_map``
+# setting (an empty value removes a built-in phrase); ``voice_symbols`` set
+# to false disables the pass entirely.
+_VOICE_SYMBOL_MAP: dict[str, str] = {
+    # symbols
+    "at sign": "@",
+    "hash": "#",
+    "number sign": "#",
+    "ampersand": "&",
+    "percent": "%",
+    "per cent": "%",
+    "dollar sign": "$",
+    "euro sign": "€",
+    "yen sign": "¥",
+    "open quote": '"',
+    "close quote": '"',
+    "double quote": '"',
+    "open single quote": "'",
+    "close single quote": "'",
+    "apostrophe": "'",
+    "open paren": "(",
+    "close paren": ")",
+    "closing paren": ")",
+    "open bracket": "[",
+    "close bracket": "]",
+    "open brace": "{",
+    "close brace": "}",
+    "slash": "/",
+    "forward slash": "/",
+    "backslash": "\\",
+    "underscore": "_",
+    "asterisk": "*",
+    "star": "*",
+    "caret": "^",
+    "tilde": "~",
+    "plus sign": "+",
+    "minus sign": "-",
+    "em dash": "—",
+    "en dash": "–",
+    "equals sign": "=",
+    "equal sign": "=",
+    "less than": "<",
+    "greater than": ">",
+    "exclamation point": "!",
+    "exclamation mark": "!",
+    "question mark": "?",
+    "colon": ":",
+    "semicolon": ";",
+    "comma": ",",
+    "period": ".",
+    "full stop": ".",
+    "dot": ".",
+    "pipe": "|",
+    "vertical bar": "|",
+    # layout: real characters in the pasted text. A pasted newline is a line
+    # break in a chat composer (it does not send the message); literal key
+    # presses (Return, Tab) are deliberately never performed.
+    "new line": "\n",
+    "line break": "\n",
+    "new paragraph": "\n",
+    "carriage return": "\n",
+    "tab": "\t",
+}
+
+
+def _voice_symbol_map() -> dict[str, str]:
+    """The built-in map merged with the user's ``voice_symbol_map`` setting."""
+    if not settings.get("voice_symbols"):
+        return {}
+    merged = dict(_VOICE_SYMBOL_MAP)
+    custom = settings.get("voice_symbol_map")
+    if isinstance(custom, dict):
+        for phrase, value in custom.items():
+            phrase = str(phrase).strip().lower()
+            if not phrase:
+                continue
+            if value in (None, ""):
+                merged.pop(phrase, None)
+            else:
+                merged[phrase] = str(value)
+    return merged
+
+
+def apply_voice_symbols(segments: list[dict]) -> int:
+    """Convert spoken symbol words to characters in the segments, in place.
+
+    Returns how many words were converted (0 when the pass is disabled or
+    found nothing). Longest phrases win, so "forward slash" beats "slash".
+    """
+    mapping = _voice_symbol_map()
+    if not mapping:
+        return 0
+    phrases = sorted(mapping, key=len, reverse=True)
+    pattern = re.compile(
+        r"\b(?:" + "|".join(re.escape(p) for p in phrases) + r")\b", re.IGNORECASE
+    )
+    total = 0
+    for seg in segments:
+        text = str(seg.get("text") or "")
+        if not text.strip():
+            continue
+        converted, count = pattern.subn(lambda m: mapping[m.group(0).lower()], text)
+        if count:
+            # Tidy the spacing the ASR put around the mapped tokens: "john @
+            # example . com" reads as an address, not a sentence.
+            converted = converted.replace(" @ ", "@").replace(" @", "@").replace(" . ", ".").replace(" .", ".")
+            seg["text"] = converted
+            total += count
+    return total
+
+
 def finish(
     preset: str,
     started_at: datetime,
@@ -695,6 +1275,10 @@ def finish(
         raise
     _cleanup_audio(audio_path)
 
+    converted = apply_voice_symbols(segments)
+    if converted:
+        _log.info("Voice symbols: converted %d spoken word(s)", converted)
+
     plain = plain_text(segments)
     duration_secs = float(segments[-1]["end"]) if segments else 0.0
 
@@ -727,6 +1311,7 @@ def finish(
             # paste_text_to_active_app handles copy + paste in one step.
             paste_ok, paste_detail = paste_text_to_active_app(plain)
             on_clipboard = True  # it copies first, so clipboard landed.
+            _log.info("Dictation paste: %s", "ok" if paste_ok else f"FAILED ({paste_detail})")
         else:
             on_clipboard = copy_to_clipboard(plain)
 

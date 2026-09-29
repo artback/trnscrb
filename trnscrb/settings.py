@@ -70,6 +70,13 @@ _DEFAULTS: dict = {
     # into whatever text field is currently focused (cmd+v via AppleScript).
     # Requires Accessibility permissions for Trnscrb in System Settings.
     "paste_on_dictation": True,
+    # Convert spoken symbol words to typed characters after transcription
+    # ("at sign" → @, "new line" → a real newline in the pasted text). The
+    # built-in map lives in dictation.py; ``voice_symbol_map`` adds or
+    # overrides phrases (an empty value removes a built-in). False disables
+    # the pass.
+    "voice_symbols": True,
+    "voice_symbol_map": {},
     # End a dictation automatically when the speaker stops talking. Off means
     # dictations run until stopped manually (Stop Dictation / SIGUSR1).
     "dictation_auto_stop": True,
