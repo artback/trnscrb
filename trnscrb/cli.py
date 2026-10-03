@@ -615,6 +615,31 @@ def _semantic_search(query: str) -> None:
         click.echo(f"  {h['text']}")
 
 
+# ── warm-search ───────────────────────────────────────────────────────────────
+
+
+@cli.command()
+def warm_search():
+    """Warm the on-device embedding model so search is fast.
+
+    Downloads and loads the ~90 MB model (~30 s cold start). Subsequent
+    search queries use the cached model (~8 s warm path). The model is
+    auto-warmed at dashboard start, but this command is useful for CLI
+    sessions or when you want to verify the model is available.
+    """
+    from trnscrb import semantic_search as sem
+
+    if not sem.available():
+        raise click.ClickException(
+            "Semantic search needs `sentence-transformers`. Reinstall/upgrade trnscrb."
+        )
+    click.echo("Warming semantic search model (first run downloads ~90 MB)…")
+    if sem.preload():
+        click.echo(click.style("  Model warmed — search is fast now.", fg="green"))
+    else:
+        click.echo(click.style("  Model failed to load; search will fall back to keyword mode.", fg="yellow"))
+
+
 # ── show ──────────────────────────────────────────────────────────────────────
 
 

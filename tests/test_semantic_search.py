@@ -123,5 +123,86 @@ class IndexAndSearchTest(unittest.TestCase):
         self.assertEqual(sem.search("   "), [])
 
 
+class WarmupTest(unittest.TestCase):
+    """Tests for the model warm/unwarm lifecycle (preload, unload, is_warmed)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.notes = Path(self._tmp.name) / "notes"
+        self.notes.mkdir()
+        self.cfg = Path(self._tmp.name) / "cfg"
+        self.cfg.mkdir()
+
+        patch.object(sem, "_INDEX_DIR", self.cfg).start()
+        patch.object(sem, "_VECTORS_FILE", self.cfg / "v.npy").start()
+        patch.object(sem, "_META_FILE", self.cfg / "m.json").start()
+        patch("trnscrb.storage.NOTES_DIR", self.notes).start()
+        self._embed = patch.object(sem, "_embed", side_effect=_fake_embed).start()
+        # _get_model sets module-level _model; side_effect must mirror that
+        # behavior (assigning to sem._model) so the mock is realistic.
+        self._mock_get = patch.object(sem, "_get_model").start()
+        self.addCleanup(patch.stopall)
+
+    def test_is_warmed_returns_false_before_preload(self):
+        sem._model = None
+        self.assertFalse(sem.is_warmed())
+
+    def test_is_warmed_returns_true_after_preload(self):
+        instance = object()
+        self._mock_get.side_effect = lambda: setattr(sem, "_model", instance) or instance
+        self.assertTrue(sem.preload())
+        self.assertTrue(sem.is_warmed())
+        self.assertIs(sem._model, instance)
+
+    def test_preload_is_idempotent(self):
+        instance = object()
+        self._mock_get.side_effect = lambda: setattr(sem, "_model", instance) or instance
+        sem.preload()
+        first = sem._model
+        sem.preload()
+        sem.preload()
+        # model stays the same after warm (singleton)
+        self.assertTrue(sem.is_warmed())
+        self.assertIs(sem._model, first)
+
+    def test_unload_clears_model(self):
+        instance = object()
+        self._mock_get.side_effect = lambda: setattr(sem, "_model", instance) or instance
+        sem.preload()
+        self.assertTrue(sem.is_warmed())
+        sem.unload()
+        self.assertFalse(sem.is_warmed())
+        self.assertIsNone(sem._model)
+
+    def test_unload_is_safe_when_not_loaded(self):
+        sem._model = None
+        # Should not raise
+        sem.unload()
+        self.assertIsNone(sem._model)
+
+    def test_reload_after_unload_works(self):
+        instance = object()
+        self._mock_get.side_effect = lambda: setattr(sem, "_model", instance) or instance
+        sem.preload()
+        self.assertTrue(sem.is_warmed())
+        sem.unload()
+        self.assertFalse(sem.is_warmed())
+        # Subsequent preload re-loads
+        sem.preload()
+        self.assertTrue(sem.is_warmed())
+        self.assertIs(sem._model, instance)
+
+    def test_preload_false_when_model_unavailable(self):
+        self._mock_get.side_effect = ImportError("No module named 'sentence_transformers'")
+        result = sem.preload()
+        self.assertFalse(result)
+
+    def test_preload_false_on_runtime_error(self):
+        self._mock_get.side_effect = RuntimeError("Failed to load model")
+        result = sem.preload()
+        self.assertFalse(result)
+
+
 if __name__ == "__main__":
     unittest.main()

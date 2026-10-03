@@ -30,6 +30,7 @@ from trnscrb import (
     hotkey,
     obsidian,
     ptt,
+    semantic_search,
     storage,
     titles,
     transcriber,
@@ -312,6 +313,15 @@ class TrnscrbApp(rumps.App):
         self._refresh_enrich_settings_menu()
         self._update_health_item()
 
+        # Warm the embedding model now (background thread) so the first search
+        # hits the fast path. The ~90 MB SentenceTransformer takes ~30 s on
+        # cold start; after warm it is ~8 s.
+        threading.Thread(
+            target=semantic_search.preload,
+            daemon=True,
+            name="trnscrb-semsearch-warmup",
+        ).start()
+
         # Models load lazily when a recording starts (see _do_start) and are
         # released again after a long idle period to free ~1 GB of memory.
         self._unload_timer: threading.Timer | None = None
@@ -437,6 +447,7 @@ class TrnscrbApp(rumps.App):
         try:
             transcriber.unload_models()
             diarizer.unload_pipeline()
+            semantic_search.unload()
         except Exception:
             _log.debug("Idle model unload failed", exc_info=True)
 
