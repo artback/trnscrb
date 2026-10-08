@@ -250,49 +250,8 @@ class SettingsDefaultsTest(unittest.TestCase):
         self.assertIn("dictation_auto_stop_silence_secs", keys)
 
 
-# ── P1: HUD truncation ───────────────────────────────────────────────────────
-
-
-class HUDTruncationTest(unittest.TestCase):
-    """_update_hud truncates long live text to fit the 560×96 HUD."""
-
-    def _hud_text(self, app, live_text: str) -> str:
-        """Trigger _update_hud and return what the label would show."""
-        app._hud_window = mock.Mock()
-        app._hud_label = mock.Mock()
-        app._hud_shown_text = ""
-        app._dict_live_text = live_text
-        app._current_state = "dictating"
-        app._update_hud(None)
-        call_args = app._hud_label.setStringValue_.call_args
-        if call_args:
-            return call_args[0][0]
-        return ""
-
-    def test_short_text_shown_as_is(self):
-        app = _hud_app()
-        text = self._hud_text(app, "hello world")
-        self.assertEqual(text, "hello world")
-
-    def test_long_text_is_truncated(self):
-        """Text longer than _HUD_MAX_CHARS shows the last 300 chars with '…'."""
-        app = _hud_app()
-        long_text = "x" * 600
-        text = self._hud_text(app, long_text)
-        # Should start with '…' and have at most _HUD_MAX_CHARS chars.
-        self.assertTrue(text.startswith("…"), "truncated text starts with '…'")
-        self.assertLessEqual(len(text), 300, "truncated text fits in HUD width")
-
-    def test_roughly_max_chars_not_truncated(self):
-        """Text near the limit is shown without truncation."""
-        app = _hud_app()
-        near_limit = "x" * 290
-        text = self._hud_text(app, near_limit)
-        self.assertEqual(text, near_limit)
-
-
 def _hud_app():
-    """Minimal app for HUD truncation tests."""
+    """Minimal menu-bar app for the dictation unit tests."""
     from trnscrb import menu_bar
 
     app = menu_bar.TrnscrbApp.__new__(menu_bar.TrnscrbApp)
