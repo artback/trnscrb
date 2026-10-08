@@ -16,13 +16,28 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-import sounddevice as sd
 
 from trnscrb.log import get_logger
 
 _log = get_logger("trnscrb.recorder")
 
 SAMPLE_RATE = 16_000  # fixed capture rate for local transcription backends
+
+
+def _sounddevice():
+    """Lazily import sounddevice (and thus initialize PortAudio).
+
+    sounddevice initializes PortAudio at import time, which fails on
+    headless machines without a working audio host API (e.g. a Linux
+    server with no PulseAudio). Capture is only needed where there is
+    audio hardware, so import on first use rather than at module import —
+    that keeps ``trnscrb serve`` (and the rest of trnscrb) importable on
+    such hosts.
+    """
+    import sounddevice
+
+    return sounddevice
+
 
 _STALE_AGE_SECS = 3600  # 1 hour
 
@@ -143,7 +158,7 @@ class Recorder:
         self.device = device
         self.capture_system_audio = system_audio
         self._recording = False
-        self._stream: sd.InputStream | None = None
+        self._stream = None
         self._lock = threading.Lock()
         self._tmpfile = None
         self._frame_count = 0
@@ -182,7 +197,7 @@ class Recorder:
             self._attr_mic.clear()
             self._attr_sys.clear()
         self._recording = True
-        self._stream = sd.InputStream(
+        self._stream = _sounddevice().InputStream(
             device=self.device,
             samplerate=SAMPLE_RATE,
             channels=1,
@@ -516,7 +531,7 @@ class Recorder:
             except Exception:
                 _log.debug("Stalled stream cleanup failed", exc_info=True)
         try:
-            stream = sd.InputStream(
+            stream = _sounddevice().InputStream(
                 device=self.device,
                 samplerate=SAMPLE_RATE,
                 channels=1,
@@ -560,6 +575,6 @@ class Recorder:
     def list_input_devices() -> list[dict]:
         return [
             {"index": i, "name": dev["name"], "channels": dev["max_input_channels"]}
-            for i, dev in enumerate(sd.query_devices())
+            for i, dev in enumerate(_sounddevice().query_devices())
             if dev["max_input_channels"] > 0
         ]
