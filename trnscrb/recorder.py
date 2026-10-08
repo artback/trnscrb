@@ -39,6 +39,24 @@ def _sounddevice():
     return sounddevice
 
 
+def __getattr__(name: str):
+    """Module-level ``sd`` alias, resolved lazily (PEP 562).
+
+    Tests patch ``trnscrb.recorder.sd.InputStream`` (see
+    tests/test_recorder_streaming.py), so the historical module attribute
+    must still resolve. Resolving it here — instead of with a module-level
+    ``import sounddevice as sd`` — keeps the PortAudio initialization out
+    of the module import path, which is what lets headless hosts import
+    this module (see :func:`_sounddevice`).
+    """
+    if name == "sd":
+        import sounddevice
+
+        globals()["sd"] = sounddevice
+        return sounddevice
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 _STALE_AGE_SECS = 3600  # 1 hour
 
 # Bound on buffered system audio awaiting mix-in. The mic clock is the master;
