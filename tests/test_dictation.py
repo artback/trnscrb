@@ -14,7 +14,7 @@ from unittest import mock
 
 from click.testing import CliRunner
 
-from trnscrb import cli, enricher, mcp_server, storage
+from trnscrb import cli, enricher, mcp_server, settings, storage
 from trnscrb import dictation as d
 from trnscrb import glossary as g
 
@@ -107,6 +107,12 @@ class DictationEngineTest(unittest.TestCase):
         for p in patchers:
             p.start()
             self.addCleanup(p.stop)
+        # finish() routes message text through the paste path when
+        # paste_on_dictation is on (the default). Pin it off so the copy
+        # branch these tests assert is deterministic on any host — on a
+        # headless runner the AX-insert step may or may not "succeed",
+        # which would otherwise skip the clipboard entirely.
+        settings.put("paste_on_dictation", False)
 
     def test_preset_label_and_is_preset(self):
         self.assertEqual(d.preset_label("message"), "Message")
