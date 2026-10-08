@@ -41,20 +41,25 @@ def live_server():
     thread.start()
     url = f"http://127.0.0.1:{port}"
     headers = {"Authorization": f"Bearer {TOKEN}"}
-    deadline = time.time() + 15
-    last: object = None
+    # Wait for the socket to accept (uvicorn startup) rather than poking the
+    # API: the first /api/health request also warms the optional embedding
+    # backend (sentence-transformers), which can exceed a short per-poke
+    # timeout on a cold CI runner and look like a dead server.
+    deadline = time.time() + 30
     while time.time() < deadline:
         try:
-            last = httpx.get(url + "/api/health", headers=headers, timeout=1.0)
-            if last.status_code == 200:
+            with socket.create_connection(("127.0.0.1", port), timeout=2):
                 break
-        except httpx.HTTPError as e:
-            last = e
-        time.sleep(0.1)
+        except OSError:
+            time.sleep(0.2)
     else:
         server.should_exit = True
         thread.join(timeout=5)
-        pytest.fail(f"live server did not come up: {last!r}")
+        pytest.fail("live server did not come up (socket never accepted)")
+    # One authenticated health check with a generous timeout: the first
+    # request may block while the optional embedding backend imports.
+    r = httpx.get(url + "/api/health", headers=headers, timeout=120)
+    assert r.status_code == 200, r.text
     yield {"url": url, "token": TOKEN, "server": server}
     server.should_exit = True
     thread.join(timeout=10)
