@@ -113,9 +113,19 @@ def test_sync_all_unconfigured_raises():
 def test_push_file_success(configured):
     path = _write_local_transcript("2026-10-08_09-02_pushed.txt", "Meeting: pushed\n")
     assert push.push_file(path) is True
-    r = httpx.get(configured["url"] + "/api/transcript/2026-10-08_09-02_pushed", timeout=5)
+    r = httpx.get(
+        configured["url"] + "/api/transcript/2026-10-08_09-02_pushed",
+        headers={"Authorization": f"Bearer {configured['token']}"},
+        timeout=5,
+    )
     assert r.status_code == 200
     assert "Meeting: pushed" in r.text
+
+
+def test_fetch_transcript_requires_token(configured):
+    _write_local_transcript("2026-10-08_09-02b_secret.txt", "secret\n")
+    r = httpx.get(configured["url"] + "/api/transcript/2026-10-08_09-02b_secret", timeout=5)
+    assert r.status_code == 401
 
 
 def test_push_file_wrong_token(configured, monkeypatch):
@@ -170,13 +180,25 @@ def test_save_transcript_hooks_push_when_configured(configured, monkeypatch):
 
 
 def test_sync_all_pushes_everything(configured):
-    for name in ("2026-10-08_10-00_one.txt", "2026-10-08_10-01_two.txt", "2026-10-08_10-02_three.txt"):
+    for name in (
+        "2026-10-08_10-00_one.txt",
+        "2026-10-08_10-01_two.txt",
+        "2026-10-08_10-02_three.txt",
+    ):
         _write_local_transcript(name, f"Meeting: {name}\n")
     ok, failed = push.sync_all()
     assert failed == 0
     assert ok >= 3
-    for name in ("2026-10-08_10-00_one.txt", "2026-10-08_10-01_two.txt", "2026-10-08_10-02_three.txt"):
-        r = httpx.get(configured["url"] + f"/api/transcript/{name[:-4]}", timeout=5)
+    for name in (
+        "2026-10-08_10-00_one.txt",
+        "2026-10-08_10-01_two.txt",
+        "2026-10-08_10-02_three.txt",
+    ):
+        r = httpx.get(
+            configured["url"] + f"/api/transcript/{name[:-4]}",
+            headers={"Authorization": f"Bearer {configured['token']}"},
+            timeout=5,
+        )
         assert r.status_code == 200, name
 
 

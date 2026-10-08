@@ -142,9 +142,7 @@ class TestCapsLockHold(unittest.TestCase):
         self.assertTrue(s.caps_held)
         self.assertTrue(ptt.handle_key_down(s, 17, 0))
         s2 = _caps_state()
-        self.assertFalse(
-            ptt.handle_key_down(s2, hotkey.CAPS_LOCK_CODE, hotkey.FLAG_CAPS_LOCK)
-        )
+        self.assertFalse(ptt.handle_key_down(s2, hotkey.CAPS_LOCK_CODE, hotkey.FLAG_CAPS_LOCK))
         self.assertTrue(ptt.handle_key_down(s2, 17, hotkey.FLAG_CAPS_LOCK))
 
     def test_release_of_caps_does_not_stop_dictation(self):

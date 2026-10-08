@@ -333,9 +333,7 @@ class MicWatcher:
                 self._suppressed = False
 
             if self._state == "idle":
-                if active and (
-                    self._no_app_until is None or now >= self._no_app_until
-                ):
+                if active and (self._no_app_until is None or now >= self._no_app_until):
                     _log.debug("state %s → %s", "idle", "warming")
                     self._state = "warming"
                     self._since = now
@@ -362,9 +360,7 @@ class MicWatcher:
                         # The mic is still active: without a cooldown the next
                         # poll re-warms and this gate rejects again — a 6s
                         # idle↔warming loop with an app check per cycle.
-                        self._no_app_until = now + timedelta(
-                            seconds=NO_APP_COOLDOWN_SECS
-                        )
+                        self._no_app_until = now + timedelta(seconds=NO_APP_COOLDOWN_SECS)
                         continue
 
                     _log.debug("state %s → %s", "warming", "recording")

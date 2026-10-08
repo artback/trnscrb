@@ -278,8 +278,7 @@ def install(force: bool):
             else {}
         )
         ptt_has_it = (
-            "dictation_ptt_key" in stored
-            and str(stored["dictation_ptt_key"]).strip() != ""
+            "dictation_ptt_key" in stored and str(stored["dictation_ptt_key"]).strip() != ""
         )
     except Exception:
         ptt_has_it = True
@@ -294,8 +293,7 @@ def install(force: bool):
             ptt_key, valid = "", False
             for _attempt in range(3):
                 ptt_key = click.prompt(
-                    "  Key combo (e.g. ctrl+alt+f8, cmd+shift+d, caps+t, "
-                    "empty to disable)",
+                    "  Key combo (e.g. ctrl+alt+f8, cmd+shift+d, caps+t, empty to disable)",
                     default="ctrl+alt+f8",
                     show_default=False,
                 ).strip()
@@ -382,6 +380,72 @@ def server():
     from trnscrb.mcp_server import main
 
     main()
+
+
+@cli.command()
+@click.option("--host", default="127.0.0.1", help="Bind address (default 127.0.0.1).")
+@click.option("--port", default=8765, type=int, help="Bind port (default 8765).")
+@click.option("--token", default=None, help="Bearer token for auth. Auto-generates if unset.")
+@click.option("--insecure", is_flag=True, help="Allow binding to non-loopback without a token.")
+def serve(host, port, token, insecure):
+    """Start the network server — transcripts + MCP over Streamable HTTP."""
+    from trnscrb import settings
+    from trnscrb.server_http import (
+        BindPolicyError,
+        check_bind_policy,
+        client_setup_snippet,
+        generate_token,
+        resolve_token,
+        start,
+    )
+
+    # Resolve token: flag > env > settings.
+    resolved = resolve_token(token)
+    if not resolved:
+        resolved = generate_token()
+        settings.put("server_token", resolved)
+        click.echo(f"Generated and saved a new token: {resolved}")
+
+    try:
+        check_bind_policy(host, resolved, insecure=insecure)
+    except BindPolicyError as e:
+        raise click.ClickException(str(e))
+
+    url = f"http://{host}:{port}"
+    snippet = client_setup_snippet(url, resolved)
+    click.echo(snippet)
+    click.echo()
+
+    start(host=host, port=port, token=resolved, insecure=insecure)
+
+
+@cli.command()
+@click.option("--status", is_flag=True, help="Show server health status.")
+def sync(status):
+    """Push all local transcripts to the configured remote server."""
+    from trnscrb import push
+
+    if status:
+        info = push.status()
+        if info is None:
+            click.echo("unreachable")
+        else:
+            import json
+
+            click.echo(json.dumps(info, indent=2))
+        return
+
+    if not push.is_configured():
+        raise click.ClickException(
+            "remote_url is not set — configure it with `trnscrb config set remote_url …`"
+        )
+
+    ok, failed = push.sync_all(
+        progress=lambda name, ok: click.echo(
+            f"  {'✓' if ok else '✗'} {name}" + ("" if ok else " (unreachable)")
+        )
+    )
+    click.echo(f"\nPushed {ok} transcript(s), {failed} failed.")
 
 
 # ── watch ─────────────────────────────────────────────────────────────────────

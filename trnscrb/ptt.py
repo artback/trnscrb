@@ -197,7 +197,10 @@ class EventTap:
             import Quartz
 
             if event_type in _TAP_DISABLED_TYPES:
-                _log.debug("PTT tap disabled: %s, re-enabling", "timeout" if event_type == 4294967294 else "user-input")
+                _log.debug(
+                    "PTT tap disabled: %s, re-enabling",
+                    "timeout" if event_type == 4294967294 else "user-input",
+                )
                 # The system disabled the tap (stall or revoked grant).
                 # Re-enable best-effort; the owner's re-arm loop notices via
                 # `disabled_reason` / a failed restart.
@@ -213,7 +216,12 @@ class EventTap:
                 autorepeat = bool(
                     Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventAutorepeat)
                 )
-                _log.debug("PTT calling _callback(down, code=%d, flags=%d, autorepeat=%s)", code, flags, autorepeat)
+                _log.debug(
+                    "PTT calling _callback(down, code=%d, flags=%d, autorepeat=%s)",
+                    code,
+                    flags,
+                    autorepeat,
+                )
                 self._callback("down", code, flags, autorepeat)
                 _log.debug("PTT _callback(down) returned OK")
             else:

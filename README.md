@@ -352,6 +352,36 @@ Dictating from a noisy room (fan, traffic, café)? Both dictation and meetings s
 
 ---
 
+## Client/server mode
+
+Capture and transcription stay local on the Mac; the transcript store and
+MCP interface run on a server (any Linux box).  Your agents on the Mac
+query the server for transcripts; finished transcripts push automatically.
+
+With `remote_url` unset (the default), everything runs locally — this mode
+is purely additive and opt-in.
+
+**Server setup** — install on the Linux host:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/artback/trnscrb/main/install-server.sh | bash
+```
+
+(Or run `install-server.sh` directly after cloning the repo.) The script
+installs `libportaudio2`, creates a venv with the minimal dependency set,
+generates and stores the auth token, and prints the paste-ready client setup.
+
+**Mac setup** — two config lines + one sync:
+
+```bash
+trnscrb config set remote_url http://<server>:8765
+trnscrb config set remote_token <token>
+trnscrb sync
+```
+
+Then paste the OpenCode remote-MCP JSON block (printed by the install script
+or by `trnscrb serve`) into your `opencode.json`.
+
 ## OpenCode / MCP tools
 
 After `trnscrb install`, OpenCode has these tools:

@@ -131,7 +131,9 @@ def test_upload_is_idempotent_overwrite(client, auth):
 
 
 def test_upload_rejects_path_traversal(client, auth):
-    r = client.post("/api/transcript", headers=auth, json={"filename": "../evil.txt", "text": "x\n"})
+    r = client.post(
+        "/api/transcript", headers=auth, json={"filename": "../evil.txt", "text": "x\n"}
+    )
     assert r.status_code == 400
     assert not (storage.NOTES_DIR.parent / "evil.txt").exists()
 
@@ -157,7 +159,11 @@ def test_upload_requires_token(client):
 
 
 def test_list_and_fetch_transcript(client, auth):
-    _ = client.post("/api/transcript", headers=auth, json={"filename": "2026-10-08_11-00_A.txt", "text": "hello A\n"})
+    _ = client.post(
+        "/api/transcript",
+        headers=auth,
+        json={"filename": "2026-10-08_11-00_A.txt", "text": "hello A\n"},
+    )
     r = client.get("/api/transcripts", headers=auth)
     assert r.status_code == 200
     ids = [t["id"] for t in r.json()["transcripts"]]
@@ -249,40 +255,55 @@ def _mcp_call(url: str, token: str, tool: str, arguments: dict, extra_setup=None
     """Initialize a real MCP client session and call one tool."""
     import asyncio
 
+    import httpx2
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
 
     headers = {"Authorization": f"Bearer {token}"}
 
     async def run():
-        async with streamable_http_client(url, headers=headers) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                if extra_setup is not None:
-                    extra_setup(session)
-                return await session.call_tool(tool, arguments)
+        # The installed mcp SDK (2.2.0) takes a pre-configured http client
+        # (no `headers=` kwarg) and yields a (read, write) stream pair.
+        async with httpx2.AsyncClient(headers=headers) as client:
+            async with streamable_http_client(url, http_client=client) as streams:
+                read, write = _unpack_streams(streams)
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    if extra_setup is not None:
+                        extra_setup(session)
+                    return await session.call_tool(tool, arguments)
 
     return asyncio.run(run())
+
+
+def _unpack_streams(streams):
+    """Normalise the SDK's stream yield to (read, write)."""
+    if isinstance(streams, tuple):
+        read, write = streams[:2]
+    else:
+        read, write = streams.read_stream, streams.write_stream
+    return read, write
 
 
 def test_mcp_serves_store_tools_only(live_server):
     import asyncio
 
+    import httpx2
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
 
     headers = {"Authorization": f"Bearer {live_server['token']}"}
 
     async def run():
-        async with streamable_http_client(live_server["url"] + "/mcp", headers=headers) as (
-            read,
-            write,
-            _,
-        ):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                tools = await session.list_tools()
-                return {t.name for t in tools.tools}
+        async with httpx2.AsyncClient(headers=headers) as client:
+            async with streamable_http_client(
+                live_server["url"] + "/mcp", http_client=client
+            ) as streams:
+                read, write = _unpack_streams(streams)
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    tools = await session.list_tools()
+                    return {t.name for t in tools.tools}
 
     names = asyncio.run(run())
     assert set(server_http.STORE_TOOLS) <= names

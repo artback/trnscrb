@@ -155,6 +155,10 @@ _DEFAULTS: dict = {
     "track_action_items": True,
     "obsidian_vault": "",  # empty → auto-detect from Obsidian's own config
     "obsidian_subdir": "Meetings",  # subfolder inside the vault for trnscrb notes
+    # Client/server mode — remote URL and tokens.  Empty = local-only.
+    "remote_url": "",  # server base URL (e.g. http://10.0.0.5:8765)
+    "remote_token": "",  # bearer token for the remote server (client side)
+    "server_token": "",  # bearer token this host presents (server side)
     # Your display name in meetings (e.g. "Jonathan"), used to tell which action
     # items are yours. Empty falls back to the macOS username.
     "user_name": "",

@@ -664,9 +664,7 @@ class TrnscrbApp(rumps.App):
         self._set_state("dictating")
 
         threading.Thread(target=self._dict_live_loop, args=(recorder,), daemon=True).start()
-        threading.Thread(
-            target=self._dict_silence_loop, args=(recorder, ptt), daemon=True
-        ).start()
+        threading.Thread(target=self._dict_silence_loop, args=(recorder, ptt), daemon=True).start()
 
         if ptt:
             subtitle = "Release the key when you're done — it transcribes and pastes."
@@ -868,8 +866,7 @@ class TrnscrbApp(rumps.App):
             _notify(
                 "Trnscrb",
                 "PTT recording unavailable",
-                "Input Monitoring permission is required — grant it to "
-                "Trnscrb and try again.",
+                "Input Monitoring permission is required — grant it to Trnscrb and try again.",
             )
 
     def _process_dictation(self, recorder, started_at, preset, save_note: bool = True):
@@ -2159,9 +2156,7 @@ def _log_accessibility_trust() -> None:
             "/System/Library/Frameworks/ApplicationServices.framework"
         )
         if bundle is None or not bundle.load():
-            _log.info(
-                "Accessibility trust: could not load ApplicationServices — skipping check"
-            )
+            _log.info("Accessibility trust: could not load ApplicationServices — skipping check")
             return
         g = {}
         objc.loadBundleFunctions(

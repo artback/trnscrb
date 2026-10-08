@@ -583,7 +583,12 @@ def _ax_paste_frontmost() -> tuple[bool, int | None]:
         cf.CFStringCreateWithCString.restype = ctypes.c_void_p
         cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint]
         cf.CFStringGetCString.restype = ctypes.c_bool
-        cf.CFStringGetCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint]
+        cf.CFStringGetCString.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.c_long,
+            ctypes.c_uint,
+        ]
         cf.CFArrayGetCount.restype = ctypes.c_long
         cf.CFArrayGetCount.argtypes = [ctypes.c_void_p]
         cf.CFArrayGetValueAtIndex.restype = ctypes.c_void_p
@@ -853,9 +858,7 @@ def _prompt_accessibility_if_missing() -> None:
         if bundle is None or not bundle.load():
             return
         g = {}
-        objc.loadBundleFunctions(
-            bundle, g, [("AXIsProcessTrustedWithOptions", b"i@")]
-        )
+        objc.loadBundleFunctions(bundle, g, [("AXIsProcessTrustedWithOptions", b"i@")])
         g["AXIsProcessTrustedWithOptions"]({"AXTrustedCheckOptionPrompt": True})
         _log.info("Accessibility: re-prompted system dialog after paste failure")
     except Exception:
@@ -867,16 +870,16 @@ def _prompt_accessibility_if_missing() -> None:
 # not a real editable field). They take the Edit > Paste path instead, which
 # runs the terminal's own paste handler — exactly what ⌘V would do.
 _TERMINAL_BUNDLE_IDS = {
-    "com.mitchellh.ghostty",   # Ghostty
-    "com.calyx.terminal",      # Calyx (where the OpenCode TUI runs)
-    "com.apple.Terminal",      # Terminal.app
-    "com.googlecode.iterm2",   # iTerm2
-    "org.alacritty",           # Alacritty
-    "net.kovidgoyal.kitty",    # kitty
+    "com.mitchellh.ghostty",  # Ghostty
+    "com.calyx.terminal",  # Calyx (where the OpenCode TUI runs)
+    "com.apple.Terminal",  # Terminal.app
+    "com.googlecode.iterm2",  # iTerm2
+    "org.alacritty",  # Alacritty
+    "net.kovidgoyal.kitty",  # kitty
     "com.github.wez.wezterm",  # WezTerm
-    "co.zeit.hyper",           # Hyper
-    "io.tabby",                # Tabby
-    "com.waveterm.waveterm",   # Wave
+    "co.zeit.hyper",  # Hyper
+    "io.tabby",  # Tabby
+    "com.waveterm.waveterm",  # Wave
 }
 
 
@@ -944,10 +947,7 @@ def paste_text_to_active_app(text: str) -> tuple[bool, str]:
         # build silently drops posted events without it — attempting would
         # only report a fake success. The text stays on the clipboard so a
         # manual ⌘V still works.
-        _log.info(
-            "paste: Accessibility grant missing (-25211) — skipping "
-            "synthetic input paths"
-        )
+        _log.info("paste: Accessibility grant missing (-25211) — skipping synthetic input paths")
         _prompt_accessibility_if_missing()
         return (
             False,
@@ -1219,9 +1219,7 @@ def apply_voice_symbols(segments: list[dict]) -> int:
     if not mapping:
         return 0
     phrases = sorted(mapping, key=len, reverse=True)
-    pattern = re.compile(
-        r"\b(?:" + "|".join(re.escape(p) for p in phrases) + r")\b", re.IGNORECASE
-    )
+    pattern = re.compile(r"\b(?:" + "|".join(re.escape(p) for p in phrases) + r")\b", re.IGNORECASE)
     total = 0
     for seg in segments:
         text = str(seg.get("text") or "")
@@ -1231,7 +1229,12 @@ def apply_voice_symbols(segments: list[dict]) -> int:
         if count:
             # Tidy the spacing the ASR put around the mapped tokens: "john @
             # example . com" reads as an address, not a sentence.
-            converted = converted.replace(" @ ", "@").replace(" @", "@").replace(" . ", ".").replace(" .", ".")
+            converted = (
+                converted.replace(" @ ", "@")
+                .replace(" @", "@")
+                .replace(" . ", ".")
+                .replace(" .", ".")
+            )
             seg["text"] = converted
             total += count
     return total
