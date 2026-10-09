@@ -155,6 +155,10 @@ def install(force: bool):
     from trnscrb.settings import save as save_settings
 
     settings = load_settings()
+    # Whether any branch below saved new settings. Every assignment sits in a
+    # conditional, so a fully configured machine (re-run of install, e.g.
+    # after an upgrade) skips them all and must start from False.
+    changed = False
     backend = _normalize_backend(settings.get("transcription_backend"))
     if backend == "whisper":
         model_size = str(settings.get("model_size") or "small")
