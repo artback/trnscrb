@@ -270,6 +270,11 @@ trnscrb glossary list|add|remove   # manage custom vocabulary
 trnscrb voices                     # list/name/forget learned voice identities
 trnscrb config list|get|set        # inspect/change settings
 
+trnscrb sync               # push pending transcripts to the remote (--all for everything)
+trnscrb remote status      # remote reachability + how much is pending locally
+trnscrb remote list        # transcripts on the remote server (✓ = also local)
+trnscrb remote pull <id>   # fetch a remote transcript into the local notes dir
+
 trnscrb mic-status       # live mic activity monitor
 trnscrb devices          # list audio input devices
 
@@ -381,6 +386,25 @@ trnscrb sync
 
 Then paste the OpenCode remote-MCP JSON block (printed by the install script
 or by `trnscrb serve`) into your `opencode.json`.
+
+**Automatic resync.** A successful push is recorded in a local ledger
+(`~/.config/trnscrb/push_state.json`), and the menu-bar app — or the headless
+watcher — re-pushes anything that is missing on the server every
+`remote_resync_interval_minutes` (default 5, `0` disables). So a transcript
+saved while the server was down reaches it on its own: no manual sync needed,
+and a routine resync costs nothing when the store is already in sync.
+
+The day-to-day commands:
+
+```bash
+trnscrb sync             # push only what is pending (--all = force everything)
+trnscrb remote status    # is the server reachable? how much is pending?
+trnscrb remote list      # what is on the server (✓ = also on this machine)
+trnscrb remote pull <id> # fetch a transcript from another machine
+```
+
+`trnscrb status` shows a Remote line (pending count, last push) from the
+ledger, so you can see the state of sync without touching the network.
 
 ## OpenCode / MCP tools
 

@@ -2203,6 +2203,13 @@ def main():
 
     _log_accessibility_trust()
 
+    # Resync loop: transcripts saved while the remote was down get pushed on
+    # a timer (see remote_resync_interval_minutes) instead of waiting for a
+    # manual `trnscrb sync`.
+    from trnscrb import push as _push
+
+    _push.start_resync_loop()
+
     app = TrnscrbApp()
     AppKit.NSApplication.sharedApplication().setActivationPolicy_(
         AppKit.NSApplicationActivationPolicyAccessory
