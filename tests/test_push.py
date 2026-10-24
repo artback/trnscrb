@@ -224,3 +224,106 @@ def test_status_reports_server_health(configured):
 def test_status_returns_none_when_unreachable(configured, monkeypatch):
     settings.put("remote_url", "http://127.0.0.1:1")
     assert push.status() is None
+
+
+# ── action-item sync (POST /api/action-items) ──────────────────────────────
+
+
+@pytest.fixture()
+def ai_store(tmp_path, monkeypatch):
+    """Point the action-item store at a per-test file (never the real one)."""
+    from trnscrb import action_items
+
+    store = tmp_path / "action_items.json"
+    monkeypatch.setattr(action_items, "_STORE", store)
+    return store
+
+
+def _item(item_id: str, **kw) -> dict:
+    """A well-formed action item, the way record_meeting writes it."""
+    item = {
+        "id": item_id,
+        "text": f"text-{item_id}",
+        "owner": "Me",
+        "status": "open",
+        "created": "2026-01-01",
+        "last_seen": "2026-01-01 10:00",
+        "meeting_id": "",
+        "meeting_title": "",
+        "note": "",
+        "jira": [],
+        "github": [],
+        "done_date": "",
+        "done_reason": "",
+    }
+    item.update(kw)
+    return item
+
+
+def test_push_action_items_unconfigured_no_http(monkeypatch):
+    """No remote configured → no HTTP call at all, and it counts as a success
+    (there is simply nothing to sync)."""
+    calls = []
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: calls.append(a))
+    assert push.push_action_items() is True
+    assert calls == []
+
+
+def test_push_action_items_empty_store_no_http(configured, monkeypatch, ai_store):
+    """An empty store is a no-op merge — skip the HTTP call entirely."""
+    calls = []
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: calls.append(a))
+    assert push.push_action_items() is True
+    assert calls == []
+
+
+def test_push_action_items_posts_entire_store(configured, monkeypatch, ai_store):
+    """Configured + non-empty store → exactly one POST of the whole store."""
+    from trnscrb import action_items
+
+    action_items.save([_item("p1", jira=["PROJ-7"]), _item("p2")])
+    calls = []
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"merged": 2, "skipped": 0, "total": 2}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
+        return _Resp()
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    assert push.push_action_items() is True
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["url"] == configured["url"] + "/api/action-items"
+    assert call["headers"] == {"Authorization": f"Bearer {configured['token']}"}
+    assert [i["id"] for i in call["json"]["items"]] == ["p1", "p2"]
+    assert call["json"]["items"][0]["jira"] == ["PROJ-7"]
+
+
+def test_push_action_items_connection_error_returns_false(configured, monkeypatch, ai_store):
+    """A dead server → False, and no exception escapes the push path."""
+    from trnscrb import action_items
+
+    action_items.save([_item("f1")])
+
+    def fake_post(*a, **k):
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    assert push.push_action_items() is False
+
+
+def test_push_action_items_server_error_returns_false(configured, monkeypatch, ai_store):
+    from trnscrb import action_items
+
+    action_items.save([_item("f2")])
+
+    class _Resp:
+        status_code = 500
+
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp())
+    assert push.push_action_items() is False

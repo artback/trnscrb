@@ -160,6 +160,49 @@ def test_upload_requires_token(client):
     assert r.status_code == 401
 
 
+def test_upload_accepts_colon_filename(client, auth):
+    """The original bug: "…Olgun-1:1-Team-Integration-Meeting.txt" 400'd."""
+    name = "2026-03-27_10-58_Olgun-1:1-Team-Integration-Meeting.txt"
+    r = client.post("/api/transcript", headers=auth, json={"filename": name, "text": "x\n"})
+    assert r.status_code == 200, r.text
+
+
+# ── filename validator (denylist, not allowlist) ────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "2026-03-27_10-58_A-1:1-B.txt",  # colons are real meeting names
+        "2026-03-27 10-58 Brown Bag Session - Team.txt",  # spaces + dashes
+        "2026-03-27_10-58_Synchronisation-ümlaut.txt",  # unicode
+        "a.txt",
+    ],
+)
+def test_valid_transcript_filename_accepts(name):
+    ok, reason = server_http._valid_transcript_filename(name)
+    assert ok, reason
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "../x.txt",  # traversal
+        "/abs.txt",  # absolute
+        "a\\b.txt",  # backslash separator
+        "a\x00b.txt",  # NUL byte
+        "noextension",  # missing .txt
+        "..txt",  # bare path element
+        "b" * 201 + ".txt",  # over 200 chars
+        "",  # empty
+    ],
+)
+def test_valid_transcript_filename_rejects(name):
+    ok, reason = server_http._valid_transcript_filename(name)
+    assert not ok
+    assert reason
+
+
 # ── list / fetch ──────────────────────────────────────────────────────────
 
 
@@ -186,6 +229,185 @@ def test_fetch_missing_transcript_404(client, auth):
 def test_mcp_endpoint_requires_token(client):
     r = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
     assert r.status_code == 401
+
+
+# ── action items (GET/POST /api/action-items) ──────────────────────────────
+
+
+@pytest.fixture()
+def ai_store(tmp_path, monkeypatch):
+    """Point the action-item store at a per-test file (never the real one)."""
+    from trnscrb import action_items
+
+    store = tmp_path / "action_items.json"
+    monkeypatch.setattr(action_items, "_STORE", store)
+    return store
+
+
+def _ai(item_id: str, **kw) -> dict:
+    """A well-formed action item, the way record_meeting writes it."""
+    item = {
+        "id": item_id,
+        "text": f"text-{item_id}",
+        "owner": "Me",
+        "status": "open",
+        "created": "2026-01-01",
+        "last_seen": "2026-01-01 10:00",
+        "meeting_id": "m1",
+        "meeting_title": "Standup",
+        "note": "",
+        "jira": [],
+        "github": [],
+        "done_date": "",
+        "done_reason": "",
+    }
+    item.update(kw)
+    return item
+
+
+def test_get_action_items_returns_store(client, auth, ai_store):
+    from trnscrb import action_items
+
+    action_items.save([_ai("g1", text="ship it"), _ai("g2")])
+    r = client.get("/api/action-items", headers=auth)
+    assert r.status_code == 200
+    body = r.json()
+    assert [i["id"] for i in body["items"]] == ["g1", "g2"]
+    assert body["items"][0]["text"] == "ship it"
+
+
+def test_get_action_items_empty_when_no_store(client, auth, ai_store):
+    r = client.get("/api/action-items", headers=auth)
+    assert r.status_code == 200
+    assert r.json() == {"items": []}
+
+
+def test_get_action_items_requires_token(client, ai_store):
+    assert client.get("/api/action-items").status_code == 401
+    assert (
+        client.get("/api/action-items", headers={"Authorization": "Bearer wrong"}).status_code
+        == 401
+    )
+
+
+def test_post_action_items_merges_new_union_and_skip(client, auth, ai_store):
+    from trnscrb import action_items
+
+    action_items.save(
+        [
+            _ai("s1", jira=["PROJ-1"], text="server text", last_seen="2026-01-02 10:00"),
+            _ai("s-only", text="server only"),  # must survive untouched
+        ]
+    )
+    r = client.post(
+        "/api/action-items",
+        headers=auth,
+        json={
+            "items": [
+                _ai(
+                    "s1",
+                    jira=["PROJ-2"],
+                    github=["https://github.com/o/r/issues/9"],
+                    text="client text",
+                    last_seen="2026-01-03 09:00",
+                ),
+                _ai("n1"),  # new id → inserted
+                {"text": "no id"},  # no id → skipped
+            ]
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["merged"] == 2
+    assert body["skipped"] == 1
+    assert body["total"] == 3
+
+    by_id = {i["id"]: i for i in action_items.load()}
+    s1 = by_id["s1"]
+    assert s1["jira"] == ["PROJ-1", "PROJ-2"]  # union, deduped
+    assert s1["github"] == ["https://github.com/o/r/issues/9"]
+    assert s1["text"] == "client text"  # non-empty client value wins
+    assert s1["last_seen"] == "2026-01-03 09:00"  # later of the two
+    assert s1["status"] == "open"
+    assert by_id["s-only"]["text"] == "server only"  # server-only item survives
+    assert by_id["n1"]["jira"] == []  # new item normalized
+
+
+def test_post_action_items_new_item_defaults(client, auth, ai_store):
+    from trnscrb import action_items
+
+    r = client.post(
+        "/api/action-items",
+        headers=auth,
+        json={"items": [{"id": "n1", "text": "bare", "owner": "Me"}]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"merged": 1, "skipped": 0, "total": 1}
+    item = action_items.load()[0]
+    assert item["jira"] == []
+    assert item["github"] == []
+    assert item["done_date"] == ""
+    assert item["done_reason"] == ""
+
+
+def test_post_action_items_done_wins_both_directions(client, auth, ai_store):
+    from trnscrb import action_items
+
+    # Server done, client open → stays done with the server's done fields.
+    action_items.save([_ai("d1", status="done", done_date="2026-01-05", done_reason="shipped")])
+    r = client.post(
+        "/api/action-items",
+        headers=auth,
+        json={"items": [_ai("d1", status="open", done_date="", done_reason="")]},
+    )
+    assert r.status_code == 200, r.text
+    merged = {i["id"]: i for i in action_items.load()}["d1"]
+    assert merged["status"] == "done"
+    assert merged["done_date"] == "2026-01-05"
+    assert merged["done_reason"] == "shipped"
+
+    # Server open, client done → done with the client's done fields.
+    action_items.save([_ai("d2")])
+    r = client.post(
+        "/api/action-items",
+        headers=auth,
+        json={"items": [_ai("d2", status="done", done_date="2026-02-01", done_reason="client")]},
+    )
+    assert r.status_code == 200, r.text
+    merged = {i["id"]: i for i in action_items.load()}["d2"]
+    assert merged["status"] == "done"
+    assert merged["done_date"] == "2026-02-01"
+    assert merged["done_reason"] == "client"
+
+
+def test_post_action_items_done_without_fields_uses_fallbacks(client, auth, ai_store):
+    from trnscrb import action_items
+
+    # Client done but carrying no done fields → the server side's fields win.
+    action_items.save([_ai("d3", status="done", done_date="2026-01-05", done_reason="shipped")])
+    r = client.post(
+        "/api/action-items",
+        headers=auth,
+        json={"items": [_ai("d3", status="done")]},
+    )
+    assert r.status_code == 200, r.text
+    merged = {i["id"]: i for i in action_items.load()}["d3"]
+    assert merged["status"] == "done"
+    assert merged["done_date"] == "2026-01-05"
+    assert merged["done_reason"] == "shipped"
+
+    # Neither side carries done fields → synthetic reason.
+    action_items.save([_ai("d4")])
+    r = client.post(
+        "/api/action-items",
+        headers=auth,
+        json={"items": [_ai("d4", status="done")]},
+    )
+    assert r.status_code == 200, r.text
+    merged = {i["id"]: i for i in action_items.load()}["d4"]
+    assert merged["status"] == "done"
+    assert merged["done_date"] == ""
+    assert merged["done_reason"] == "resolved via client sync"
 
 
 # ── unauthenticated (loopback dev mode) app ───────────────────────────────

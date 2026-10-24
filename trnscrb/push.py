@@ -195,6 +195,66 @@ def push_file(
     return False
 
 
+def push_action_items() -> bool:
+    """POST the local action-item store to the server.
+
+    The client sends its *entire* store; the server merges it idempotently,
+    so re-sending an unchanged store is a no-op and the periodic resync can
+    call this on every tick.  Returns True on success — and when there is
+    nothing to send (unconfigured, or an empty store: no HTTP call either
+    way).  False on any failure; never raises, a dead server must not take
+    down the transcript push path.
+
+    One attempt, no retry/backoff (unlike ``push_file``): the resync loop
+    already retries on the next tick, and the transcript push owns the retry
+    budget.
+    """
+    if not is_configured():
+        return True
+
+    from trnscrb import action_items
+
+    items = action_items.load()
+    if not items:
+        _log.debug("push_action_items: local store empty, nothing to sync")
+        return True
+
+    url = configured_url()
+    token = configured_token()
+    if not url or not token:
+        _log.debug("push_action_items: not fully configured (url=%s token=%s)", url, bool(token))
+        return False
+
+    try:
+        r = httpx.post(
+            f"{url}/api/action-items",
+            json={"items": items},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30.0,
+        )
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as e:
+        _log.warning("push_action_items: %s", e)
+        return False
+    except Exception as e:
+        _log.warning("push_action_items: unexpected error %s", e)
+        return False
+
+    if r.status_code == 200:
+        try:
+            data = r.json()
+        except ValueError:
+            data = {}
+        _log.info(
+            "pushed action items (merged=%s skipped=%s total=%s)",
+            data.get("merged"),
+            data.get("skipped"),
+            data.get("total"),
+        )
+        return True
+    _log.warning("push_action_items: server error %d", r.status_code)
+    return False
+
+
 def maybe_push(path: Path) -> bool:
     """Start a background daemon thread pushing this file.
 
@@ -251,6 +311,9 @@ def sync_all(
             ok += 1
         else:
             failed += 1
+    # Action items ride along: the merge is idempotent and the call is
+    # log-only, so an item-sync failure never fails the transcript sync.
+    push_action_items()
     return ok, failed
 
 
@@ -311,6 +374,11 @@ def resync_loop(stop_event: threading.Event, interval_secs: float | None = None)
     switching the interval to 0) takes effect without a restart.  A slow or
     dead server is harmless: each cycle is best-effort and the next one
     retries whatever is still pending.
+
+    Every configured tick also syncs the action-item store — even when no
+    transcript is pending, which is the state where the item merge is needed
+    most (the ``resync`` call returns early in that case, so the hook lives
+    here, next to it, rather than inside ``resync``).
     """
     while not stop_event.is_set():
         interval = resync_interval_secs() if interval_secs is None else interval_secs
@@ -329,6 +397,7 @@ def resync_loop(stop_event: threading.Event, interval_secs: float | None = None)
                 )
             elif ok:
                 _log.debug("resync: pushed %d pending transcript(s)", ok)
+            push_action_items()
         except Exception:
             _log.warning("resync: cycle failed", exc_info=True)
         stop_event.wait(interval)

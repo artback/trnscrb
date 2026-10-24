@@ -10,7 +10,6 @@ Runs via ``trnscrb serve`` and exposes, on one port:
 import hmac
 import json
 import os
-import re
 import secrets
 
 from mcp.server import MCPServer
@@ -20,7 +19,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 
 import trnscrb
-from trnscrb import settings, storage
+from trnscrb import action_items, settings, storage
 from trnscrb.log import get_logger
 
 _log = get_logger("trnscrb.server_http")
@@ -40,9 +39,31 @@ STORE_TOOLS = (
     "add_action_item",
 )
 
-# Filename validation: [A-Za-z0-9] followed by up to 199 chars from the
-# allowed set, ending in .txt — total ≤ 200 chars.
-_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,198}\.txt$")
+
+def _valid_transcript_filename(name: str) -> tuple[bool, str]:
+    """Validate an uploaded transcript filename (denylist, not allowlist).
+
+    Real meeting filenames contain colons ("1:1"), spaces, unicode, and
+    dashes, and none of those should 400 — so everything is accepted except
+    the path-dangerous shapes. The ``_resolve_id`` traversal guard stays as
+    the second layer on top of this.
+
+    Returns:
+        (ok, reason) — reason is a short human-readable message when not ok.
+    """
+    if not isinstance(name, str) or not name:
+        return False, "filename is required"
+    if len(name) > 200:
+        return False, "filename exceeds 200 characters"
+    if not name.endswith(".txt"):
+        return False, "filename must end with .txt"
+    if "\x00" in name:
+        return False, "filename contains a NUL byte"
+    if "/" in name or "\\" in name:
+        return False, "filename must not contain path separators"
+    if name[:-4] in (".", ".."):
+        return False, "filename must not be a bare path element"
+    return True, ""
 
 
 def _import_mcp_tools():
@@ -55,6 +76,49 @@ def _import_mcp_tools():
         if fn is not None:
             tools[name] = fn
     return tools
+
+
+def _action_item_is_done(item: dict) -> bool:
+    """True when an item is done: its status says so, or it has a done_date."""
+    return str(item.get("status") or "").lower() == "done" or bool(
+        str(item.get("done_date") or "").strip()
+    )
+
+
+def _merge_action_item(existing: dict, incoming: dict) -> None:
+    """Merge a client copy of an item into its server record, in place.
+
+    jira/github are unioned (deduped, order-stable); last_seen takes the
+    later of the two (plain string compare — the format sorts chronologically);
+    text-ish fields take the client value when it is non-empty. Status
+    follows done-wins: if either side is done the result is done, carrying the
+    done side's done_date/done_reason, falling back to the other side's and
+    then to a synthetic reason. Neither done → open with empty done fields.
+    """
+    existing["jira"] = sorted(set(existing.get("jira") or []) | set(incoming.get("jira") or []))
+    existing["github"] = sorted(
+        set(existing.get("github") or []) | set(incoming.get("github") or [])
+    )
+    existing["last_seen"] = max(
+        str(existing.get("last_seen") or ""), str(incoming.get("last_seen") or "")
+    )
+    for field in ("text", "owner", "meeting_id", "meeting_title", "note"):
+        if incoming.get(field):
+            existing[field] = incoming[field]
+
+    server_done = _action_item_is_done(existing)
+    client_done = _action_item_is_done(incoming)
+    if server_done or client_done:
+        primary, other = (incoming, existing) if client_done else (existing, incoming)
+        existing["status"] = "done"
+        existing["done_date"] = primary.get("done_date") or other.get("done_date") or ""
+        existing["done_reason"] = (
+            primary.get("done_reason") or other.get("done_reason") or "resolved via client sync"
+        )
+    else:
+        existing["status"] = "open"
+        existing["done_date"] = ""
+        existing["done_reason"] = ""
 
 
 def build_app(token: str | None = None, *, insecure: bool = False):
@@ -117,8 +181,9 @@ def build_app(token: str | None = None, *, insecure: bool = False):
         if not filename or not text:
             return JSONResponse({"detail": "filename and text are required"}, status_code=400)
 
-        if not _FILENAME_RE.match(filename):
-            return JSONResponse({"detail": f"Invalid filename: {filename!r}"}, status_code=400)
+        ok, reason = _valid_transcript_filename(filename)
+        if not ok:
+            return JSONResponse({"detail": f"Invalid filename: {reason}"}, status_code=400)
 
         path = _resolve_id(filename[:-4])  # strip .txt
         if path is None:
@@ -147,6 +212,55 @@ def build_app(token: str | None = None, *, insecure: bool = False):
         if path is None or not path.exists():
             return PlainTextResponse("Not found", status_code=404)
         return PlainTextResponse(path.read_text(encoding="utf-8"))
+
+    # The Go dashboard reads the server's action-item store; the Mac client
+    # merges its own store into it, so items recorded locally are not lost
+    # when only the server-side store is visible.
+    @server.custom_route("/api/action-items", methods=["GET"])
+    async def list_action_items_endpoint(request: Request):
+        """The server's action-item store — an empty list when there is no store."""
+        return JSONResponse({"items": action_items.load()})
+
+    @server.custom_route("/api/action-items", methods=["POST"])
+    async def merge_action_items_endpoint(request: Request):
+        """Merge the client's entire action-item store into the server's.
+
+        Body: ``{"items": [...]}`` — the client's whole store, not a diff, so
+        the merge is idempotent: re-sending an unchanged store changes nothing.
+        """
+        body = await request.json()
+        payload = body.get("items") if isinstance(body, dict) else None
+        if not isinstance(payload, list):
+            return JSONResponse({"detail": 'body must be {"items": [...]}'}, status_code=400)
+
+        merged = list(action_items.load())
+        by_id = {i["id"]: i for i in merged if isinstance(i, dict) and i.get("id")}
+
+        merged_count = 0
+        skipped = 0
+        for item in payload:
+            if not isinstance(item, dict) or not item.get("id"):
+                skipped += 1  # no id → nothing to merge against
+                continue
+            existing = by_id.get(item["id"])
+            if existing is None:
+                record = dict(item)
+                record["jira"] = record.get("jira") or []
+                record["github"] = record.get("github") or []
+                record["done_date"] = record.get("done_date") or ""
+                record["done_reason"] = record.get("done_reason") or ""
+                merged.append(record)
+                by_id[item["id"]] = record
+            else:
+                _merge_action_item(existing, item)
+            merged_count += 1
+
+        action_items.save(merged)
+        try:
+            action_items.render()
+        except Exception:
+            pass  # the server host has no Obsidian vault
+        return JSONResponse({"merged": merged_count, "skipped": skipped, "total": len(merged)})
 
     # ── MCP transport ────────────────────────────────────────────────────────
     inner = server.streamable_http_app(
