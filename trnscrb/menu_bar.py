@@ -1051,7 +1051,7 @@ class TrnscrbApp(rumps.App):
             width, height = 64.0, 64.0
             screen = self._focused_screen() or AppKit.NSScreen.mainScreen()
             frame = screen.frame()
-            x = (frame.size.width - width) / 2.0
+            x = (frame.size.width - width) / 2.0 + frame.origin.x
             y = (frame.size.height - height) / 2.0 + frame.origin.y
 
             # ── window ──────────────────────────────────────────────────
