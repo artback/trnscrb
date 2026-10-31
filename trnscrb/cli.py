@@ -327,9 +327,9 @@ def install(force: bool):
     if settings.get("auto_record") is not True:
         settings["auto_record"] = True
         changed = True
-    configured_backend = str(settings.get("transcription_backend") or "").strip().lower()
+    configured_backend = str(settings.get("meeting_backend") or "").strip().lower()
     if configured_backend not in {"parakeet", "whisper"}:
-        settings["transcription_backend"] = "parakeet"
+        settings["meeting_backend"] = "parakeet"
         changed = True
     if not settings.get("parakeet_model_id"):
         settings["parakeet_model_id"] = _DEFAULT_PARAKEET_MODEL_ID
@@ -1676,8 +1676,13 @@ def status():
 
     settings = load_settings()
     _row("Auto-transcribe", bool(settings.get("auto_record")), "")
-    backend = str(settings.get("transcription_backend") or "auto")
-    click.echo(f"  Backend: {backend}")
+    from trnscrb import transcriber as _transcriber
+
+    for ctx in ("dictation", "meeting"):
+        try:
+            _row(f"Backend ({ctx})", True, _transcriber._backend(ctx))
+        except RuntimeError:
+            _row(f"Backend ({ctx})", False, f"invalid: {settings.get(ctx + '_backend')}")
     if settings.get("denoise"):
         from trnscrb import denoise as _denoise
 
@@ -2716,7 +2721,7 @@ def dictation_command():
         click.echo("No audio captured.", err=True)
         return
     try:
-        segments = transcriber.transcribe(audio_path)
+        segments = transcriber.transcribe(audio_path, context="dictation")
     except Exception as e:
         click.echo(f"Transcription failed: {e}", err=True)
         return

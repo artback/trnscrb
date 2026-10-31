@@ -482,10 +482,10 @@ class TrnscrbApp(rumps.App):
 
     def _preload_model(self):
         try:
-            backend = str(get_setting("transcription_backend") or "auto")
             # Loads happen on the transcriber's dedicated inference thread —
             # MLX models must be loaded and evaluated on the same thread.
-            transcriber.preload(backend)
+            # No argument: warms both the dictation and meeting backends.
+            transcriber.preload()
         except Exception as e:
             _log.debug("Model preload skipped: %s", e)
 

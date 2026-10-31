@@ -140,7 +140,9 @@ _DEFAULTS: dict = {
     "mlx_cache_limit_mb": 512,
     "retention_audio_days": 30,  # delete preserved .wav files after N days (0 = keep)
     "retention_transcript_days": 0,  # delete transcripts after N days (0 = keep forever)
-    "transcription_backend": "auto",  # auto | parakeet | whisper | voxtral | qwen3 | nemotron
+    "transcription_backend": "auto",  # auto | parakeet | whisper | voxtral | qwen3 | nemotron — global override (legacy); applies to contexts left on auto
+    "dictation_backend": "auto",  # PTT dictation: single-speaker, speed matters most
+    "meeting_backend": "auto",  # meetings: word timings feed the diarizer
     "denoise": False,  # noisereduce spectral-gate filter before transcription (off)
     "parakeet_model_id": "mlx-community/parakeet-tdt-0.6b-v3",
     "qwen3_model_id": "Qwen/Qwen3-ASR-0.6B",  # ~1.2 GB; Qwen3-ASR-1.7B for more accuracy

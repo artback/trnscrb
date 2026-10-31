@@ -23,6 +23,7 @@ from trnscrb.cli import cli
 FULLY_CONFIGURED = {
     "auto_record": True,
     "transcription_backend": "parakeet",
+    "meeting_backend": "parakeet",
     "parakeet_model_id": "redparakeet/parakeet-mlx-s",
     "dictation_ptt_key": "ctrl+alt+f8",
 }

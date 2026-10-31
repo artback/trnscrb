@@ -86,7 +86,7 @@ def _preload_for_recording() -> None:
     from trnscrb.settings import read_hf_token
 
     try:
-        transcriber.preload(str(settings.get("transcription_backend") or "auto"))
+        transcriber.preload()
     except Exception as e:
         _log.debug("Transcription preload skipped: %s", e)
     try:
