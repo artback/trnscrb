@@ -20,6 +20,12 @@ _parakeet_model = None
 _parakeet_model_id = None
 _parakeet_model_lock = threading.Lock()
 
+# Whether the loaded backend has completed a first forward pass, so its
+# kernels are compiled. The first MLX pass of a process pays a one-time
+# compile cost of several seconds; preload() runs a warmup pass instead of
+# letting the user's first real transcription pay it.
+_warmed = False
+
 
 def set_model_size(size: str) -> None:
     global _whisper_model_size, _whisper_model
@@ -536,6 +542,48 @@ def trim_mlx_cache() -> float:
         return 0.0
 
 
+def _warmup_pass(backend: str) -> None:
+    """One tiny forward pass per loaded backend, on the inference thread:
+    it compiles the backend's kernels during the preload, so the user's
+    first real transcription does not pay the one-time multi-second
+    compile cost. Runs the backend runners directly — never the public
+    transcribe(), which would re-take the lock and re-submit to this same
+    single-worker executor and deadlock.
+    """
+    import tempfile
+    import wave
+
+    tmp = Path(tempfile.mkstemp(suffix=".wav", prefix="trnscrb-warmup-")[1])
+    try:
+        with wave.open(str(tmp), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(b"\x00\x00" * 16000)
+        if backend in ("auto", "parakeet"):
+            try:
+                _transcribe_parakeet(tmp)
+            except Exception as e:
+                _log.debug("Parakeet warmup skipped: %s", e)
+        if backend in ("auto", "whisper"):
+            try:
+                _transcribe_whisper(tmp)
+            except Exception as e:
+                _log.debug("Whisper warmup skipped: %s", e)
+        if backend == "qwen3":
+            try:
+                _transcribe_qwen3(tmp)
+            except Exception as e:
+                _log.debug("Qwen3 warmup skipped: %s", e)
+        if backend == "voxtral":
+            try:
+                _transcribe_voxtral(tmp)
+            except Exception as e:
+                _log.debug("Voxtral warmup skipped: %s", e)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def preload(backend: str | None = None) -> None:
     """Warm the configured backend's models on the shared inference thread."""
     backend = backend or _backend()
@@ -550,9 +598,16 @@ def preload(backend: str | None = None) -> None:
         if backend == "voxtral":
             _get_voxtral_pipeline()
 
+    global _warmed
     with _transcribe_lock:
         _inference_executor.submit(_load).result()
         _inference_executor.submit(_bound_mlx_cache).result()
+    if not _warmed:
+        # One executor task per pass: the warmup runs the backend runners
+        # directly (transcribe() would deadlock on this same worker). A
+        # concurrent unload just makes a runner lazy-reload its model.
+        _inference_executor.submit(_warmup_pass, backend).result()
+        _warmed = True
     _log.info("Transcription model preloaded (%s)", backend)
 
 
@@ -663,6 +718,7 @@ def unload_models() -> None:
     global _whisper_model, _parakeet_model, _parakeet_model_id
     global _voxtral_pipeline, _voxtral_model_id
     global _qwen3_model, _qwen3_aligner, _qwen3_model_id
+    global _warmed
     import gc
 
     with _transcribe_lock:
@@ -678,6 +734,9 @@ def unload_models() -> None:
             _qwen3_model = None
             _qwen3_aligner = None
             _qwen3_model_id = None
+        # A reload must re-run the warmup: the freed GPU cache may take the
+        # compiled kernels with it.
+        _warmed = False
     gc.collect()
     # Model weights live in MLX's GPU cache too — drop them after the Python
     # references are gone, or the memory stays held despite the unload.

@@ -323,6 +323,17 @@ class TrnscrbApp(rumps.App):
         # released again after a long idle period to free ~1 GB of memory.
         self._unload_timer: threading.Timer | None = None
 
+        # Warm the transcription model at startup as well: the cold load plus
+        # the first MLX pass costs a few seconds, and doing it now keeps that
+        # off the critical path after the user releases the PTT key. The
+        # idle-unload timer below reclaims it after 30 quiet minutes.
+        threading.Thread(
+            target=transcriber.preload,
+            daemon=True,
+            name="trnscrb-transcriber-warmup",
+        ).start()
+        self._schedule_model_unload()
+
         # Elapsed recording time next to the menu bar icon (🔴 12:34).
         self._duration_shown = False
         self._duration_timer = rumps.Timer(self._update_duration_title, 15)
