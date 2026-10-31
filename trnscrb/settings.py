@@ -140,10 +140,16 @@ _DEFAULTS: dict = {
     "mlx_cache_limit_mb": 512,
     "retention_audio_days": 30,  # delete preserved .wav files after N days (0 = keep)
     "retention_transcript_days": 0,  # delete transcripts after N days (0 = keep forever)
-    "transcription_backend": "auto",  # auto | parakeet | whisper | voxtral | qwen3
+    "transcription_backend": "auto",  # auto | parakeet | whisper | voxtral | qwen3 | nemotron
     "denoise": False,  # noisereduce spectral-gate filter before transcription (off)
     "parakeet_model_id": "mlx-community/parakeet-tdt-0.6b-v3",
     "qwen3_model_id": "Qwen/Qwen3-ASR-0.6B",  # ~1.2 GB; Qwen3-ASR-1.7B for more accuracy
+    # Nemotron-ASR 0.6B (English only): cache-aware streaming conformer, the
+    # fastest backend on Apple Silicon. Note: it emits no word-level
+    # timestamps, so notes in this mode lack per-word timing.
+    "nemotron_model_id": "dboris/nemotron-asr-mlx",  # ~1.2 GB, downloads on first use
+    "nemotron_beam_size": 1,  # 1 = greedy (fastest); 4 = max accuracy (slower)
+    "nemotron_ilm_scale": 0.0,  # ILM subtraction scale, applied when beam_size > 1
     "model_size": "small",  # whisper model size (used when backend=whisper)
     # Also nudge near-spelling tokens onto a glossary term (in addition to exact
     # alias replacement). Off leaves everything but explicit aliases untouched.

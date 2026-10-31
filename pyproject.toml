@@ -50,6 +50,10 @@ dependencies = [
     "scipy>=1.11",
     "parakeet-mlx>=0.5.1",
     "mlx-qwen3-asr>=0.3.5",
+    # Nemotron-ASR 0.6B on MLX (English, streaming-native — fastest backend
+    # on Apple Silicon). Pulls only sentencepiece/typer beyond what the
+    # venv already carries.
+    "nemotron-asr-mlx>=0.2.0",
     # Transitive (librosa→numba) resolution guard: without a floor, resolvers
     # keep the newest numpy and backtrack numba to ancient sdists that cannot
     # build on Python 3.12+ (numba<=0.53 has no numpy cap in its metadata).

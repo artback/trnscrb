@@ -10,7 +10,7 @@ from trnscrb.log import get_logger
 
 _log = get_logger("trnscrb.transcriber")
 
-_SUPPORTED_BACKENDS = {"auto", "parakeet", "whisper", "voxtral", "qwen3"}
+_SUPPORTED_BACKENDS = {"auto", "parakeet", "whisper", "voxtral", "qwen3", "nemotron"}
 
 _whisper_model = None
 _whisper_model_lock = threading.Lock()
@@ -25,6 +25,10 @@ _parakeet_model_lock = threading.Lock()
 # compile cost of several seconds; preload() runs a warmup pass instead of
 # letting the user's first real transcription pay it.
 _warmed = False
+
+_nemotron_model = None
+_nemotron_model_id = None
+_nemotron_model_lock = threading.Lock()
 
 
 def set_model_size(size: str) -> None:
@@ -335,6 +339,67 @@ def _get_qwen3():
         return _qwen3_model, _qwen3_aligner
 
 
+def _get_nemotron_model():
+    """Load and cache the Nemotron-ASR model on first call.
+
+    dboris/nemotron-asr-mlx is a pure-MLX port of NVIDIA's cache-aware
+    streaming conformer (nemotron-asr-speech-streaming-en-0.6b): each audio
+    frame is processed exactly once, so it stays fast on long recordings.
+    English-only. The ~1.2 GB of weights download from the Hub on first
+    use, the same pattern as the Parakeet model.
+    """
+    global _nemotron_model, _nemotron_model_id
+    model_id = str(settings.get("nemotron_model_id") or "dboris/nemotron-asr-mlx").strip()
+    with _nemotron_model_lock:
+        if _nemotron_model is None or _nemotron_model_id != model_id:
+            try:
+                from nemotron_asr_mlx import from_pretrained
+            except ModuleNotFoundError as e:
+                raise RuntimeError(
+                    "Nemotron backend selected but nemotron-asr-mlx is not installed. "
+                    "Install it with `uv add nemotron-asr-mlx`."
+                ) from e
+            try:
+                _log.info("Loading Nemotron-ASR model %s", model_id)
+                _nemotron_model = from_pretrained(model_id)
+                _nemotron_model_id = model_id
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to load Nemotron-ASR model '{model_id}'. "
+                    "Verify network/cache access for first-time model download."
+                ) from e
+        return _nemotron_model
+
+
+def _transcribe_nemotron(audio_path: Path) -> list[dict]:
+    """Transcribe via Nemotron-ASR.
+
+    The port emits text without timestamps, so the runner returns a single
+    segment spanning the audio — word-level timing is a Parakeet/Qwen3
+    feature, and the empty words list means the diarizer labels the whole
+    segment rather than cutting at word boundaries.
+    """
+    model = _get_nemotron_model()
+    beam = int(float(settings.get("nemotron_beam_size") or 1))
+    kwargs = {}
+    if beam > 1:
+        kwargs["beam_size"] = beam
+        ilm = float(settings.get("nemotron_ilm_scale") or 0.0)
+        if ilm > 0:
+            kwargs["ilm_scale"] = ilm
+    result = model.transcribe(str(audio_path), **kwargs)
+    text = str(getattr(result, "text", "") or "").strip()
+    if not text:
+        return []
+    try:
+        import soundfile as sf
+
+        duration = float(sf.info(str(audio_path)).duration)
+    except Exception:
+        duration = 0.0
+    return [{"start": 0.0, "end": duration, "text": text, "speaker": None, "words": []}]
+
+
 def _words_to_segments(text: str, words: list[dict]) -> list[dict]:
     """Combine Qwen3's punctuated text with word-level timings into sentences.
 
@@ -580,6 +645,11 @@ def _warmup_pass(backend: str) -> None:
                 _transcribe_voxtral(tmp)
             except Exception as e:
                 _log.debug("Voxtral warmup skipped: %s", e)
+        if backend == "nemotron":
+            try:
+                _transcribe_nemotron(tmp)
+            except Exception as e:
+                _log.debug("Nemotron warmup skipped: %s", e)
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -597,6 +667,8 @@ def preload(backend: str | None = None) -> None:
             _get_qwen3()
         if backend == "voxtral":
             _get_voxtral_pipeline()
+        if backend == "nemotron":
+            _get_nemotron_model()
 
     global _warmed
     with _transcribe_lock:
@@ -697,6 +769,7 @@ def _transcribe_on_worker(audio_path: Path, backend: str) -> list[dict]:
         "parakeet": _transcribe_parakeet,
         "voxtral": _transcribe_voxtral,
         "qwen3": _transcribe_qwen3,
+        "nemotron": _transcribe_nemotron,
     }
     try:
         return runners[backend](audio_path)
@@ -718,6 +791,7 @@ def unload_models() -> None:
     global _whisper_model, _parakeet_model, _parakeet_model_id
     global _voxtral_pipeline, _voxtral_model_id
     global _qwen3_model, _qwen3_aligner, _qwen3_model_id
+    global _nemotron_model, _nemotron_model_id
     global _warmed
     import gc
 
@@ -734,6 +808,9 @@ def unload_models() -> None:
             _qwen3_model = None
             _qwen3_aligner = None
             _qwen3_model_id = None
+        with _nemotron_model_lock:
+            _nemotron_model = None
+            _nemotron_model_id = None
         # A reload must re-run the warmup: the freed GPU cache may take the
         # compiled kernels with it.
         _warmed = False

@@ -2934,7 +2934,7 @@ def _parakeet_model_cached(model_id: str) -> bool:
 
 def _normalize_backend(value) -> str:
     backend = str(value or "parakeet").strip().lower()
-    if backend in {"auto", "parakeet", "whisper", "voxtral"}:
+    if backend in {"auto", "parakeet", "whisper", "voxtral", "qwen3", "nemotron"}:
         return backend
     return "auto"
 

@@ -6,12 +6,21 @@ from pathlib import Path
 from unittest import mock
 
 
-def _settings_getter(backend: str, parakeet_model_id: str = "mlx-community/parakeet-tdt-0.6b-v3"):
+def _settings_getter(
+    backend: str,
+    parakeet_model_id: str = "mlx-community/parakeet-tdt-0.6b-v3",
+    nemotron_model_id: str = "dboris/nemotron-asr-mlx",
+    nemotron_beam_size: int = 1,
+    nemotron_ilm_scale: float = 0.0,
+):
     mapping = {
         "transcription_backend": backend,
         "parakeet_model_id": parakeet_model_id,
         "qwen3_model_id": "Qwen/Qwen3-ASR-0.6B",
         "model_size": "small",
+        "nemotron_model_id": nemotron_model_id,
+        "nemotron_beam_size": nemotron_beam_size,
+        "nemotron_ilm_scale": nemotron_ilm_scale,
     }
     return lambda key: mapping.get(key)
 
@@ -26,6 +35,27 @@ def _fake_qwen3_module(text, words):
         load_model=lambda _model_id: (object(), object()),
         ForcedAligner=lambda: object(),
         transcribe=transcribe,
+    )
+
+
+def _fake_nemotron_module(text, seen_kwargs=None):
+    """A stand-in nemotron_asr_mlx module returning a fixed transcription."""
+
+    if seen_kwargs is None:
+        seen_kwargs = {}
+
+    class NemotronModel:
+        def transcribe(self, _audio_path, **kwargs):
+            seen_kwargs.update(kwargs)
+            return types.SimpleNamespace(text=text)
+
+    return types.SimpleNamespace(from_pretrained=lambda _model_id: NemotronModel())
+
+
+def _fake_soundfile_module(duration):
+    """A stand-in soundfile module reporting a fixed audio duration."""
+    return types.SimpleNamespace(
+        info=lambda _path: types.SimpleNamespace(duration=duration)
     )
 
 
@@ -178,6 +208,108 @@ class TranscriberTests(unittest.TestCase):
                 {"start": 2.0, "end": 2.8, "text": "Goodbye now.", "speaker": None},
             ],
         )
+
+    def test_uses_nemotron_backend_when_configured(self):
+        seen_kwargs = {}
+        fake_nemotron = _fake_nemotron_module(" Hello there. ", seen_kwargs)
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "nemotron_asr_mlx": fake_nemotron,
+                "soundfile": _fake_soundfile_module(3.5),
+            },
+            clear=False,
+        ):
+            with mock.patch("trnscrb.settings.get", side_effect=_settings_getter("nemotron")):
+                transcriber = self._reload_transcriber()
+                with (
+                    mock.patch.object(Path, "exists", return_value=True),
+                    mock.patch.object(Path, "stat", return_value=_fake_stat()),
+                ):
+                    segments = transcriber.transcribe(Path("audio.wav"))
+
+        # The port emits no timestamps, so one segment spans the whole
+        # audio with no word timings for the diarizer to cut on.
+        self.assertEqual(
+            segments,
+            [
+                {
+                    "start": 0.0,
+                    "end": 3.5,
+                    "text": "Hello there.",
+                    "speaker": None,
+                    "words": [],
+                }
+            ],
+        )
+        # Greedy by default: no decoding kwargs are forwarded.
+        self.assertEqual(seen_kwargs, {})
+
+    def test_nemotron_forwards_beam_settings(self):
+        seen_kwargs = {}
+        fake_nemotron = _fake_nemotron_module("Beam search.", seen_kwargs)
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "nemotron_asr_mlx": fake_nemotron,
+                "soundfile": _fake_soundfile_module(1.0),
+            },
+            clear=False,
+        ):
+            with mock.patch(
+                "trnscrb.settings.get",
+                side_effect=_settings_getter(
+                    "nemotron", nemotron_beam_size=4, nemotron_ilm_scale=0.2
+                ),
+            ):
+                transcriber = self._reload_transcriber()
+                with (
+                    mock.patch.object(Path, "exists", return_value=True),
+                    mock.patch.object(Path, "stat", return_value=_fake_stat()),
+                ):
+                    transcriber.transcribe(Path("audio.wav"))
+
+        self.assertEqual(seen_kwargs, {"beam_size": 4, "ilm_scale": 0.2})
+
+    def test_nemotron_empty_text_returns_no_segments(self):
+        fake_nemotron = _fake_nemotron_module("   ")
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "nemotron_asr_mlx": fake_nemotron,
+                "soundfile": _fake_soundfile_module(1.0),
+            },
+            clear=False,
+        ):
+            with mock.patch("trnscrb.settings.get", side_effect=_settings_getter("nemotron")):
+                transcriber = self._reload_transcriber()
+                with (
+                    mock.patch.object(Path, "exists", return_value=True),
+                    mock.patch.object(Path, "stat", return_value=_fake_stat()),
+                ):
+                    segments = transcriber.transcribe(Path("audio.wav"))
+
+        self.assertEqual(segments, [])
+
+    def test_missing_nemotron_dependency_falls_back_to_whisper(self):
+        """An uninstalled backend must not cost the meeting."""
+        with mock.patch("trnscrb.settings.get", side_effect=_settings_getter("nemotron")):
+            with mock.patch.dict(sys.modules, {"nemotron_asr_mlx": None}, clear=False):
+                transcriber = self._reload_transcriber()
+                with (
+                    mock.patch.object(Path, "exists", return_value=True),
+                    mock.patch.object(Path, "stat", return_value=_fake_stat()),
+                    mock.patch.object(
+                        transcriber, "_transcribe_whisper", return_value=[{"text": "rescued"}]
+                    ) as whisper,
+                ):
+                    segments = transcriber.transcribe(Path("audio.wav"))
+
+        whisper.assert_called_once()
+        self.assertEqual(segments, [{"text": "rescued"}])
 
     def test_auto_routes_non_english_to_qwen3(self):
         with mock.patch("trnscrb.settings.get", side_effect=_settings_getter("auto")):
