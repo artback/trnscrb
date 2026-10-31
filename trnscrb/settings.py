@@ -70,6 +70,13 @@ _DEFAULTS: dict = {
     # into whatever text field is currently focused (cmd+v via AppleScript).
     # Requires Accessibility permissions for Trnscrb in System Settings.
     "paste_on_dictation": True,
+    # Convert spoken symbol words to typed characters after transcription
+    # ("at sign" → @, "new line" → a real newline in the pasted text). The
+    # built-in map lives in dictation.py; ``voice_symbol_map`` adds or
+    # overrides phrases (an empty value removes a built-in). False disables
+    # the pass.
+    "voice_symbols": True,
+    "voice_symbol_map": {},
     # End a dictation automatically when the speaker stops talking. Off means
     # dictations run until stopped manually (Stop Dictation / SIGUSR1).
     "dictation_auto_stop": True,
@@ -84,6 +91,8 @@ _DEFAULTS: dict = {
     # Dictation menu captures a combo without typing it). An empty string
     # turns it off. Needs the Input Monitoring grant, like the auto-paste;
     # the menu bar shows "grant Input Monitoring" until it is given.
+    # Caps lock may appear as a modifier ("caps+t"): it matches the physical
+    # hold (its down/up pair), not the latched toggle state.
     "dictation_ptt_key": "ctrl+alt+f8",
     "auto_integrate": False,  # push transcripts into notes via the Claude Code CLI
     # Prompt for note integration. {transcript_path} is the saved transcript;
@@ -146,6 +155,14 @@ _DEFAULTS: dict = {
     "track_action_items": True,
     "obsidian_vault": "",  # empty → auto-detect from Obsidian's own config
     "obsidian_subdir": "Meetings",  # subfolder inside the vault for trnscrb notes
+    # Client/server mode — remote URL and tokens.  Empty = local-only.
+    "remote_url": "",  # server base URL (e.g. http://10.0.0.5:8765)
+    "remote_token": "",  # bearer token for the remote server (client side)
+    "server_token": "",  # bearer token this host presents (server side)
+    # How often the menu-bar app / headless watcher re-push transcripts that
+    # have not reached the remote yet (server was down at save time, or a
+    # push failed). 0 disables the automatic loop — `trnscrb sync` still works.
+    "remote_resync_interval_minutes": 5,
     # Your display name in meetings (e.g. "Jonathan"), used to tell which action
     # items are yours. Empty falls back to the macOS username.
     "user_name": "",

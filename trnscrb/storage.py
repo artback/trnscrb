@@ -325,7 +325,22 @@ def save_transcript(path: Path, content: str) -> None:
     # end" marker (the stray %) when a note is read back in a terminal.
     if not content.endswith("\n"):
         content += "\n"
-    path.write_text(content, encoding="utf-8")
+    # Ensure the parent dir exists (needed when NOTES_DIR is redirected
+    # to a test temp path that hasn't been created yet).
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Write to a temp file and rename: a direct write_text truncates first,
+    # so a concurrent reader (a background push re-reading this file, the
+    # live-tail watcher) could observe an empty or half-written transcript.
+    tmp_path = path.parent / (path.name + ".tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    tmp_path.replace(path)
+    # Push to remote server in the background (no-op when unconfigured).
+    try:
+        from trnscrb import push
+
+        push.maybe_push(path)
+    except Exception:
+        _log.debug("push hook failed for %s", path, exc_info=True)
 
 
 def list_transcripts() -> list[dict]:

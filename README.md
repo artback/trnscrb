@@ -24,6 +24,31 @@ uv tool install trnscrb && trnscrb install
 
 ---
 
+## Permissions
+
+macOS asks for each of these once. Every grant attaches to the **`~/Applications/Trnscrb.app`** wrapper instead of your terminal, so the prompts read *Trnscrb* and the grants survive updates — a release only re-asks if the launcher itself changes.
+
+| Grant | Asked when | What it is for | Without it |
+| --- | --- | --- | --- |
+| **Microphone** | first recording | Meeting audio and dictation. | Nothing can be recorded. |
+| **Screen & System Audio Recording** | `trnscrb install`, then the first recording | The *other* participants, captured from the system output. macOS 15+ lists this as "Screen & System Audio Recording". | Only your mic is recorded, and the transcript notes that other participants were not captured. Check it with `trnscrb status`. |
+| **Input Monitoring** | first push-to-talk use | The push-to-talk key. A listen-only event tap compares keypresses against your configured combo (`ctrl+shift+k` by default). | Push-to-talk cannot arm — the menu shows `PTT: … (grant Input Monitoring)` and retries by itself. |
+| **Accessibility** | first dictation that pastes | Putting the dictated text into the focused text box. First choice is writing `AXSelectedText` on the frontmost app's focused field — insert at the caret, no clipboard, no keystrokes. Terminals silently drop that write, so they get the app's own **Edit ▸ Paste** instead. A synthetic ⌘V is only the last resort. | The text is left on the clipboard and the notification says so. Dictation still works; you paste it yourself. |
+| **Automation** (Apple Events) | first browser meeting check | Asking a browser which tab is open (`osascript`), so a Google Meet or Teams call in Safari/Chrome is detected. Also the last-resort paste through System Events. | Meeting detection falls back to its other signals (per-process mic use, native meeting apps); the last-resort paste is skipped. |
+| **Notifications** | first status message | The "saved", "transcribing" and "paste didn't land" toasts. | Silent — everything still works. |
+
+trnscrb asks for nothing else: no Full Disk Access, no camera, no contacts, no account.
+
+Two of these are broad grants, so here is exactly what they can and cannot see:
+
+- **Accessibility** is used only at the moment a dictation ends, and only against the frontmost app's focused element, to insert the text you just spoke. Nothing is read while you work — no keystrokes, no screen contents, no window titles.
+- **Input Monitoring** is a listen-only tap: it never injects events and never stores what you type. Each keypress is compared with the push-to-talk combo and passed straight through.
+- In a terminal, the dictation is placed on the clipboard for the instant the terminal's own paste needs it, then whatever you had is put back.
+
+Revoking a grant in **System Settings → Privacy & Security** is enough to disable the feature that uses it; the menu bar says what is missing and retries, so you can grant it again later without reinstalling.
+
+---
+
 ## Quick start
 
 ```bash
@@ -245,6 +270,11 @@ trnscrb glossary list|add|remove   # manage custom vocabulary
 trnscrb voices                     # list/name/forget learned voice identities
 trnscrb config list|get|set        # inspect/change settings
 
+trnscrb sync               # push pending transcripts to the remote (--all for everything)
+trnscrb remote status      # remote reachability + how much is pending locally
+trnscrb remote list        # transcripts on the remote server (✓ = also local)
+trnscrb remote pull <id>   # fetch a remote transcript into the local notes dir
+
 trnscrb mic-status       # live mic activity monitor
 trnscrb devices          # list audio input devices
 
@@ -299,6 +329,16 @@ changes it). `message` also copies the verbatim text to the clipboard when you
 stop, and when `paste_on_dictation` is on (the default) it pastes directly into
 the currently focused text field.
 
+**Push-to-talk** is the fast path: hold `ctrl+shift+k` (change it with menu bar
+▸ **Dictation ▸ Record PTT key…**), speak, release. Nothing is saved and your
+clipboard is not touched — the text is written straight into the focused text
+box. Terminals (Ghostty, Terminal, iTerm2, Calyx, …) refuse that write, so they
+get the text through their own **Edit ▸ Paste** instead: the clipboard is used
+for that instant and then restored, so whatever you had copied stays copied.
+Spoken symbols are converted on the way through — "at sign", "new line",
+"comma" arrive as `@`, a line break, `,` (`voice_symbols`; extend or override
+the map with `voice_symbol_map`).
+
 `--no-save` skips writing a note file entirely: the text only reaches the
 clipboard (or is pasted). This is the "normal app" flow — focus a text box,
 invoke `trnscrb dictate message --no-save`, speak, and it disappears into your
@@ -316,6 +356,55 @@ Dictation only uses the microphone (no system audio), matches your glossary term
 Dictating from a noisy room (fan, traffic, café)? Both dictation and meetings share the same transcription pipeline, so a single toggle cleans the audio first: `trnscrb config set denoise true`. It runs a fully local noise filter (noisereduce spectral gating) before the model decodes, which helps most in steady background hiss — at the cost of extra pre-processing time. Off by default.
 
 ---
+
+## Client/server mode
+
+Capture and transcription stay local on the Mac; the transcript store and
+MCP interface run on a server (any Linux box).  Your agents on the Mac
+query the server for transcripts; finished transcripts push automatically.
+
+With `remote_url` unset (the default), everything runs locally — this mode
+is purely additive and opt-in.
+
+**Server setup** — install on the Linux host:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/artback/trnscrb/main/install-server.sh | bash
+```
+
+(Or run `install-server.sh` directly after cloning the repo.) The script
+installs `libportaudio2`, creates a venv with the minimal dependency set,
+generates and stores the auth token, and prints the paste-ready client setup.
+
+**Mac setup** — two config lines + one sync:
+
+```bash
+trnscrb config set remote_url http://<server>:8765
+trnscrb config set remote_token <token>
+trnscrb sync
+```
+
+Then paste the OpenCode remote-MCP JSON block (printed by the install script
+or by `trnscrb serve`) into your `opencode.json`.
+
+**Automatic resync.** A successful push is recorded in a local ledger
+(`~/.config/trnscrb/push_state.json`), and the menu-bar app — or the headless
+watcher — re-pushes anything that is missing on the server every
+`remote_resync_interval_minutes` (default 5, `0` disables). So a transcript
+saved while the server was down reaches it on its own: no manual sync needed,
+and a routine resync costs nothing when the store is already in sync.
+
+The day-to-day commands:
+
+```bash
+trnscrb sync             # push only what is pending (--all = force everything)
+trnscrb remote status    # is the server reachable? how much is pending?
+trnscrb remote list      # what is on the server (✓ = also on this machine)
+trnscrb remote pull <id> # fetch a transcript from another machine
+```
+
+`trnscrb status` shows a Remote line (pending count, last push) from the
+ledger, so you can see the state of sync without touching the network.
 
 ## OpenCode / MCP tools
 
@@ -390,7 +479,7 @@ Filler words (um, uh, like, basically, etc.) are automatically removed in 5 lang
 
 ## Privacy
 
-Everything runs locally. Enrichment sends transcript text to whichever LLM provider you configure (local by default, via llama.cpp) — swap in Claude Code, Ollama, LM Studio, or a hosted Anthropic/OpenAI key from menu bar Settings.
+Everything runs locally. Enrichment sends transcript text to whichever LLM provider you configure (local by default, via llama.cpp) — swap in Claude Code, Ollama, LM Studio, or a hosted Anthropic/OpenAI key from menu bar Settings. The system grants trnscrb asks for, and exactly what each can see, are listed under [Permissions](#permissions).
 
 ---
 

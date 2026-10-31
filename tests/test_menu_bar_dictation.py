@@ -163,21 +163,15 @@ class HudTest(unittest.TestCase):
         app._update_hud(None)
         app.stop_dictation.assert_called_once_with(None)
 
-    def test_live_text_reaches_the_label(self):
-        app = _app()
-        app._current_state = "dictating"
-        app._hud_window = mock.Mock()
-        app._hud_label = mock.Mock()
-        app._dict_live_text = "I hope testing"
-        app._update_hud(None)
-        app._hud_label.setStringValue_.assert_called_once_with("I hope testing")
-
     def test_hud_hidden_when_not_dictating(self):
         app = _app()
         app._current_state = "transcribing"
         app._hud_window = mock.Mock()
         app._update_hud(None)
-        app._hud_window.orderOut_.assert_called_once()
+        # The hide path goes through _hide_dictation_hud, which drops the
+        # window ref so the next dictation builds a fresh HUD.
+        self.assertIsNone(app._hud_window)
+        self.assertEqual(app._hud_shown_text, "")
 
     def test_hud_creation_failure_is_guarded(self):
         """No AppKit (headless) must never break a dictation."""

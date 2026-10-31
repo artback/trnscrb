@@ -155,6 +155,10 @@ def install(force: bool):
     from trnscrb.settings import save as save_settings
 
     settings = load_settings()
+    # Whether any branch below saved new settings. Every assignment sits in a
+    # conditional, so a fully configured machine (re-run of install, e.g.
+    # after an upgrade) skips them all and must start from False.
+    changed = False
     backend = _normalize_backend(settings.get("transcription_backend"))
     if backend == "whisper":
         model_size = str(settings.get("model_size") or "small")
@@ -278,8 +282,7 @@ def install(force: bool):
             else {}
         )
         ptt_has_it = (
-            "dictation_ptt_key" in stored
-            and str(stored["dictation_ptt_key"]).strip() != ""
+            "dictation_ptt_key" in stored and str(stored["dictation_ptt_key"]).strip() != ""
         )
     except Exception:
         ptt_has_it = True
@@ -289,12 +292,29 @@ def install(force: bool):
             "into the focused field? (ctrl+alt+F8)",
             default=True,
         ):
-            ptt_key = click.prompt(
-                "  Key combo (e.g. ctrl+alt+f8, cmd+shift+d, empty to disable)",
-                default="ctrl+alt+f8",
-                show_default=False,
-            ).strip()
-            if ptt_key:
+            from trnscrb import hotkey
+
+            ptt_key, valid = "", False
+            for _attempt in range(3):
+                ptt_key = click.prompt(
+                    "  Key combo (e.g. ctrl+alt+f8, cmd+shift+d, caps+t, empty to disable)",
+                    default="ctrl+alt+f8",
+                    show_default=False,
+                ).strip()
+                # A non-empty combo must parse: an unparseable spec would be
+                # stored fine, then the menu bar would quietly show
+                # "PTT: off" with no trace of why.
+                valid = not ptt_key or hotkey.parse(ptt_key) is not None
+                if valid:
+                    break
+                click.echo(
+                    click.style(
+                        f"  '{ptt_key}' is not a valid combo — type it as in "
+                        "the examples, or leave it empty to disable.",
+                        fg="yellow",
+                    )
+                )
+            if valid and ptt_key:
                 settings["dictation_ptt_key"] = ptt_key
                 changed = True
                 click.echo(click.style("  PTT key set.", fg="green"))
@@ -364,6 +384,199 @@ def server():
     from trnscrb.mcp_server import main
 
     main()
+
+
+@cli.command()
+@click.option("--host", default="127.0.0.1", help="Bind address (default 127.0.0.1).")
+@click.option("--port", default=8765, type=int, help="Bind port (default 8765).")
+@click.option("--token", default=None, help="Bearer token for auth. Auto-generates if unset.")
+@click.option("--insecure", is_flag=True, help="Allow binding to non-loopback without a token.")
+def serve(host, port, token, insecure):
+    """Start the network server — transcripts + MCP over Streamable HTTP."""
+    from trnscrb import settings
+    from trnscrb.server_http import (
+        BindPolicyError,
+        check_bind_policy,
+        client_setup_snippet,
+        generate_token,
+        resolve_token,
+        start,
+    )
+
+    # Resolve token: flag > env > settings.
+    resolved = resolve_token(token)
+    if not resolved:
+        resolved = generate_token()
+        settings.put("server_token", resolved)
+        click.echo(f"Generated and saved a new token: {resolved}")
+
+    try:
+        check_bind_policy(host, resolved, insecure=insecure)
+    except BindPolicyError as e:
+        raise click.ClickException(str(e))
+
+    url = f"http://{host}:{port}"
+    snippet = client_setup_snippet(url, resolved)
+    click.echo(snippet)
+    click.echo()
+
+    start(host=host, port=port, token=resolved, insecure=insecure)
+
+
+@cli.command()
+@click.option("--status", is_flag=True, help="Show remote status instead of pushing.")
+@click.option("--all", "all_files", is_flag=True, help="Push every transcript, not just pending.")
+def sync(status, all_files):
+    """Push local transcripts to the configured remote server.
+
+    By default only the pending transcripts — never successfully pushed, or
+    changed since — are sent.  Use --all to force a full re-push of
+    everything (the behaviour of older versions).
+    """
+    from trnscrb import push
+
+    if status:
+        _print_remote_status()
+        return
+
+    if not push.is_configured():
+        raise click.ClickException(
+            "remote_url is not set — configure it with `trnscrb config set remote_url …`"
+        )
+
+    if all_files:
+        ok, failed = push.sync_all(
+            progress=lambda name, ok: click.echo(
+                f"  {'✓' if ok else '✗'} {name}" + ("" if ok else " (unreachable)")
+            )
+        )
+    else:
+        pending = push.pending_count()
+        if pending == 0:
+            click.echo("Nothing pending — every local transcript has been pushed.")
+            return
+        ok, failed = push.resync(
+            progress=lambda name, ok: click.echo(
+                f"  {'✓' if ok else '✗'} {name}" + ("" if ok else " (unreachable)")
+            )
+        )
+    click.echo(f"\nPushed {ok} transcript(s), {failed} failed.")
+
+
+# ── remote ────────────────────────────────────────────────────────────────────
+
+
+def _print_remote_status() -> None:
+    """Reachability, server-side count, and how much is still pending locally.
+
+    Shared by `trnscrb remote status` and `trnscrb sync --status`.  The
+    pending count and last-push line come from the local ledger, so they are
+    correct even when the server is down — the network call is only there to
+    say whether the server itself is.
+    """
+    from trnscrb import push
+
+    if not push.is_configured():
+        click.echo(click.style("  ✗ Remote: not configured", fg="yellow"))
+        click.echo(
+            "    set `trnscrb config set remote_url …` and "
+            "`trnscrb config set remote_token …` (printed by `trnscrb serve`)"
+        )
+        return
+
+    health = push.status()
+    pending = push.pending_count()
+    last = push.last_push()
+    if health is None:
+        click.echo(
+            click.style("  ✗ Remote: unreachable", fg="red") + f"  ({push.configured_url()})"
+        )
+    else:
+        click.echo(
+            click.style("  ✓ Remote: reachable", fg="green")
+            + f"  — {health.get('transcript_count', '?')} transcript(s) on server "
+            f"(v{health.get('version', '?')})"
+        )
+    if pending:
+        click.echo(f"    {pending} transcript(s) pending locally — pushed on next resync")
+    else:
+        click.echo("    nothing pending — every local transcript has been pushed")
+    if last:
+        click.echo(f"    last push: {last[0]} at {last[1]}")
+
+
+@cli.group()
+def remote():
+    """Inspect and work with the configured remote transcript server."""
+
+
+@remote.command(name="status")
+def remote_status():
+    """Reachability, server transcript count, and how much is pending locally."""
+    _print_remote_status()
+
+
+@remote.command(name="list")
+@click.option("--limit", default=30, show_default=True, help="Max entries to show (newest first).")
+def remote_list(limit):
+    """List transcripts on the remote server (✓ = also exists locally)."""
+    from trnscrb import push, storage
+
+    if not push.is_configured():
+        raise click.ClickException("remote_url is not set — see `trnscrb remote status`.")
+    entries = push.remote_transcripts()
+    if entries is None:
+        raise click.ClickException(
+            f"Remote at {push.configured_url()} is unreachable (or rejected the token)."
+        )
+    local_names = {e["name"] for e in storage.list_transcripts()}
+    entries = sorted(entries, key=lambda e: str(e.get("modified") or ""), reverse=True)
+    for e in entries[:limit]:
+        mark = click.style("✓", fg="green") if e.get("name") in local_names else "−"
+        click.echo(f"  {mark} {e.get('id', e.get('name'))}  ({str(e.get('modified'))[:16]})")
+    if len(entries) > limit:
+        click.echo(
+            click.style(f"  … {len(entries) - limit} more — use --limit {len(entries)}", dim=True)
+        )
+    click.echo(f"\n{len(entries)} transcript(s) on the remote server.")
+
+
+@remote.command(name="pull")
+@click.argument("transcript_id")
+@click.option("--show", is_flag=True, help="Print the transcript instead of saving it.")
+@click.option("--force", is_flag=True, help="Overwrite a local file of the same name that differs.")
+def remote_pull(transcript_id, show, force):
+    """Fetch a transcript from the remote server (dictated on another machine?).
+
+    By default saves it into the local notes directory as <id>.txt.  A local
+    file of the same name is left alone unless --force is given.
+    """
+    from trnscrb import push, storage
+
+    if not push.is_configured():
+        raise click.ClickException("remote_url is not set — see `trnscrb remote status`.")
+    text = push.fetch_transcript(transcript_id)
+    if text is None:
+        raise click.ClickException(
+            f"Transcript '{transcript_id}' not found on {push.configured_url()} (or unreachable)."
+        )
+
+    if show:
+        click.echo(text)
+        return
+
+    storage.ensure_notes_dir()
+    name = transcript_id[:-4] if transcript_id.endswith(".txt") else transcript_id
+    path = storage.NOTES_DIR / f"{name}.txt"
+    if path.exists() and path.read_text(encoding="utf-8") != text:
+        if not force:
+            raise click.ClickException(
+                f"{path.name} already exists locally with different content — "
+                "use --force to overwrite it."
+            )
+        _log.warning("pull: overwriting local %s", path.name)
+    path.write_text(text, encoding="utf-8")
+    click.echo(f"Saved: {path}")
 
 
 # ── watch ─────────────────────────────────────────────────────────────────────
@@ -489,6 +702,13 @@ def watch():
         speech_ratio=lambda secs: _attribution.live_speech_ratio(_recorder_ref[0], secs),
     )
     watcher.start()
+
+    # Missed pushes (remote down at save time) get retried on a timer — the
+    # same loop the menu-bar app runs; this process holds the same lock, so
+    # at most one resync loop exists.
+    from trnscrb import push as _push
+
+    _push.start_resync_loop()
 
     click.echo(f"Watching for mic activity (warmup={WARMUP_SECS}s, grace={GRACE_SECS}s).")
     click.echo("Press Ctrl-C to stop.\n")
@@ -1522,6 +1742,19 @@ def status():
             "OpenCode" if _mcp_config_healthy() else "stale command path — run `trnscrb install`"
         )
         _row("MCP server", _mcp_config_healthy(), detail)
+    # Remote push state from the local ledger — no network call, so this
+    # command stays fast and works while the server is down.
+    from trnscrb import push as _push
+
+    if _push.is_configured():
+        pending = _push.pending_count()
+        last = _push.last_push()
+        detail = (f"{pending} pending" if pending else "in sync") + (
+            f", last push {last[1][11:19]}" if last else ", never pushed"
+        )
+        _row("Remote", pending == 0, detail)
+    else:
+        _row("Remote", False, "off (no remote_url)")
     click.echo()
 
     # Sort by the filename's date prefix, not mtime — maintenance passes
@@ -1883,6 +2116,17 @@ def config_set(key, value):
 
     if key not in settings.scalar_keys():
         raise click.ClickException(f"Unknown setting '{key}'. See `trnscrb config list`.")
+    if key == "dictation_ptt_key":
+        # Validate the PTT spec here: an unparseable value would be stored
+        # fine, then the menu bar would quietly show "PTT: off" with no
+        # trace of why.
+        from trnscrb import hotkey
+
+        if value and hotkey.parse(value) is None:
+            raise click.ClickException(
+                f"'{value}' is not a valid PTT combo — e.g. ctrl+alt+f8 or "
+                "caps+t; empty turns PTT off."
+            )
     coerced = _coerce_setting(value, settings.default_for(key))
     settings.put(key, coerced)
     click.echo(f"  {key} = {json.dumps(coerced)}")
