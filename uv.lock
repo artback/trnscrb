@@ -4146,12 +4146,13 @@ wheels = [
 
 [[package]]
 name = "trnscrb"
-version = "0.71.0"
+version = "0.71.1"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
     { name = "click" },
     { name = "faster-whisper" },
+    { name = "httpx" },
     { name = "mcp" },
     { name = "mlx-qwen3-asr" },
     { name = "noisereduce" },
@@ -4178,6 +4179,7 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.25" },
     { name = "click", specifier = ">=8.1" },
     { name = "faster-whisper", specifier = ">=1.0.0" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "mcp", specifier = ">=2.0.0" },
     { name = "mlx-qwen3-asr", specifier = ">=0.3.5" },
     { name = "noisereduce", specifier = ">=3.0.3" },
