@@ -978,6 +978,58 @@ class TrnscrbApp(rumps.App):
 
     # ── dictation HUD (floating activity indicator) ─────────────────────────
 
+    def _focused_screen(self):
+        """The screen under the frontmost app's window, or None.
+
+        ``mainScreen`` is the primary display for an accessory app with no
+        key window, so the HUD lands on the wrong screen. The frontmost
+        app's topmost normal window (CGWindowList, layer 0) names the real
+        target; the mouse location covers apps without a normal window.
+        """
+        try:
+            import AppKit
+            import Quartz
+
+            screens = AppKit.NSScreen.screens()
+            if not screens:
+                return None
+            primary_h = screens[0].frame().size.height
+            front = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+            if front is not None:
+                pid = int(front.processIdentifier())
+                windows = Quartz.CGWindowListCopyWindowInfo(
+                    Quartz.kCGWindowListOptionOnScreenOnly,
+                    Quartz.kCGNullWindowID,
+                )
+                for w in windows:
+                    if int(w.get("kCGWindowOwnerPID", -1)) != pid or w.get("kCGWindowLayer") != 0:
+                        continue
+                    b = w.get("kCGWindowBounds") or {}
+                    x, y = float(b.get("X", 0.0)), float(b.get("Y", 0.0))
+                    wdt, hgt = float(b.get("Width", 0.0)), float(b.get("Height", 0.0))
+                    # CG bounds are top-left origin; AppKit frames are not.
+                    cx, cy = x + wdt / 2.0, primary_h - y - hgt / 2.0
+                    for s in screens:
+                        f = s.frame()
+                        if (
+                            f.origin.x <= cx <= f.origin.x + f.size.width
+                            and f.origin.y <= cy <= f.origin.y + f.size.height
+                        ):
+                            return s
+            from AppKit import NSEvent
+
+            mouse = NSEvent.mouseLocation()
+            for s in screens:
+                f = s.frame()
+                if (
+                    f.origin.x <= mouse.x <= f.origin.x + f.size.width
+                    and f.origin.y <= mouse.y <= f.origin.y + f.size.height
+                ):
+                    return s
+        except Exception:
+            _log.debug("Focused-screen lookup failed", exc_info=True)
+        return None
+
     def _show_dictation_hud(self) -> None:
         """Create and show the floating dictation indicator.
 
@@ -997,7 +1049,7 @@ class TrnscrbApp(rumps.App):
 
             # ── dimensions & positioning ────────────────────────────────
             width, height = 64.0, 64.0
-            screen = AppKit.NSScreen.mainScreen()
+            screen = self._focused_screen() or AppKit.NSScreen.mainScreen()
             frame = screen.frame()
             x = (frame.size.width - width) / 2.0
             y = (frame.size.height - height) / 2.0 + frame.origin.y
