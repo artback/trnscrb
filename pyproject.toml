@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trnscrb"
-version = "0.71.0"
+version = "0.71.1"
 description = "Offline meeting transcription for macOS — auto-detects meetings, transcribes locally with Parakeet or Whisper, saves to Claude Desktop via MCP"
 readme = "README.md"
 license = "MIT"
@@ -42,6 +42,9 @@ dependencies = [
     # that pyannote already pulls in).
     "sentence-transformers>=3.0",
     "mcp>=2.0.0",
+    # Remote push / resync client (trnscrb.push) — the 0.71.0 release shipped
+    # without it declared and crash-looped on every fresh start.
+    "httpx>=0.27",
     "click>=8.1",
     "anthropic>=0.25",
     "scipy>=1.11",
