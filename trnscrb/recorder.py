@@ -69,6 +69,14 @@ _SYS_BUFFER_MAX_FRAMES = SAMPLE_RATE * 30
 # cost more than the echo it fixes.
 _ALIGN_MAX_FRAMES = SAMPLE_RATE // 2
 
+# How long stop() keeps the mic stream open after the user releases PTT.
+# PortAudio's queue still holds the tail of the last word (50-150 ms) at
+# key-up, and the callback drops every block it is handed once _recording
+# is false — so stopping the stream immediately loses the end of the last
+# word. The captured tail is also trailing silence, which helps decoders
+# finalize their last prediction.
+_STOP_GRACE_SECS = 0.3
+
 # Mic level balancing: the mic is often much quieter than system playback,
 # drowning the user's voice in the mix. Track loudness of both sources and
 # boost the mic toward the system-audio level, never above this factor.
@@ -236,6 +244,11 @@ class Recorder:
 
     def stop(self) -> Path | None:
         """Stop recording and return the path to a temporary WAV file."""
+        # Keep the stream open a beat longer: the callback still owes us the
+        # tail of the last word (see _STOP_GRACE_SECS). Flipping _recording
+        # before that drains would make the callback drop it.
+        if self._stream is not None:
+            time.sleep(_STOP_GRACE_SECS)
         self._recording = False
         # Whatever the alignment delay is holding is real audio the meeting
         # ended on — a fraction of a second of it, but losing the last words

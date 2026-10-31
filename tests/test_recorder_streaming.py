@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from trnscrb.recorder import SAMPLE_RATE, Recorder, _wav_header
+from trnscrb.recorder import SAMPLE_RATE, Recorder, _STOP_GRACE_SECS, _wav_header
 
 
 class WavHeaderTest(unittest.TestCase):
@@ -185,6 +185,39 @@ class RecorderFullCycleTest(unittest.TestCase):
             data = wf.readframes(wf.getnframes())
             self.assertEqual(len(data), 10 * 1024 * 2)
 
+        path.unlink(missing_ok=True)
+
+    def test_stop_grace_captures_tail_delivered_during_grace(self):
+        """A block delivered while stop() waits out the grace must land in
+        the file — stopping the stream at key-up loses the end of the last
+        word, because the callback drops blocks once _recording is false."""
+        with self._patch_stream():
+            rec = Recorder(device=None, system_audio=False)
+            rec.start()
+
+            for _ in range(3):
+                block = np.random.uniform(-0.5, 0.5, (1024, 1)).astype(np.float32)
+                rec._callback(block, 1024, None, None)
+
+            tail = np.random.uniform(-0.5, 0.5, (1024, 1)).astype(np.float32)
+            delivered = []
+
+            def fake_sleep(seconds):
+                # Simulate PortAudio draining its queue during the grace:
+                # one final block reaches the callback while the stream is
+                # still open. Other sleeps (the watchdog) pass through.
+                if abs(seconds - _STOP_GRACE_SECS) < 1e-9 and not delivered:
+                    rec._callback(tail, 1024, None, None)
+                    delivered.append(seconds)
+
+            with patch("trnscrb.recorder.time.sleep", side_effect=fake_sleep):
+                path = rec.stop()
+
+        self.assertEqual(delivered, [_STOP_GRACE_SECS])
+        self.assertIsNotNone(path)
+        with wave.open(str(path), "rb") as wf:
+            # 3 blocks before stop + the tail block captured during grace
+            self.assertEqual(wf.getnframes(), 4 * 1024)
         path.unlink(missing_ok=True)
 
     def test_stop_with_no_frames_returns_none_and_cleans_up(self):
