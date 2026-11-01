@@ -12,7 +12,13 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from trnscrb.recorder import SAMPLE_RATE, Recorder, _STOP_DRAIN_SECS, _wav_header
+from trnscrb.recorder import (
+    SAMPLE_RATE,
+    Recorder,
+    _STOP_DRAIN_SECS,
+    _TRAIL_SILENCE_SECS,
+    _wav_header,
+)
 
 
 class WavHeaderTest(unittest.TestCase):
@@ -180,10 +186,10 @@ class RecorderFullCycleTest(unittest.TestCase):
             self.assertEqual(wf.getnchannels(), 1)
             self.assertEqual(wf.getsampwidth(), 2)  # 16-bit = 2 bytes
             self.assertEqual(wf.getframerate(), SAMPLE_RATE)
-            self.assertEqual(wf.getnframes(), 10 * 1024)
+            self.assertEqual(wf.getnframes(), 10 * 1024 + int(_TRAIL_SILENCE_SECS * SAMPLE_RATE))
             # Read all frames to confirm no corruption
             data = wf.readframes(wf.getnframes())
-            self.assertEqual(len(data), 10 * 1024 * 2)
+            self.assertEqual(len(data), (10 * 1024 + int(_TRAIL_SILENCE_SECS * SAMPLE_RATE)) * 2)
 
         path.unlink(missing_ok=True)
 
@@ -219,7 +225,31 @@ class RecorderFullCycleTest(unittest.TestCase):
         self.assertIsNotNone(path)
         with wave.open(str(path), "rb") as wf:
             # 3 blocks before stop + the tail block captured during grace
-            self.assertEqual(wf.getnframes(), 4 * 1024)
+            # + the fixed silence tail appended in stop()
+            self.assertEqual(
+                wf.getnframes(), 4 * 1024 + int(_TRAIL_SILENCE_SECS * SAMPLE_RATE)
+            )
+        path.unlink(missing_ok=True)
+
+    def test_stop_appends_digital_silence_tail(self):
+        """stop() ends the file with a fixed stretch of digital silence —
+        the endpointer tail streaming ASR needs to finalize the last words
+        (a mid-word release would otherwise leave the file hard-cut)."""
+        with self._patch_stream():
+            rec = Recorder(device=None, system_audio=False)
+            rec.start()
+            block = np.random.uniform(-0.5, 0.5, (1024, 1)).astype(np.float32)
+            rec._callback(block, 1024, None, None)
+
+            path = rec.stop()
+
+        tail_frames = int(_TRAIL_SILENCE_SECS * SAMPLE_RATE)
+        self.assertIsNotNone(path)
+        with wave.open(str(path), "rb") as wf:
+            self.assertEqual(wf.getnframes(), 1024 + tail_frames)
+            data = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
+            # The appended tail is pure zeros
+            np.testing.assert_array_equal(data[-tail_frames:], 0)
         path.unlink(missing_ok=True)
 
     def test_stop_grace_ends_early_when_tail_is_silent(self):

@@ -82,6 +82,12 @@ _ALIGN_MAX_FRAMES = SAMPLE_RATE // 2
 _STOP_DRAIN_SECS = 0.15  # Phase 1: fixed PortAudio queue drain
 _STOP_BLOCK_SECS = 1024 / SAMPLE_RATE  # one callback block ≈ 64 ms
 _SILENCE_ENERGY = 5e-4  # mean-square ≈ -66 dBFS: above a quiet room, below speech
+# Digital silence appended to the end of every stopped recording. Streaming
+# ASR (Nemotron) only finalizes the last words after enough trailing
+# silence, and a mid-word PTT release leaves the file hard-cut — measured
+# against the model: a 0.5 s utterance transcribes with ~600 ms of tail,
+# not with 300 ms. Zeros, so even a noisy room ends in clean silence.
+_TRAIL_SILENCE_SECS = 0.6
 
 # Mic level balancing: the mic is often much quieter than system playback,
 # drowning the user's voice in the mix. Track loudness of both sources and
@@ -294,6 +300,14 @@ class Recorder:
                 Path(self._tmpfile.name).unlink(missing_ok=True)
                 self._tmpfile = None
                 return None
+
+            # The endpointer's tail: streaming ASR only finalizes the last
+            # words after enough trailing silence, and a mid-word release
+            # leaves the file hard-cut — end every recording with a fixed
+            # stretch of digital silence (see _TRAIL_SILENCE_SECS).
+            tail_frames = int(_TRAIL_SILENCE_SECS * SAMPLE_RATE)
+            self._tmpfile.write(b"\x00" * (tail_frames * 2))
+            frame_count += tail_frames
 
             # Finalize WAV header now that we know the data size.
             data_size = frame_count * 2  # int16 = 2 bytes per sample
