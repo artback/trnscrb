@@ -70,12 +70,18 @@ _SYS_BUFFER_MAX_FRAMES = SAMPLE_RATE * 30
 _ALIGN_MAX_FRAMES = SAMPLE_RATE // 2
 
 # How long stop() keeps the mic stream open after the user releases PTT.
-# PortAudio's queue still holds the tail of the last word (50-150 ms) at
-# key-up, and the callback drops every block it is handed once _recording
-# is false — so stopping the stream immediately loses the end of the last
-# word. The captured tail is also trailing silence, which helps decoders
-# finalize their last prediction.
-_STOP_GRACE_SECS = 0.3
+# Two phases: a fixed drain of the PortAudio queue tail — the callback
+# drops every block once _recording is false, so the last 50-150 ms of
+# audio still queued at key-up must be captured while the stream is
+# alive — then an adaptive tail: the stream stays open while the last
+# recorded blocks still carry energy, so releasing mid-word does not cut
+# the word off. A noisy room never reads as silent, so the tail degrades
+# to the full stop_grace_ms cap; quiet speech ends it within ~100 ms.
+# The captured silence also helps decoders finalize their last
+# prediction.
+_STOP_DRAIN_SECS = 0.15  # Phase 1: fixed PortAudio queue drain
+_STOP_BLOCK_SECS = 1024 / SAMPLE_RATE  # one callback block ≈ 64 ms
+_SILENCE_ENERGY = 5e-4  # mean-square ≈ -66 dBFS: above a quiet room, below speech
 
 # Mic level balancing: the mic is often much quieter than system playback,
 # drowning the user's voice in the mix. Track loudness of both sources and
@@ -196,6 +202,7 @@ class Recorder:
         self._mic_loudness = 0.0  # EMA of mic mean-square (speech-gated)
         self._sys_loudness = 0.0  # EMA of system-audio mean-square
         self._last_mic_frame = 0.0  # time.monotonic() of last mic callback
+        self._last_block_energy = 0.0  # mean-square of last written mixed block
         self._watchdog: threading.Thread | None = None
         # Per-block energy timeline of both source streams, recorded before
         # mixing — lets the transcriber attribute segments to "Me" (mic) vs
@@ -244,11 +251,9 @@ class Recorder:
 
     def stop(self) -> Path | None:
         """Stop recording and return the path to a temporary WAV file."""
-        # Keep the stream open a beat longer: the callback still owes us the
-        # tail of the last word (see _STOP_GRACE_SECS). Flipping _recording
-        # before that drains would make the callback drop it.
-        if self._stream is not None:
-            time.sleep(_STOP_GRACE_SECS)
+        # Keep the stream open until the queue tail is in the file: the
+        # callback drops every block once _recording is false.
+        self._wait_out_grace()
         self._recording = False
         # Whatever the alignment delay is holding is real audio the meeting
         # ended on — a fraction of a second of it, but losing the last words
@@ -301,6 +306,36 @@ class Recorder:
 
         _log.info("Recording stopped: %d samples, saved to %s", frame_count, out)
         return out
+
+    def _wait_out_grace(self) -> None:
+        """Keep the stream open while the tail of the recording is still in flight.
+
+        Phase 1 is a fixed drain of PortAudio's queue — physics, not
+        speech: whatever was buffered at key-up is discarded the moment
+        the stream stops. Phase 2 then holds the stream open while the
+        last written block still carries energy, so releasing mid-word
+        does not cut the word off; a room that never reads as silent
+        (fan, AC) degrades to the full stop_grace_ms cap.
+        """
+        if self._stream is None:
+            return
+        from trnscrb import settings
+
+        grace_ms = settings.get("stop_grace_ms")
+        cap = (grace_ms if grace_ms is not None else 300) / 1000.0
+        if cap <= 0:
+            return
+        drain = min(_STOP_DRAIN_SECS, cap)
+        time.sleep(drain)
+        budget = cap - drain
+        # Budget-driven (sleep + subtract) rather than clock-driven, so the
+        # whole wait is patchable in tests and never oversleeps the cap.
+        while budget > 1e-9:
+            if self._last_block_energy < _SILENCE_ENERGY:
+                break
+            step = min(_STOP_BLOCK_SECS, budget)
+            time.sleep(step)
+            budget -= step
 
     def flush_to_disk(self) -> int:
         """Make the in-progress recording a valid, playable WAV. Returns frames.
@@ -525,6 +560,9 @@ class Recorder:
                     mixed = mic * self._mic_gain(mic, system) + system
                 else:
                     mixed = mic
+                # stop()'s adaptive grace decides on this: how loud was the
+                # last block that actually made it into the file?
+                self._last_block_energy = float(np.mean(np.square(mixed)))
                 audio_int16 = np.clip(mixed, -1.0, 1.0)
                 audio_int16 = (audio_int16 * 32_767).astype(np.int16)
                 raw = audio_int16.tobytes()

@@ -143,6 +143,10 @@ _DEFAULTS: dict = {
     "transcription_backend": "auto",  # auto | parakeet | whisper | voxtral | qwen3 | nemotron — global override (legacy); applies to contexts left on auto
     "dictation_backend": "auto",  # PTT dictation: single-speaker, speed matters most
     "meeting_backend": "auto",  # meetings: word timings feed the diarizer
+    # stop() holds the mic stream open after key-up: a fixed PortAudio
+    # queue drain plus a silence-aware tail, bounded by this cap. 0 stops
+    # immediately (old behavior).
+    "stop_grace_ms": 300,
     "denoise": False,  # noisereduce spectral-gate filter before transcription (off)
     "parakeet_model_id": "mlx-community/parakeet-tdt-0.6b-v3",
     "qwen3_model_id": "Qwen/Qwen3-ASR-0.6B",  # ~1.2 GB; Qwen3-ASR-1.7B for more accuracy
