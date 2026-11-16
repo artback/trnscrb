@@ -277,6 +277,16 @@ class PTTMonitor:
     def active(self) -> bool:
         return self._tap.active
 
+    @property
+    def disabled_reason(self) -> str:
+        """Why the system disabled the tap (``""`` while it is enabled).
+
+        Non-empty means the tap object is alive but no events are being
+        delivered — the owner should tear it down and re-arm rather than
+        trust :attr:`active`, which stays True until ``stop()``.
+        """
+        return self._tap.disabled_reason
+
     def start(self) -> bool:
         return self._tap.start()
 

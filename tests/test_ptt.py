@@ -98,6 +98,20 @@ class TestStateMachine(unittest.TestCase):
         self.assertFalse(s.holding)
         self.assertFalse(s.started)
 
+    def test_lost_key_up_leaves_stuck_press_reset_heals(self):
+        # The key-up never arrives (the system disabled the tap mid-press,
+        # or the dictation ended via the safety net first): ``holding``
+        # latches and the next press is swallowed as a "second press".
+        # ``reset()`` — what the 5s menu-bar check calls when no dictation
+        # is live — heals the stuck state.
+        s = _state()
+        self.assertTrue(ptt.handle_key_down(s, 99, CTRL_ALT))
+        ptt.confirm_start(s, True)
+        # key-up lost
+        self.assertFalse(ptt.handle_key_down(s, 99, CTRL_ALT))  # swallowed
+        s.reset()
+        self.assertTrue(ptt.handle_key_down(s, 99, CTRL_ALT))
+
 
 # ── caps lock as a hold modifier ──────────────────────────────────────────────
 #

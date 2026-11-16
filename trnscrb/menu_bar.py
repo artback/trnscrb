@@ -780,14 +780,29 @@ class TrnscrbApp(rumps.App):
             self._ptt_item.title = "PTT: off"
             return
         display = hotkey.display_spec(key.key_code, key.flags)
+        if self._ptt_monitor is not None:
+            # Self-heal a stuck press: a lost key-up (the system disabled
+            # the tap while the main run loop was busy, or the dictation
+            # ended via the safety net before the release was processed)
+            # leaves ``holding`` latched, which swallows the next press as
+            # a "second press of an open press". With no dictation live the
+            # press state is stale by definition, so clear it.
+            if self._dict_preset is None and self._ptt_monitor.state.holding:
+                self._ptt_monitor.state.reset()
         if (
             self._ptt_monitor is not None
             and self._ptt_monitor.active
+            and not self._ptt_monitor.disabled_reason
             and self._ptt_armed_spec == spec
         ):
             self._ptt_item.title = f"PTT: {display}"
             return
         if self._ptt_monitor is not None:
+            if self._ptt_monitor.disabled_reason:
+                _log.info(
+                    "PTT tap was disabled by the system (%s) — re-arming",
+                    self._ptt_monitor.disabled_reason,
+                )
             self._ptt_monitor.stop()
         monitor = ptt.PTTMonitor(key, on_start=self._ptt_start, on_stop=self._ptt_stop)
         if monitor.start():
