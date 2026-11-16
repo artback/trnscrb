@@ -263,6 +263,7 @@ class TrnscrbApp(rumps.App):
         self._live_thread: threading.Thread | None = None
         self._meeting_name: str = ""
         self._calendar_event: dict | None = None  # captured at recording start
+        self._call_names_watch = None  # call names AX watch (None until started)
 
         # Active dictation state. The recorder is the same field as a meeting's
         # (_recorder) — the two are mutually exclusive, and sharing the field
@@ -488,6 +489,53 @@ class TrnscrbApp(rumps.App):
         self._watcher.start()
         if not (self._recorder and self._recorder.is_recording):
             self._set_icon_state("watching")
+
+    # ── call names ────────────────────────────────────────────────────────────
+
+    def _start_call_names_watch(self):
+        """Start the call names accessibility tree watcher."""
+        if not get_setting("call_names_enabled"):
+            return
+        try:
+            from trnscrb.callnames import watch as _cw_mod
+            w = _cw_mod.watch_for(self._meeting_name)
+            if w is None:
+                # No supported app → nothing to watch.
+                _log.debug("Call names: no watcher for %s", self._meeting_name)
+                return
+            w.start()
+            self._call_names_watch = w
+            _log.info("Call names watch started: %s", self._meeting_name)
+        except Exception:
+            _log.debug("Call names watch failed to start", exc_info=True)
+
+    def _apply_call_names(self, segments, evt):
+        """Run call names attribution and apply names to segments.
+
+        Returns the call names metadata dict for the MCP.
+        """
+        if self._call_names_watch is None:
+            return None
+        try:
+            result = self._call_names_watch.stop_and_attr(segments, my_names=[evt.get("title", "")] if evt else [])
+            if result is None:
+                return None
+            name_map = result.get("name_map", {})
+            if name_map:
+                for seg in segments:
+                    old = seg.get("speaker")
+                    new = name_map.get(old, old)
+                    if new != old:
+                        seg["speaker"] = new
+                _log.info(
+                    "Call names: named %d/%d segments (%s participants)",
+                    len(name_map), len(segments),
+                    ", ".join(result.get("participants", [])),
+                )
+            return result
+        except Exception:
+            _log.warning("Call names attribution failed", exc_info=True)
+            return None
 
     # ── manual controls ───────────────────────────────────────────────────────
 
@@ -1632,6 +1680,9 @@ class TrnscrbApp(rumps.App):
         self._open_latest_item.title = f"Open Latest ({self._meeting_name})"
         storage.set_live_session(self._live_path, self._meeting_name, self._started_at)
 
+        # Start the call names accessibility tree watcher.
+        self._start_call_names_watch()
+
         # Start live transcription thread
         self._live_thread = threading.Thread(target=self._live_transcribe, daemon=True)
         self._live_thread.start()
@@ -1861,6 +1912,10 @@ class TrnscrbApp(rumps.App):
                 # A 1:1 can be named from the calendar; larger meetings stay
                 # generic rather than risk attaching the wrong name.
                 attribution.name_from_calendar(segments, evt)
+                # Call names: assign participant names from the meeting app's
+                # accessibility tree (after diarization, so segment speaker labels
+                # are known — otherwise we don't know which cluster to rename).
+                call_names_meta = self._apply_call_names(segments, evt)
 
             capture = analytics.capture_health(
                 segments,

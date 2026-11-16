@@ -120,6 +120,12 @@ _DEFAULTS: dict = {
     # biometric fingerprints of people who have not consented to being
     # enrolled, unlike the user's own voice.
     "cluster_voices": False,
+    # Learn participant names from the meeting app's accessibility tree (Zoom
+    # video tiles, Teams attendee panel, Meet tiles, Webex participants).  The
+    # names come from the app's UI — not audio — and are assigned by temporal
+    # overlap with transcript segments.  On by default; turn off if the AX
+    # permission prompt is distracting or if the app's AX tree is unstable.
+    "call_names_enabled": True,
     # Cosine similarity required to treat two recordings as the same person,
     # and how far ahead of the runner-up that match must be.
     #
