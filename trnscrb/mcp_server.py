@@ -25,7 +25,16 @@ from pathlib import Path
 from mcp.server import MCPServer
 
 import trnscrb
-from trnscrb import action_items, diarizer, dictation, glossary, settings, storage, transcriber
+from trnscrb import (
+    action_items,
+    diarizer,
+    dictation,
+    glossary,
+    search,
+    settings,
+    storage,
+    transcriber,
+)
 from trnscrb import recorder as rec_module
 from trnscrb import semantic_search as _semsearch
 from trnscrb.calendar_integration import get_current_or_upcoming_event
@@ -449,40 +458,47 @@ def get_weekly_summaries(year: str = "") -> str:
 
 
 @mcp.tool()
-def search_transcripts(query: str) -> str:
+def search_transcripts(
+    query: str, since: str = "", until: str = "", speaker: str = "", path: str = ""
+) -> str:
     """
-    Search across all saved transcripts for a keyword or phrase.
-    Returns matching lines with context from each transcript.
+    Search all saved transcripts by keyword and by meaning, fused into one
+    ranked list (reciprocal rank fusion). Each match carries a citation —
+    file, line range, and timestamp when the lines carry one — so a result
+    can be opened at the right place with get_transcript.
 
     Args:
-        query: The search term (case-insensitive).
+        query: The search term (literal, case-insensitive) or a
+               natural-language question.
+        since: Only transcripts on or after this date (YYYY-MM-DD).
+        until: Only transcripts on or before this date (YYYY-MM-DD).
+        speaker: Only matches spoken by this person — a name substring.
+        path: Only transcripts under this subfolder of ~/meeting-notes/.
     """
-    import re
+    try:
+        result = search.hybrid(query, since=since, until=until, speaker=speaker, path=path)
+    except ValueError as e:
+        return str(e)
 
-    files = sorted(storage.NOTES_DIR.glob("*.txt"), reverse=True)
-    if not files:
-        return "No transcripts found in ~/meeting-notes/"
-
-    pattern = re.compile(re.escape(query), re.IGNORECASE)
-    results = []
-    for f in files:
-        try:
-            lines = f.read_text(encoding="utf-8").splitlines()
-        except Exception:
-            continue
-        hits = [i for i, line in enumerate(lines) if pattern.search(line)]
-        if not hits:
-            continue
-        matches = []
-        for hit in hits:
-            start = max(0, hit - 1)
-            end = min(len(lines), hit + 2)
-            matches.append("\n".join(lines[start:end]))
-        results.append(f"## {f.name}\n" + "\n---\n".join(matches))
-
-    if not results:
+    if result.files_searched == 0:
+        scope = f" under '{path}'" if path else ""
+        return f"No transcripts found in ~/meeting-notes{scope}."
+    if not result.results:
         return f"No matches for '{query}'."
-    return "\n\n".join(results[:10])
+
+    note = (
+        "note: vector search unavailable — keyword results only.\n\n"
+        if not result.vector_available
+        else ""
+    )
+    by_file: dict[str, list] = {}
+    for hit in result.results:
+        by_file.setdefault(hit.name, []).append(hit)
+    blocks = []
+    for name, hits in list(by_file.items())[:10]:
+        matches = [f"{h.citation}\n{h.text}" for h in hits]
+        blocks.append(f"## {name}\n" + "\n---\n".join(matches))
+    return note + "\n\n".join(blocks)
 
 
 @mcp.tool()
