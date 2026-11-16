@@ -41,6 +41,10 @@ LABELS = {
     APP_START: "App startup",
 }
 
+# Apple SpeechAnalyzer live partials — reported in diagnostics, not as a
+# persisted health component (it does not "fail" the meeting pipeline).
+APPLE_LIVE = "apple_live"
+
 # What one run of each component is, for counting failures in a status line.
 # Most run once per meeting; the app runs once per launch, and reporting a
 # restart loop as "1 meeting" describes the wrong thing entirely.
@@ -188,6 +192,16 @@ def describe(component: str) -> str:
     noun = RUN_NOUNS.get(component, "meeting")
     run_word = noun if failures == 1 else f"{noun}s"
     return f"failing since {since} ({failures} {run_word}): {entry.get('detail', '')}"
+
+
+def apple_status() -> str:
+    """One-line Apple SpeechAnalyzer status for the diagnostics menu."""
+    from trnscrb.apple_speech import available as _avail
+
+    ok, reason = _avail()
+    if ok:
+        return "Apple live: available"
+    return f"Apple live: unavailable ({reason})"
 
 
 def should_notify(entry: dict) -> bool:

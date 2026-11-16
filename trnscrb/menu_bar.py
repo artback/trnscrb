@@ -23,6 +23,7 @@ except ImportError:
 from trnscrb import (
     action_items,
     analytics,
+    apple_speech,
     attribution,
     diarizer,
     enricher,
@@ -283,6 +284,9 @@ class TrnscrbApp(rumps.App):
         self._dict_live_paused = False  # True when live loop is paused (on battery)
         self._hud_timer = rumps.Timer(self._update_hud, 0.5)
         self._hud_timer.start()
+
+        # Apple SpeechAnalyzer live session (display-only, off when unavailable).
+        self._apple_session: apple_speech.LiveSession | None = None
 
         self._set_state("idle")
         self._install_signal_handlers()
@@ -678,6 +682,12 @@ class TrnscrbApp(rumps.App):
     def _dict_live_loop(self, recorder):
         """Background live transcription feeding the HUD. Display only.
 
+        When ``live_backend`` is ``"apple"`` (or ``"auto"`` on macOS 26+)
+        the Apple SpeechAnalyzer layer streams partial text through
+        ``_on_live_text``; the authoritative transcript still comes from
+        ``d.finish()`` at stop.  When Apple is unavailable or the setting
+        is ``"model"``, the existing ``d.live_transcribe`` path is used.
+
         Paused on battery unless ``live_on_battery`` is on (same policy as
         meeting live transcription); the silence watchdog keeps running.
         """
@@ -686,10 +696,41 @@ class TrnscrbApp(rumps.App):
         if _on_battery() and not get_setting("live_on_battery"):
             _log.debug("Dictation live display paused (on battery)")
             return
-        try:
-            d.live_transcribe(recorder, self._dict_live_stop, on_text=self._on_live_text)
-        except Exception:
-            _log.warning("Dictation live display loop failed", exc_info=True)
+
+        backend = str(get_setting("live_backend") or "auto")
+        source = apple_speech.live_source(backend)
+
+        if source == "apple":
+            self._start_apple_live()
+            try:
+                # Wait until the stop event fires — the Apple session's own
+                # callback pushes text to _on_live_text continuously.
+                self._dict_live_stop.wait()
+            except Exception:
+                _log.warning("Dictation Apple live loop failed", exc_info=True)
+            finally:
+                self._stop_apple_live()
+        else:
+            # Existing model-based live transcribe.
+            try:
+                d.live_transcribe(recorder, self._dict_live_stop, on_text=self._on_live_text)
+            except Exception:
+                _log.warning("Dictation live display loop failed", exc_info=True)
+
+    def _start_apple_live(self) -> None:
+        """Start the Apple SpeechAnalyzer session and wire its callback."""
+        if self._apple_session is not None:
+            return
+        self._apple_session = apple_speech.create_session(self._on_live_text)
+        if not self._apple_session.active:
+            _log.debug("Apple live session unavailable: %s", self._apple_session.reason)
+            self._apple_session = None
+
+    def _stop_apple_live(self) -> None:
+        """Stop and drain the Apple SpeechAnalyzer session."""
+        if self._apple_session is not None:
+            self._apple_session.stop()
+            self._apple_session = None
 
     def _on_live_text(self, text: str) -> None:
         """Accumulate live chunks (background thread); the HUD timer displays."""
@@ -1360,6 +1401,9 @@ class TrnscrbApp(rumps.App):
         ]
         if not lines:
             lines = ["Nothing has run yet."]
+        # Apple SpeechAnalyzer status (display-only, always included).
+        lines.append("")
+        lines.append(health.apple_status())
         if broken:
             lines.append("")
             lines.append("Run `trnscrb doctor` in a terminal to test the stack end to end.")
