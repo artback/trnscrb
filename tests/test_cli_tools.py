@@ -136,6 +136,41 @@ class StatusCommandTest(unittest.TestCase):
         self.assertIn("trnscrb start", result.output)
         self.assertIn("idle", result.output)
 
+    def test_status_reports_missing_models_with_the_recommendation(self):
+        """A machine that has not downloaded its models gets pointed at the pick."""
+        fake_lock = mock.MagicMock()
+        fake_lock.acquire.return_value = True
+        from trnscrb import catalog
+
+        with (
+            mock.patch("trnscrb.single_instance.SingleInstance", return_value=fake_lock),
+            mock.patch.object(storage, "get_live_session_info", return_value=None),
+            mock.patch(
+                "trnscrb.catalog.verify",
+                return_value={
+                    "id": "whisper-small",
+                    "status": catalog.MISSING,
+                    "size_bytes": 0,
+                    "detail": "",
+                },
+            ),
+            mock.patch(
+                "trnscrb.catalog.recommend",
+                return_value={
+                    "entry_id": "whisper-small",
+                    "backend": "whisper",
+                    "model": "Systran/faster-whisper-small",
+                    "model_size": "small",
+                    "reason": "test",
+                },
+            ),
+        ):
+            result = CliRunner().invoke(cli, ["status"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("transcription model(s) not downloaded", result.output)
+        self.assertIn("Recommended for this machine", result.output)
+        self.assertIn("whisper-small", result.output)
+
 
 class RetentionTest(unittest.TestCase):
     def setUp(self):
