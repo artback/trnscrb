@@ -54,6 +54,41 @@ def _get_pid(bundle_id: str) -> int | None:
     return None
 
 
+def _frontmost_bundle() -> str | None:
+    """Bundle ID of the frontmost app, or ``None`` (never raises)."""
+    if not AX_AVAILABLE:
+        return None
+    try:
+        from AppKit import NSWorkspace
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        if app is not None:
+            return app.bundleIdentifier()
+    except Exception:
+        _log.debug("Could not get frontmost app", exc_info=True)
+    return None
+
+
+def pick_bundle(bundle_ids: list[str]) -> str | None:
+    """Choose which candidate bundle to sample.
+
+    Browsers are the common case (several may be installed): prefer the
+    frontmost app when it is one of the candidates, else the first running
+    candidate, else the first candidate (``sample()`` reports "not
+    running" if none is).  Headless: the input order is kept.
+    """
+    if not bundle_ids:
+        return None
+    if not AX_AVAILABLE:
+        return bundle_ids[0]
+    front = _frontmost_bundle()
+    running = [b for b in bundle_ids if _get_pid(b) is not None]
+    if front in running:
+        return front
+    if running:
+        return running[0]
+    return bundle_ids[0]
+
+
 def _bundle_for_app(app_name: str) -> str | None:
     """Map a display name to a bundle ID."""
     return {
@@ -61,6 +96,7 @@ def _bundle_for_app(app_name: str) -> str | None:
         "Microsoft Teams": "com.microsoft.teams2",
         "Google Meet": "com.google.Chrome",
         "Webex": "com.cisco.webexmeetingsapp",
+        "Slack Huddle": "com.tinyspeck.slackmacgap",
     }.get(app_name)
 
 

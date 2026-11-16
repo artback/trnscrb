@@ -81,6 +81,24 @@ class TestCallNamesWatch(unittest.TestCase):
             self.assertIsInstance(samples, list)
             self.assertGreater(len(samples), 0)
 
+    @patch.object(_watch_mod._ax_mod, "sample")
+    @patch.object(_watch_mod._ax_mod, "pick_bundle")
+    def test_re_resolves_bundle_each_tick(self, mock_pick, mock_sample):
+        """The frontmost browser can change mid-call — sample the live one."""
+        mock_pick.return_value = "com.apple.Safari"
+        mock_sample.return_value = {"ts": time.time(), "ok": False, "tree": []}
+        w = _watch_mod.CallNamesWatch(
+            bundle_ids=["com.google.Chrome", "com.apple.Safari"],
+            app_name="Google Meet",
+        )
+        w.start()
+        time.sleep(0.6)
+        w.stop()
+        self.assertGreaterEqual(mock_pick.call_count, 2)
+        for call in mock_sample.call_args_list:
+            self.assertEqual(call.args[0] if call.args else call.kwargs.get("bundle_id"),
+                             "com.apple.Safari")
+
     def test_set_offset(self):
         w = _watch_mod.CallNamesWatch(bundle_ids=["us.zoom.xos"])
         self.assertEqual(w._meeting_offset_ms, 0.0)
@@ -94,6 +112,12 @@ class TestWatchFor(unittest.TestCase):
         self.assertIsNotNone(w)
         self.assertIsInstance(w, _watch_mod.CallNamesWatch)
         self.assertIn("us.zoom.xos", w._bundle_ids)
+
+    def test_slack_huddle(self):
+        w = _watch_mod.watch_for("Slack Huddle")
+        self.assertIsNotNone(w)
+        self.assertEqual(w._bundle_ids, ["com.tinyspeck.slackmacgap"])
+        self.assertEqual(w._app_name, "Slack Huddle")
 
     def test_unknown_app(self):
         w = _watch_mod.watch_for("UnknownApp")

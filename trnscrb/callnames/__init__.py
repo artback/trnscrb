@@ -1,9 +1,9 @@
 """Accessibility-based call participant naming.
 
-Reads the accessibility tree of the meeting app (Zoom, Teams, Meet, Webex)
-during a recording, extracts who is in the call and who is speaking, then
-assigns names to transcript segments by temporal overlap — same signal as
-yogurt's call names, different target.
+Reads the accessibility tree of the meeting app (Zoom, Teams, Meet, Webex,
+Slack huddles) during a recording, extracts who is in the call and who is
+speaking, then assigns names to transcript segments by temporal overlap —
+same signal as yogurt's call names, different target.
 
 The package is safe to import headless (CI, Linux). PyObjC is only imported
 inside ax.py; everything else is pure Python.

@@ -119,6 +119,62 @@ class TestMeet(unittest.TestCase):
         self.assertEqual(result.participants, [])
 
 
+# ── Slack Huddle ───────────────────────────────────────────────────────────────
+
+def _huddle_window(*names):
+    """A synthetic Slack huddle window: header + one tile per name."""
+    children = [_node(role="AXStaticText", title="Video huddle")]
+    for n in names:
+        children.append(
+            {"role": "AXGroup", "description": "", "title": "", "value": "",
+             "children": [_node(role="AXStaticText", title=n)]}
+        )
+    return [
+        {"role": "AXWindow", "description": "", "title": "Slack",
+         "value": "", "children": children}
+    ]
+
+
+class TestSlack(unittest.TestCase):
+    def test_one_to_one(self):
+        result = _parse.slack(_huddle_window("Jane Doe", "You"))
+        self.assertEqual(result.participants, ["Jane Doe"])
+        self.assertEqual(result.me, "You")
+        self.assertEqual(result.speaking, [])
+
+    def test_group(self):
+        result = _parse.slack(_huddle_window("Jane Doe", "Bo Park", "You"))
+        self.assertEqual(sorted(result.participants), ["Bo Park", "Jane Doe"])
+        self.assertEqual(result.me, "You")
+
+    def test_ui_words_excluded(self):
+        result = _parse.slack(_huddle_window("Jane Doe", "Muted", "End huddle"))
+        self.assertEqual(result.participants, ["Jane Doe"])
+
+    def test_chat_window_not_matched(self):
+        """Names only count in a root that also carries a huddle header."""
+        chat = _huddle_window("Jane Doe")
+        chat[0]["children"] = [
+            _node(role="AXStaticText", title="Jane Doe"),
+            _node(role="AXStaticText", title="Can you take a look at the deploy please"),
+        ]  # no huddle header
+        self.assertEqual(_parse.slack(chat).participants, [])
+
+    def test_long_chat_line_excluded(self):
+        result = _parse.slack(
+            _huddle_window(
+                "Jane Doe",
+                "Can you take a look at the deploy please?",
+            )
+        )
+        self.assertEqual(result.participants, ["Jane Doe"])
+
+    def test_empty_tree(self):
+        result = _parse.slack(_root([]))
+        self.assertEqual(result.participants, [])
+        self.assertIsNone(result.me)
+
+
 # ── Teams ─────────────────────────────────────────────────────────────────────
 
 class TestTeams(unittest.TestCase):
@@ -199,6 +255,11 @@ class TestParse(unittest.TestCase):
             description="Ann Lee, Computer audio unmuted",
         )
         self.assertIsInstance(_parse.parse("Zoom", _root([ann])), _parse.CallReading)
+
+    def test_dispatch_slack_huddle(self):
+        tree = _huddle_window("Jane Doe", "You")
+        result = _parse.parse("Slack Huddle", tree)
+        self.assertEqual(result.participants, ["Jane Doe"])
 
     def test_unknown_app(self):
         result = _parse.parse("UnknownApp", [])
