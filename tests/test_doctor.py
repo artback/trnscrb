@@ -62,6 +62,28 @@ class DoctorTest(unittest.TestCase):
         result = self._run(["--quick"], downloaded=False)
         self.assertIn("accept the model terms", result.output)
 
+    def test_a_checksum_mismatch_is_reported(self):
+        """A corrupted download passes every presence check; only the checksum sees it."""
+        with mock.patch(
+            "trnscrb.catalog.verify_all",
+            return_value=[
+                {"id": "whisper-small", "status": "mismatch", "size_bytes": 486_000_000,
+                 "detail": "sha256 deadbeef != pinned cafebabe"},
+                {"id": "all-minilm-l6-v2", "status": "not-verifiable", "size_bytes": 90_000_000,
+                 "detail": ""},
+            ],
+        ):
+            result = self._run(["--quick"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("model whisper-small", result.output)
+        self.assertIn("checksum mismatch", result.output)
+
+    def test_model_integrity_reports_clean_when_nothing_is_pinned(self):
+        with mock.patch("trnscrb.catalog.verify_all", return_value=[]):
+            result = self._run(["--quick"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("No checksum mismatches", result.output)
+
     def test_a_green_probe_clears_a_stale_failure(self):
         """Fix the machine and status should go green without waiting for a meeting."""
         health.record_failure(health.DIARIZATION, "torchcodec is not available")

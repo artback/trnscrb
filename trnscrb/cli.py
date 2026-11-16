@@ -8,6 +8,8 @@ trnscrb show <id> — print a transcript
 trnscrb enrich <id> — run LLM enrichment pass on a transcript
 trnscrb watch     — headless auto-record watcher
 trnscrb devices   — list audio input devices
+trnscrb models    — model catalog: what trnscrb downloads, its state, and the
+                    pick for this machine
 trnscrb dictation — speak a short note: to the clipboard (message) or as a
                     brain-dump note, optionally drafted by an LLM afterwards
 """
@@ -184,6 +186,20 @@ def install(force: bool):
                 click.echo(click.style("  Model ready.", fg="green"))
             except Exception as e:
                 click.echo(click.style(f"  Download failed: {e}", fg="yellow"))
+    click.echo()
+
+    # ── 4½. Model recommendation ────────────────────────────────────────────
+    # Surface the catalog's pick for this machine where the models are first
+    # needed, so a constrained machine sees why it should not run the default.
+    from trnscrb import catalog
+
+    facts = catalog.machine_facts()
+    rec = catalog.recommend(facts)
+    hw = "Apple Silicon" if facts["apple_silicon"] else "Intel"
+    size = f" (size {rec['model_size']})" if rec.get("model_size") else ""
+    click.echo(f"  Recommended for this machine ({hw}, {facts['ram_gb']:.0f} GB):")
+    click.echo(f"  {rec['backend']}{size} — {rec['model']}: {rec['reason']}")
+    click.echo("  `trnscrb models` lists the full catalog and download state")
     click.echo()
 
     # ── 5. Speaker diarization (optional) ────────────────────────────────────
@@ -1605,6 +1621,47 @@ def retry_cmd():
 
 
 @cli.command()
+def models():
+    """List the model catalog: what trnscrb downloads, its state, and the pick for this machine."""
+    from trnscrb import catalog
+
+    facts = catalog.machine_facts()
+    rec = catalog.recommend(facts)
+    hw = "Apple Silicon" if facts["apple_silicon"] else "Intel"
+
+    click.echo()
+    click.echo(f"  Model catalog — {hw}, {facts['ram_gb']:.0f} GB RAM")
+    click.echo()
+    for entry in catalog.CATALOG:
+        v = catalog.verify(entry)
+        on_disk = _human_size(v["size_bytes"]) if v["size_bytes"] else "—"
+        status = {
+            catalog.MISSING: click.style("missing", fg="yellow"),
+            catalog.OK: click.style("verified", fg="green"),
+            catalog.MISMATCH: click.style("CHECKSUM MISMATCH", fg="red"),
+            catalog.NOT_VERIFIABLE: "downloaded",
+        }[v["status"]]
+        star = click.style("  ← recommended", fg="green") if entry["id"] == rec["entry_id"] else ""
+        extra = f" ({entry['model_size']})" if entry.get("model_size") else ""
+        click.echo(
+            f"  {entry['id']:<20}{extra:<9}{entry['backend']:<16}"
+            f"{entry['approx_size_gb']:>7.2f} GB {on_disk:>9}  {status}{star}"
+        )
+    click.echo()
+    click.echo(f"  Recommended: {rec['backend']} — {rec['model']}")
+    click.echo(f"  {rec['reason']}")
+    click.echo()
+
+
+def _human_size(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1000:
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1000
+    return f"{n:.1f} TB"
+
+
+@cli.command()
 def status():
     """Show what trnscrb is doing right now and whether it's healthy."""
     import shutil as _sh
@@ -1653,6 +1710,28 @@ def status():
     _row("Auto-transcribe", bool(settings.get("auto_record")), "")
     backend = str(settings.get("transcription_backend") or "auto")
     click.echo(f"  Backend: {backend}")
+    # A missing model is where first-run guidance pays off: name it and point
+    # at the catalog's pick for this machine instead of a generic download.
+    from trnscrb import catalog
+
+    missing = [
+        e
+        for e in catalog.configured_entries(settings)
+        if catalog.verify(e)["status"] == catalog.MISSING
+    ]
+    if missing:
+        rec = catalog.recommend()
+        size = f" (size {rec['model_size']})" if rec.get("model_size") else ""
+        click.echo(
+            click.style(
+                f"  ⚠ transcription model(s) not downloaded: {', '.join(e['id'] for e in missing)}",
+                fg="yellow",
+            )
+        )
+        click.echo(
+            f"  Recommended for this machine: {rec['backend']}{size} — {rec['model']}; "
+            "`trnscrb models` for the full catalog"
+        )
     if settings.get("denoise"):
         from trnscrb import denoise as _denoise
 
@@ -1907,6 +1986,20 @@ def doctor(quick: bool):
         bucket=audio_failures,
     )
     _check("screen recording", _screen_recording_state, _TCC_RESET_HINT, bucket=audio_failures)
+
+    click.echo("\n  Diagnosing model integrity\n")
+    from trnscrb import catalog
+
+    integrity = catalog.verify_all()
+    mismatches = [v for v in integrity if v["status"] == catalog.MISMATCH]
+    if mismatches:
+        # A corrupted download passes every "is it there?" check and only
+        # blows up at load time; the checksum is the check that sees it.
+        for v in mismatches:
+            _row(f"model {v['id']}", False, "checksum mismatch — delete the cache copy and re-download")
+        click.echo(click.style(f"  Model integrity broken: {len(mismatches)} mismatch(es)", fg="red"))
+    else:
+        click.echo("  No checksum mismatches (pinned entries only — `trnscrb models` for download state)")
 
     click.echo()
     for component in sorted(health.LABELS):
