@@ -105,6 +105,11 @@ _DEFAULTS: dict = {
     # transcript path outright, so nothing needs searching for.
     "integrate_allowed_tools": "Read,Write,Edit",
     "live_on_battery": False,  # keep the live-transcription loop running on battery
+    # Which backend provides live partials before the authoritative transcript.
+    # "auto" → Apple SpeechAnalyzer on macOS 26+ (display-only);
+    # "apple" → force Apple (falls back to model when unavailable);
+    # "model" → same as today (no Apple layer).
+    "live_backend": "auto",
     # End a recording after this many minutes with nobody speaking, even while
     # a meeting tab is still open. A tab left open after the call looks exactly
     # like a live one, so without this a forgotten tab keeps recording until
