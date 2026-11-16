@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
+from trnscrb import echo, settings
 from trnscrb.log import get_logger
 
 _log = get_logger("trnscrb.recorder")
@@ -79,6 +80,11 @@ _NOISE_FLOOR = 1e-6  # mean-square ≈ -60 dBFS; blocks below this don't update
 # If the mic stream delivers nothing for this long (default input device
 # changed, e.g. AirPods connected mid-meeting), reopen it.
 _MIC_STALL_SECS = 3.0
+
+# Echo detection runs off the callback at this cadence: the callback only
+# appends blocks to a bounded backlog, a low-rate worker scores them.
+_ECHO_TICK_SECS = 0.5
+_ECHO_MAX_BLOCKS = 64  # 4 s of backlog at 1024 frames per block
 
 
 # A killed recording leaves a temp WAV with a placeholder header. Anything
@@ -200,6 +206,20 @@ class Recorder:
         self._attr_offsets: list[int] = []  # frame offset of each block
         self._attr_mic: list[float] = []  # mic mean-square per block
         self._attr_sys: list[float] = []  # system-audio mean-square per block
+        # Echo detection (mic picking up the call audio). The callback only
+        # appends blocks to this bounded backlog; a low-rate worker scores
+        # them, so the cross-correlation never runs in the audio thread.
+        self._echo_enabled = False
+        self._echo_scorer = None
+        self._echo_lock = threading.Lock()
+        self._echo_mic: deque = deque()  # mic blocks awaiting the echo check
+        self._echo_sys: deque = deque()  # their paired system-audio blocks
+        self._echo_scores: deque = deque()  # recent running scores, newest last
+        self._echo_streak = 0  # consecutive ticks the gate has been hot
+        self._echo_done = threading.Event()
+        self._echo_worker: threading.Thread | None = None
+        self._echo_notified = False
+        self.echo_detected = False  # session fact, read by the stop path
 
     # ── public ──────────────────────────────────────────────────────────────
 
@@ -228,6 +248,7 @@ class Recorder:
         self._watchdog = threading.Thread(target=self._watch_mic_stream, daemon=True)
         self._watchdog.start()
         self._start_system_audio()
+        self._reset_echo()
         _log.info(
             "Recording started (device=%s, system_audio=%s)",
             self.device,
@@ -237,6 +258,7 @@ class Recorder:
     def stop(self) -> Path | None:
         """Stop recording and return the path to a temporary WAV file."""
         self._recording = False
+        self._stop_echo_worker()
         # Whatever the alignment delay is holding is real audio the meeting
         # ended on — a fraction of a second of it, but losing the last words
         # of a call to a buffer is not a trade anyone would make.
@@ -508,6 +530,14 @@ class Recorder:
                     self._attr_sys.append(
                         float(np.mean(np.square(system))) if system is not None else 0.0
                     )
+                if system is not None and self._echo_enabled:
+                    with self._echo_lock:
+                        # Cheap append only — the low-rate worker scores them.
+                        self._echo_mic.append(mic)
+                        self._echo_sys.append(system)
+                        if len(self._echo_mic) >= _ECHO_MAX_BLOCKS:
+                            self._echo_mic.popleft()
+                            self._echo_sys.popleft()
                 if system is not None:
                     mixed = mic * self._mic_gain(mic, system) + system
                 else:
@@ -569,6 +599,90 @@ class Recorder:
         finally:
             # Reset the stall timer so failed reopens back off instead of spinning.
             self._last_mic_frame = time.monotonic()
+
+    # ── echo detection ───────────────────────────────────────────────────────
+
+    def _reset_echo(self) -> None:
+        """Start a fresh echo session (one warning per recording)."""
+        if self._echo_worker and self._echo_worker.is_alive():
+            self._stop_echo_worker()
+        self.echo_detected = False
+        self._echo_notified = False
+        self._echo_streak = 0
+        self._echo_scores.clear()
+        with self._echo_lock:
+            self._echo_mic.clear()
+            self._echo_sys.clear()
+        # Mic-only recordings (dictation) have no system track to echo.
+        self._echo_enabled = bool(settings.get("echo_detect")) and self.capture_system_audio
+        self._echo_scorer = echo.EchoScorer() if self._echo_enabled else None
+        if self._echo_enabled:
+            self._echo_done.clear()
+            self._echo_worker = threading.Thread(target=self._echo_worker_loop, daemon=True)
+            self._echo_worker.start()
+
+    def _stop_echo_worker(self) -> None:
+        if not self._echo_worker:
+            return
+        self._echo_done.set()
+        self._echo_worker.join(timeout=2.0)
+        self._echo_worker = None
+        with self._echo_lock:
+            self._echo_mic.clear()
+            self._echo_sys.clear()
+
+    def _echo_worker_loop(self) -> None:
+        """Score the queued blocks at a low rate, off the audio callback."""
+        while not self._echo_done.wait(_ECHO_TICK_SECS):
+            try:
+                self._echo_tick()
+            except Exception:
+                _log.debug("Echo check failed", exc_info=True)
+
+    def _echo_tick(self) -> None:
+        """One low-rate echo check: score the backlog, warn once when hot.
+
+        The running score must stay above the threshold for ``echo_window``
+        consecutive windows before the warning fires, so a moment of overlap
+        — two people saying the same thing — does not trip it.
+        """
+        if not self._recording or not self._system_audio_active:
+            return
+        with self._echo_lock:
+            if not self._echo_mic:
+                return
+            mic = np.concatenate(self._echo_mic)
+            system = np.concatenate(self._echo_sys)
+            self._echo_mic.clear()
+            self._echo_sys.clear()
+        score = self._echo_scorer.update(mic, system)
+        window = int(settings.get("echo_window") or 10)
+        threshold = float(settings.get("echo_threshold") or 0.5)
+        self._echo_scores.append(score)
+        while len(self._echo_scores) > window:
+            self._echo_scores.popleft()
+        hot = echo.confident(self._echo_scores, threshold)
+        self._echo_streak = self._echo_streak + 1 if hot else 0
+        if self._echo_streak >= window and not self._echo_notified:
+            self._echo_notified = True
+            self.echo_detected = True
+            _log.warning(
+                "Echo detected: mic is picking up the call audio — headphones would keep it out"
+            )
+            self._notify_echo()
+
+    def _notify_echo(self) -> None:
+        """Best-effort banner; a headless or un-bundled launch just logs it."""
+        try:
+            import rumps
+
+            rumps.notification(
+                "Trnscrb",
+                "Echo detected",
+                "Your mic is picking up the call audio — put on headphones.",
+            )
+        except Exception:
+            pass
 
     # ── class-level utilities ────────────────────────────────────────────────
 

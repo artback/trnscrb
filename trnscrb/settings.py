@@ -142,6 +142,18 @@ _DEFAULTS: dict = {
     "retention_transcript_days": 0,  # delete transcripts after N days (0 = keep forever)
     "transcription_backend": "auto",  # auto | parakeet | whisper | voxtral | qwen3
     "denoise": False,  # noisereduce spectral-gate filter before transcription (off)
+    # Warn once per recording when the mic picks up the call audio from the
+    # speakers (no headphones). The check runs off the capture callback at a
+    # low rate; the warning is the product — some echo is normal, so it fires
+    # only once the other side has been talking over the mic for a while.
+    "echo_detect": True,
+    # Cross-correlation (0..1) at which the mic counts as echoing the system
+    # track. A real leak usually sits at 0.5-0.9 once the other side is
+    # talking; 0.5 clears casual overlap of two unrelated voices.
+    "echo_threshold": 0.5,
+    # Consecutive half-second windows the score must stay above the threshold
+    # before the one-time warning fires (10 = ~5 s of sustained echo).
+    "echo_window": 10,
     "parakeet_model_id": "mlx-community/parakeet-tdt-0.6b-v3",
     "qwen3_model_id": "Qwen/Qwen3-ASR-0.6B",  # ~1.2 GB; Qwen3-ASR-1.7B for more accuracy
     "model_size": "small",  # whisper model size (used when backend=whisper)

@@ -107,6 +107,7 @@ def capture_health(
     segments: list[dict],
     recorded_secs: float,
     system_audio: bool,
+    echo: bool = False,
 ) -> dict:
     """Facts about how well a recording captured the meeting.
 
@@ -126,6 +127,7 @@ def capture_health(
         "speech": speech,
         "speech_ratio": ratio,
         "system_audio": bool(system_audio),
+        "echo": bool(echo),
         "mostly_silent": recorded_secs > 300 and ratio < LOW_SPEECH_RATIO,
     }
 
@@ -141,6 +143,11 @@ def format_capture_health(health: dict) -> str:
     )
     if not health["system_audio"]:
         line += "\n  ⚠︎ Other participants were not captured — check Screen Recording permission."
+    if health.get("echo"):
+        line += (
+            "\n  ⚠︎ Mic picked up the call audio — the other side's words may be doubled "
+            "(headphones avoid this)."
+        )
     if health.get("mostly_silent"):
         line += "\n  ⚠︎ Mostly silence — the meeting may have ended while a tab stayed open."
     return line
