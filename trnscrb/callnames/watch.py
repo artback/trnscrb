@@ -37,6 +37,7 @@ _APP_BUNDLES: dict[str, list[str]] = {
         "com.apple.Safari", "org.mozilla.firefox",
     ],
     "Webex": ["com.cisco.webexmeetingsapp"],
+    "Slack Huddle": ["com.tinyspeck.slackmacgap"],
 }
 
 
@@ -155,8 +156,13 @@ class CallNamesWatch:
     # ── internal ──────────────────────────────────────────────────────────────
 
     def _sample_loop(self) -> None:
-        """Background loop: sample every WATCH_EVERY_MS until stopped."""
-        bundle_id = self._bundle_ids[0] if self._bundle_ids else None
+        """Background loop: sample every WATCH_EVERY_MS until stopped.
+
+        The bundle to sample is re-resolved each tick (frontmost-first
+        among the running candidates) — the user may be on a different
+        browser than the first in the list, and the frontmost app changes
+        when they switch between e.g. Meet and chat.
+        """
         next_sample_time = time.monotonic()
 
         while self._running:
@@ -172,6 +178,7 @@ class CallNamesWatch:
 
             next_sample_time = now + self.WATCH_EVERY_MS / 1000.0
 
+            bundle_id = _ax_mod.pick_bundle(self._bundle_ids)
             try:
                 snap = _ax_mod.sample(bundle_id=bundle_id, app_name=self._app_name)
                 if snap.get("ok") and snap.get("tree"):

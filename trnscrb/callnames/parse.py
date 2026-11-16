@@ -583,6 +583,100 @@ def webex(tree: list[dict]) -> CallReading:
     )
 
 
+# ── Slack Huddle ───────────────────────────────────────────────────────────────
+#
+# A huddle lives in its own floating window (Electron AX tree): a "Huddle"
+# or "Video huddle" header, one video tile per participant with the name as
+# a static text under it, and the user's own tile labelled "You".  There is
+# no reliable speaking signal in the tree, so ``speaking`` stays empty and
+# attribution falls back to the two-person rule for 1:1 huddles (group
+# huddles land in the meeting metadata as a participant list only).
+
+_HUDDLE_ANCHOR_RE = re.compile(r"\bhuddle\b", re.IGNORECASE)
+_SLACK_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z .'\-]{0,57}[A-Za-z]$")
+_SLACK_UI_WORDS = {
+    "huddle", "huddles", "video huddle", "muted", "unmuted", "mute",
+    "unmute", "video", "mic", "microphone", "camera", "call", "leave",
+    "end", "end call", "end huddle", "share", "share screen", "screen",
+    "participants", "invite", "invite people", "add people", "people",
+    "settings", "more", "options", "join", "start", "stop", "sound",
+    "follow", "pin", "copy", "you", "you're", "you are", "now speaking",
+    "speaking", "talking", "you're talking",
+}
+
+
+def _slack_name(text: str) -> str | None:
+    """A name-shaped static text, or ``None`` (UI label / chat / junk)."""
+    t = text.strip()
+    if not (2 <= len(t) <= 60):
+        return None
+    if not _SLACK_NAME_RE.match(t):
+        return None
+    if len(t.split()) > 4:
+        return None
+    if t.casefold() in _SLACK_UI_WORDS:
+        return None
+    return t
+
+
+def slack(tree: list[dict]) -> CallReading:
+    """Parse a Slack Huddle AX tree snapshot.
+
+    Names come from the huddle window's tile labels; chat lives in a
+    different window and is excluded by the anchor rule (a root only counts
+    as a huddle when it contains a "huddle" text).  ``speaking`` is always
+    empty — see the module note above.
+    """
+    huddle_roots: set[int] = set()
+    for w in tree:
+        found = False
+
+        def _anchor(node: dict, up: list[dict]) -> None:
+            if node.get("role") in STATIC_TEXT:
+                t = (node.get("value") or node.get("title") or "").strip()
+                if t and _HUDDLE_ANCHOR_RE.search(t):
+                    nonlocal found
+                    found = True
+
+        walk(w, _anchor)
+        if found:
+            huddle_roots.add(id(w))
+
+    participants: list[str] = []
+    me: str | None = None
+    seen: set[str] = set()
+
+    for w in tree:
+        if id(w) not in huddle_roots:
+            continue
+
+        def _names(node: dict, up: list[dict]) -> None:
+            nonlocal me
+            if node.get("role") not in STATIC_TEXT:
+                return
+            t = (node.get("value") or node.get("title") or "").strip()
+            if not t:
+                return
+            if _HUDDLE_ANCHOR_RE.search(t):
+                return  # the header itself
+            if t.casefold() in ("you", "you (you)", "you (me)"):
+                me = t
+                return
+            name = _slack_name(t)
+            if not name or name.casefold() in seen:
+                return
+            seen.add(name.casefold())
+            participants.append(name)
+
+        walk(w, _names)
+
+    return CallReading(
+        speaking=[],
+        participants=uniq(participants),
+        me=me,
+    )
+
+
 # ── dispatcher ──────────────────────────────────────────────────────────────────
 
 _APP_PARSERS: dict[str, Callable[[list[dict]], CallReading]] = {
@@ -590,6 +684,7 @@ _APP_PARSERS: dict[str, Callable[[list[dict]], CallReading]] = {
     "Microsoft Teams": teams,
     "Google Meet": meet,
     "Webex": webex,
+    "Slack Huddle": slack,
 }
 
 

@@ -47,7 +47,53 @@ class TestAxHeadless(unittest.TestCase):
         import trnscrb.callnames.ax as ax_mod
         self.assertEqual(ax_mod._bundle_for_app("Zoom"), "us.zoom.xos")
         self.assertEqual(ax_mod._bundle_for_app("Microsoft Teams"), "com.microsoft.teams2")
+        self.assertEqual(ax_mod._bundle_for_app("Slack Huddle"), "com.tinyspeck.slackmacgap")
         self.assertIsNone(ax_mod._bundle_for_app("Unknown"))
+
+
+class TestPickBundle(unittest.TestCase):
+    """pick_bundle: frontmost-first among the running candidates."""
+
+    def _pick(self, frontmost, running, candidates):
+        import trnscrb.callnames.ax as ax_mod
+        with patch.object(ax_mod, "AX_AVAILABLE", True), \
+             patch.object(ax_mod, "_frontmost_bundle", return_value=frontmost), \
+             patch.object(ax_mod, "_get_pid",
+                          side_effect=lambda b: 1 if b in running else None):
+            return ax_mod.pick_bundle(candidates)
+
+    def test_frontmost_wins(self):
+        """User's browser is Safari, not the first candidate (Chrome)."""
+        candidates = ["com.google.Chrome", "com.apple.Safari"]
+        self.assertEqual(
+            self._pick("com.apple.Safari",
+                       {"com.apple.Safari", "com.google.Chrome"}, candidates),
+            "com.apple.Safari",
+        )
+
+    def test_first_running_when_frontmost_is_other(self):
+        candidates = ["com.google.Chrome", "com.apple.Safari"]
+        self.assertEqual(
+            self._pick("com.apple.Terminal", {"com.google.Chrome"}, candidates),
+            "com.google.Chrome",
+        )
+
+    def test_falls_back_to_first_candidate(self):
+        candidates = ["com.google.Chrome", "com.apple.Safari"]
+        self.assertEqual(
+            self._pick("com.apple.Terminal", set(), candidates),
+            "com.google.Chrome",
+        )
+
+    def test_headless_keeps_input_order(self):
+        import trnscrb.callnames.ax as ax_mod
+        candidates = ["com.google.Chrome", "com.apple.Safari"]
+        with patch.object(ax_mod, "AX_AVAILABLE", False):
+            self.assertEqual(ax_mod.pick_bundle(candidates), "com.google.Chrome")
+
+    def test_empty(self):
+        import trnscrb.callnames.ax as ax_mod
+        self.assertIsNone(ax_mod.pick_bundle([]))
 
 
 class TestAxImportIsolation(unittest.TestCase):
