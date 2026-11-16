@@ -1799,6 +1799,7 @@ class TrnscrbApp(rumps.App):
         try:
             # Read before stopping — stop() clears the capture state.
             system_audio_used = recorder.system_audio_active
+            echo_detected = recorder.echo_detected
             audio_path = recorder.stop()
             if not audio_path:
                 _notify("Trnscrb", "Error", "No audio captured.")
@@ -1866,6 +1867,7 @@ class TrnscrbApp(rumps.App):
                 segments,
                 recorded_secs=(datetime.now() - started_at).total_seconds(),
                 system_audio=system_audio_used,
+                echo=echo_detected,
             )
             if capture.get("mostly_silent"):
                 _log.warning(
