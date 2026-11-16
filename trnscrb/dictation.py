@@ -320,7 +320,7 @@ def live_transcribe(
             continue
         snap, end_frame = result
         try:
-            new_segments = transcriber.transcribe(snap)
+            new_segments = transcriber.transcribe(snap, context="dictation")
             segments_acc.extend(new_segments)
             transcribed_frames = end_frame
             plain = plain_text(new_segments)
@@ -1260,7 +1260,7 @@ def finish(
     """
     _log.info("Dictation finishing (preset=%s, audio=%s)", preset, audio_path)
     try:
-        segments = transcriber.transcribe(audio_path)
+        segments = transcriber.transcribe(audio_path, context="dictation")
     except Exception as e:
         _log.error("Dictation transcription failed: %s", e, exc_info=True)
         # A transient model failure must not cost the user their words:

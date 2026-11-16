@@ -10,7 +10,7 @@ from trnscrb.log import get_logger
 
 _log = get_logger("trnscrb.transcriber")
 
-_SUPPORTED_BACKENDS = {"auto", "parakeet", "whisper", "voxtral", "qwen3"}
+_SUPPORTED_BACKENDS = {"auto", "parakeet", "whisper", "voxtral", "qwen3", "nemotron"}
 
 _whisper_model = None
 _whisper_model_lock = threading.Lock()
@@ -20,6 +20,16 @@ _parakeet_model = None
 _parakeet_model_id = None
 _parakeet_model_lock = threading.Lock()
 
+# Backends that have completed a first forward pass, so their kernels are
+# compiled. The first MLX pass of a process pays a one-time compile cost of
+# several seconds; preload() runs a warmup pass instead of letting the user's
+# first real transcription pay it.
+_warmed_backends: set[str] = set()
+
+_nemotron_model = None
+_nemotron_model_id = None
+_nemotron_model_lock = threading.Lock()
+
 
 def set_model_size(size: str) -> None:
     global _whisper_model_size, _whisper_model
@@ -27,13 +37,23 @@ def set_model_size(size: str) -> None:
     _whisper_model = None  # force reload on next call
 
 
-def _backend() -> str:
-    backend = str(settings.get("transcription_backend") or "parakeet").strip().lower()
+def _backend(context: str = "meeting") -> str:
+    """Backend for a use context: "dictation" or "meeting".
+
+    The context's own setting wins; the legacy global
+    ``transcription_backend`` only applies when the context setting is left
+    on auto, so a pre-split config keeps working unchanged.
+    """
+    backend = str(settings.get(f"{context}_backend") or "auto").strip().lower()
+    if backend == "auto":
+        backend = str(settings.get("transcription_backend") or "auto").strip().lower()
+    if backend == "auto":
+        return "auto"
     if backend not in _SUPPORTED_BACKENDS:
         allowed = ", ".join(sorted(_SUPPORTED_BACKENDS))
         raise RuntimeError(
-            f"Unsupported transcription backend '{backend}'. "
-            f"Set transcription_backend to one of: {allowed}."
+            f"Unsupported transcription backend '{backend}' for {context}. "
+            f"Set {context}_backend to one of: {allowed}."
         )
     return backend
 
@@ -329,6 +349,67 @@ def _get_qwen3():
         return _qwen3_model, _qwen3_aligner
 
 
+def _get_nemotron_model():
+    """Load and cache the Nemotron-ASR model on first call.
+
+    dboris/nemotron-asr-mlx is a pure-MLX port of NVIDIA's cache-aware
+    streaming conformer (nemotron-asr-speech-streaming-en-0.6b): each audio
+    frame is processed exactly once, so it stays fast on long recordings.
+    English-only. The ~1.2 GB of weights download from the Hub on first
+    use, the same pattern as the Parakeet model.
+    """
+    global _nemotron_model, _nemotron_model_id
+    model_id = str(settings.get("nemotron_model_id") or "dboris/nemotron-asr-mlx").strip()
+    with _nemotron_model_lock:
+        if _nemotron_model is None or _nemotron_model_id != model_id:
+            try:
+                from nemotron_asr_mlx import from_pretrained
+            except ModuleNotFoundError as e:
+                raise RuntimeError(
+                    "Nemotron backend selected but nemotron-asr-mlx is not installed. "
+                    "Install it with `uv add nemotron-asr-mlx`."
+                ) from e
+            try:
+                _log.info("Loading Nemotron-ASR model %s", model_id)
+                _nemotron_model = from_pretrained(model_id)
+                _nemotron_model_id = model_id
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to load Nemotron-ASR model '{model_id}'. "
+                    "Verify network/cache access for first-time model download."
+                ) from e
+        return _nemotron_model
+
+
+def _transcribe_nemotron(audio_path: Path) -> list[dict]:
+    """Transcribe via Nemotron-ASR.
+
+    The port emits text without timestamps, so the runner returns a single
+    segment spanning the audio — word-level timing is a Parakeet/Qwen3
+    feature, and the empty words list means the diarizer labels the whole
+    segment rather than cutting at word boundaries.
+    """
+    model = _get_nemotron_model()
+    beam = int(float(settings.get("nemotron_beam_size") or 1))
+    kwargs = {}
+    if beam > 1:
+        kwargs["beam_size"] = beam
+        ilm = float(settings.get("nemotron_ilm_scale") or 0.0)
+        if ilm > 0:
+            kwargs["ilm_scale"] = ilm
+    result = model.transcribe(str(audio_path), **kwargs)
+    text = str(getattr(result, "text", "") or "").strip()
+    if not text:
+        return []
+    try:
+        import soundfile as sf
+
+        duration = float(sf.info(str(audio_path)).duration)
+    except Exception:
+        duration = 0.0
+    return [{"start": 0.0, "end": duration, "text": text, "speaker": None, "words": []}]
+
+
 def _words_to_segments(text: str, words: list[dict]) -> list[dict]:
     """Combine Qwen3's punctuated text with word-level timings into sentences.
 
@@ -536,35 +617,106 @@ def trim_mlx_cache() -> float:
         return 0.0
 
 
+def _warmup_pass(backend: str) -> None:
+    """One tiny forward pass per loaded backend, on the inference thread:
+    it compiles the backend's kernels during the preload, so the user's
+    first real transcription does not pay the one-time multi-second
+    compile cost. Runs the backend runners directly — never the public
+    transcribe(), which would re-take the lock and re-submit to this same
+    single-worker executor and deadlock.
+    """
+    import tempfile
+    import wave
+
+    tmp = Path(tempfile.mkstemp(suffix=".wav", prefix="trnscrb-warmup-")[1])
+    try:
+        with wave.open(str(tmp), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(b"\x00\x00" * 16000)
+        if backend in ("auto", "parakeet"):
+            try:
+                _transcribe_parakeet(tmp)
+            except Exception as e:
+                _log.debug("Parakeet warmup skipped: %s", e)
+        if backend in ("auto", "whisper"):
+            try:
+                _transcribe_whisper(tmp)
+            except Exception as e:
+                _log.debug("Whisper warmup skipped: %s", e)
+        if backend == "qwen3":
+            try:
+                _transcribe_qwen3(tmp)
+            except Exception as e:
+                _log.debug("Qwen3 warmup skipped: %s", e)
+        if backend == "voxtral":
+            try:
+                _transcribe_voxtral(tmp)
+            except Exception as e:
+                _log.debug("Voxtral warmup skipped: %s", e)
+        if backend == "nemotron":
+            try:
+                _transcribe_nemotron(tmp)
+            except Exception as e:
+                _log.debug("Nemotron warmup skipped: %s", e)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def preload(backend: str | None = None) -> None:
-    """Warm the configured backend's models on the shared inference thread."""
-    backend = backend or _backend()
+    """Warm transcription models on the shared inference thread.
+
+    Without an argument, warms both use contexts (dictation and meeting), so
+    neither pays a first-use load or kernel-compile cost. An explicit backend
+    warms just that one.
+    """
+    if backend is not None:
+        backends = {backend}
+    else:
+        backends = {b for b in (_backend("dictation"), _backend("meeting"))}
 
     def _load():
-        if backend in ("auto", "parakeet"):
-            _get_parakeet_model()
-        if backend in ("auto", "whisper"):
-            _get_whisper_model()
-        if backend == "qwen3":
-            _get_qwen3()
-        if backend == "voxtral":
-            _get_voxtral_pipeline()
+        for b in sorted(backends):
+            if b in ("auto", "parakeet"):
+                _get_parakeet_model()
+            if b in ("auto", "whisper"):
+                _get_whisper_model()
+            if b == "qwen3":
+                _get_qwen3()
+            if b == "voxtral":
+                _get_voxtral_pipeline()
+            if b == "nemotron":
+                _get_nemotron_model()
 
+    global _warmed_backends
     with _transcribe_lock:
         _inference_executor.submit(_load).result()
         _inference_executor.submit(_bound_mlx_cache).result()
-    _log.info("Transcription model preloaded (%s)", backend)
+    for b in sorted(backends):
+        if b in _warmed_backends:
+            continue
+        # One executor task per pass: the warmup runs the backend runners
+        # directly (transcribe() would deadlock on this same worker). A
+        # concurrent unload just makes a runner lazy-reload its model.
+        _inference_executor.submit(_warmup_pass, b).result()
+        _warmed_backends.add(b)
+    _log.info("Transcription model preloaded (%s)", ", ".join(sorted(backends)))
 
 
-def transcribe(audio_path: Path) -> list[dict]:
+def transcribe(audio_path: Path, context: str = "meeting") -> list[dict]:
     """Return segments: [{start, end, text, speaker}] — speaker filled later by diarizer.
 
     Serialized with a lock so concurrent calls don't overlap on the GPU, and
     executed on the dedicated inference thread (see _inference_executor).
+
+    context selects the backend between "dictation" and "meeting" so the two
+    can use different models (e.g. fast Nemotron for dictation, Parakeet for
+    meetings where word timings feed the diarizer).
     """
     audio_path = Path(audio_path)
     file_size = audio_path.stat().st_size if audio_path.exists() else 0
-    _log.info("Transcribing %s (%d bytes)", audio_path, file_size)
+    _log.info("Transcribing %s (%d bytes, context=%s)", audio_path, file_size, context)
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
     if file_size == 0:
@@ -577,7 +729,7 @@ def transcribe(audio_path: Path) -> list[dict]:
         if bool(settings.get("denoise")):
             audio_path, temp_denoised = _denoise_audio(audio_path)
 
-        backend = _backend()
+        backend = _backend(context)
         with _transcribe_lock:
             segments = _inference_executor.submit(
                 _transcribe_on_worker, audio_path, backend
@@ -642,6 +794,7 @@ def _transcribe_on_worker(audio_path: Path, backend: str) -> list[dict]:
         "parakeet": _transcribe_parakeet,
         "voxtral": _transcribe_voxtral,
         "qwen3": _transcribe_qwen3,
+        "nemotron": _transcribe_nemotron,
     }
     try:
         return runners[backend](audio_path)
@@ -663,6 +816,8 @@ def unload_models() -> None:
     global _whisper_model, _parakeet_model, _parakeet_model_id
     global _voxtral_pipeline, _voxtral_model_id
     global _qwen3_model, _qwen3_aligner, _qwen3_model_id
+    global _nemotron_model, _nemotron_model_id
+    global _warmed_backends
     import gc
 
     with _transcribe_lock:
@@ -678,6 +833,12 @@ def unload_models() -> None:
             _qwen3_model = None
             _qwen3_aligner = None
             _qwen3_model_id = None
+        with _nemotron_model_lock:
+            _nemotron_model = None
+            _nemotron_model_id = None
+        # A reload must re-run the warmup: the freed GPU cache may take the
+        # compiled kernels with it.
+        _warmed_backends.clear()
     gc.collect()
     # Model weights live in MLX's GPU cache too — drop them after the Python
     # references are gone, or the memory stays held despite the unload.

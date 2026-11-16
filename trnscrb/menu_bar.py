@@ -31,6 +31,7 @@ from trnscrb import (
     hotkey,
     obsidian,
     ptt,
+    semantic_search,
     storage,
     titles,
     transcriber,
@@ -314,9 +315,29 @@ class TrnscrbApp(rumps.App):
         self._refresh_enrich_settings_menu()
         self._update_health_item()
 
+        # Warm the embedding model now (background thread) so the first search
+        # hits the fast path. The ~90 MB SentenceTransformer takes ~30 s on
+        # cold start; after warm it is ~8 s.
+        threading.Thread(
+            target=semantic_search.preload,
+            daemon=True,
+            name="trnscrb-semsearch-warmup",
+        ).start()
+
         # Models load lazily when a recording starts (see _do_start) and are
         # released again after a long idle period to free ~1 GB of memory.
         self._unload_timer: threading.Timer | None = None
+
+        # Warm the transcription model at startup as well: the cold load plus
+        # the first MLX pass costs a few seconds, and doing it now keeps that
+        # off the critical path after the user releases the PTT key. The
+        # idle-unload timer below reclaims it after 30 quiet minutes.
+        threading.Thread(
+            target=transcriber.preload,
+            daemon=True,
+            name="trnscrb-transcriber-warmup",
+        ).start()
+        self._schedule_model_unload()
 
         # Elapsed recording time next to the menu bar icon (🔴 12:34).
         self._duration_shown = False
@@ -439,6 +460,7 @@ class TrnscrbApp(rumps.App):
         try:
             transcriber.unload_models()
             diarizer.unload_pipeline()
+            semantic_search.unload()
         except Exception:
             _log.debug("Idle model unload failed", exc_info=True)
 
@@ -465,10 +487,10 @@ class TrnscrbApp(rumps.App):
 
     def _preload_model(self):
         try:
-            backend = str(get_setting("transcription_backend") or "auto")
             # Loads happen on the transcriber's dedicated inference thread —
             # MLX models must be loaded and evaluated on the same thread.
-            transcriber.preload(backend)
+            # No argument: warms both the dictation and meeting backends.
+            transcriber.preload()
         except Exception as e:
             _log.debug("Model preload skipped: %s", e)
 
@@ -1071,6 +1093,58 @@ class TrnscrbApp(rumps.App):
 
     # ── dictation HUD (floating activity indicator) ─────────────────────────
 
+    def _focused_screen(self):
+        """The screen under the frontmost app's window, or None.
+
+        ``mainScreen`` is the primary display for an accessory app with no
+        key window, so the HUD lands on the wrong screen. The frontmost
+        app's topmost normal window (CGWindowList, layer 0) names the real
+        target; the mouse location covers apps without a normal window.
+        """
+        try:
+            import AppKit
+            import Quartz
+
+            screens = AppKit.NSScreen.screens()
+            if not screens:
+                return None
+            primary_h = screens[0].frame().size.height
+            front = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+            if front is not None:
+                pid = int(front.processIdentifier())
+                windows = Quartz.CGWindowListCopyWindowInfo(
+                    Quartz.kCGWindowListOptionOnScreenOnly,
+                    Quartz.kCGNullWindowID,
+                )
+                for w in windows:
+                    if int(w.get("kCGWindowOwnerPID", -1)) != pid or w.get("kCGWindowLayer") != 0:
+                        continue
+                    b = w.get("kCGWindowBounds") or {}
+                    x, y = float(b.get("X", 0.0)), float(b.get("Y", 0.0))
+                    wdt, hgt = float(b.get("Width", 0.0)), float(b.get("Height", 0.0))
+                    # CG bounds are top-left origin; AppKit frames are not.
+                    cx, cy = x + wdt / 2.0, primary_h - y - hgt / 2.0
+                    for s in screens:
+                        f = s.frame()
+                        if (
+                            f.origin.x <= cx <= f.origin.x + f.size.width
+                            and f.origin.y <= cy <= f.origin.y + f.size.height
+                        ):
+                            return s
+            from AppKit import NSEvent
+
+            mouse = NSEvent.mouseLocation()
+            for s in screens:
+                f = s.frame()
+                if (
+                    f.origin.x <= mouse.x <= f.origin.x + f.size.width
+                    and f.origin.y <= mouse.y <= f.origin.y + f.size.height
+                ):
+                    return s
+        except Exception:
+            _log.debug("Focused-screen lookup failed", exc_info=True)
+        return None
+
     def _show_dictation_hud(self) -> None:
         """Create and show the floating dictation indicator.
 
@@ -1090,9 +1164,9 @@ class TrnscrbApp(rumps.App):
 
             # ── dimensions & positioning ────────────────────────────────
             width, height = 64.0, 64.0
-            screen = AppKit.NSScreen.mainScreen()
+            screen = self._focused_screen() or AppKit.NSScreen.mainScreen()
             frame = screen.frame()
-            x = (frame.size.width - width) / 2.0
+            x = (frame.size.width - width) / 2.0 + frame.origin.x
             y = (frame.size.height - height) / 2.0 + frame.origin.y
 
             # ── window ──────────────────────────────────────────────────

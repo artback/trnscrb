@@ -12,7 +12,13 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from trnscrb.recorder import SAMPLE_RATE, Recorder, _wav_header
+from trnscrb.recorder import (
+    SAMPLE_RATE,
+    Recorder,
+    _STOP_DRAIN_SECS,
+    _TRAIL_SILENCE_SECS,
+    _wav_header,
+)
 
 
 class WavHeaderTest(unittest.TestCase):
@@ -180,11 +186,145 @@ class RecorderFullCycleTest(unittest.TestCase):
             self.assertEqual(wf.getnchannels(), 1)
             self.assertEqual(wf.getsampwidth(), 2)  # 16-bit = 2 bytes
             self.assertEqual(wf.getframerate(), SAMPLE_RATE)
-            self.assertEqual(wf.getnframes(), 10 * 1024)
+            self.assertEqual(wf.getnframes(), 10 * 1024 + int(_TRAIL_SILENCE_SECS * SAMPLE_RATE))
             # Read all frames to confirm no corruption
             data = wf.readframes(wf.getnframes())
-            self.assertEqual(len(data), 10 * 1024 * 2)
+            self.assertEqual(len(data), (10 * 1024 + int(_TRAIL_SILENCE_SECS * SAMPLE_RATE)) * 2)
 
+        path.unlink(missing_ok=True)
+
+    def test_stop_grace_captures_tail_delivered_during_grace(self):
+        """A block delivered while stop() waits out the grace must land in
+        the file — stopping the stream at key-up loses the end of the last
+        word, because the callback drops blocks once _recording is false."""
+        with self._patch_stream():
+            rec = Recorder(device=None, system_audio=False)
+            rec.start()
+
+            for _ in range(3):
+                block = np.random.uniform(-0.5, 0.5, (1024, 1)).astype(np.float32)
+                rec._callback(block, 1024, None, None)
+
+            tail = np.random.uniform(-0.5, 0.5, (1024, 1)).astype(np.float32)
+            delivered = []
+
+            def fake_sleep(seconds):
+                # Simulate PortAudio draining its queue during the fixed
+                # drain: one final block reaches the callback while the
+                # stream is still open. The watchdog's 1 s sleeps pass by.
+                if abs(seconds - _STOP_DRAIN_SECS) < 1e-9 and not delivered:
+                    rec._callback(tail, 1024, None, None)
+                    delivered.append(seconds)
+
+            with patch("trnscrb.settings.get", return_value=300), patch(
+                "trnscrb.recorder.time.sleep", side_effect=fake_sleep
+            ):
+                path = rec.stop()
+
+        self.assertEqual(delivered, [_STOP_DRAIN_SECS])
+        self.assertIsNotNone(path)
+        with wave.open(str(path), "rb") as wf:
+            # 3 blocks before stop + the tail block captured during grace
+            # + the fixed silence tail appended in stop()
+            self.assertEqual(
+                wf.getnframes(), 4 * 1024 + int(_TRAIL_SILENCE_SECS * SAMPLE_RATE)
+            )
+        path.unlink(missing_ok=True)
+
+    def test_stop_appends_digital_silence_tail(self):
+        """stop() ends the file with a fixed stretch of digital silence —
+        the endpointer tail streaming ASR needs to finalize the last words
+        (a mid-word release would otherwise leave the file hard-cut)."""
+        with self._patch_stream():
+            rec = Recorder(device=None, system_audio=False)
+            rec.start()
+            block = np.random.uniform(-0.5, 0.5, (1024, 1)).astype(np.float32)
+            rec._callback(block, 1024, None, None)
+
+            path = rec.stop()
+
+        tail_frames = int(_TRAIL_SILENCE_SECS * SAMPLE_RATE)
+        self.assertIsNotNone(path)
+        with wave.open(str(path), "rb") as wf:
+            self.assertEqual(wf.getnframes(), 1024 + tail_frames)
+            data = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
+            # The appended tail is pure zeros
+            np.testing.assert_array_equal(data[-tail_frames:], 0)
+        path.unlink(missing_ok=True)
+
+    def test_stop_grace_ends_early_when_tail_is_silent(self):
+        """Once the last written block reads as silent, phase 2 has nothing
+        to wait for — the grace ends right after the fixed drain, so a
+        quiet stop does not pay the full cap in latency."""
+        with self._patch_stream():
+            rec = Recorder(device=None, system_audio=False)
+            rec.start()
+            silence = np.zeros((1024, 1), dtype=np.float32)
+            for _ in range(3):
+                rec._callback(silence, 1024, None, None)
+
+            sleeps = []
+
+            def fake_sleep(seconds):
+                sleeps.append(seconds)
+
+            with patch("trnscrb.settings.get", return_value=300), patch(
+                "trnscrb.recorder.time.sleep", side_effect=fake_sleep
+            ):
+                path = rec.stop()
+
+        grace_sleeps = [s for s in sleeps if s != 1.0]  # 1.0 = the watchdog
+        self.assertEqual(grace_sleeps, [_STOP_DRAIN_SECS])
+        self.assertIsNotNone(path)
+        path.unlink(missing_ok=True)
+
+    def test_stop_grace_runs_to_cap_while_tail_stays_voiced(self):
+        """A room that never reads as silent (fan, AC) degrades to the full
+        stop_grace_ms cap — never longer, never shorter."""
+        with self._patch_stream():
+            rec = Recorder(device=None, system_audio=False)
+            rec.start()
+            for _ in range(3):
+                block = np.random.uniform(-0.5, 0.5, (1024, 1)).astype(np.float32)
+                rec._callback(block, 1024, None, None)
+
+            sleeps = []
+
+            def fake_sleep(seconds):
+                sleeps.append(seconds)
+
+            with patch("trnscrb.settings.get", return_value=300), patch(
+                "trnscrb.recorder.time.sleep", side_effect=fake_sleep
+            ):
+                path = rec.stop()
+
+        grace_sleeps = [s for s in sleeps if s != 1.0]  # 1.0 = the watchdog
+        self.assertGreater(len(grace_sleeps), 1)  # drain + at least one step
+        self.assertAlmostEqual(sum(grace_sleeps), 300 / 1000.0, places=6)
+        self.assertIsNotNone(path)
+        path.unlink(missing_ok=True)
+
+    def test_stop_grace_ms_zero_disables_grace(self):
+        """stop_grace_ms of 0 skips the grace entirely — the old
+        stop-immediately-at-key-up behavior, available if ever wanted back."""
+        with self._patch_stream():
+            rec = Recorder(device=None, system_audio=False)
+            rec.start()
+            block = np.random.uniform(-0.5, 0.5, (1024, 1)).astype(np.float32)
+            rec._callback(block, 1024, None, None)
+
+            sleeps = []
+
+            def fake_sleep(seconds):
+                sleeps.append(seconds)
+
+            with patch("trnscrb.settings.get", return_value=0), patch(
+                "trnscrb.recorder.time.sleep", side_effect=fake_sleep
+            ):
+                path = rec.stop()
+
+        self.assertEqual([s for s in sleeps if s != 1.0], [])
+        self.assertIsNotNone(path)
         path.unlink(missing_ok=True)
 
     def test_stop_with_no_frames_returns_none_and_cleans_up(self):

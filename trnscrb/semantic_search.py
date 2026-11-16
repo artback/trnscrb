@@ -9,6 +9,10 @@ machine.
 The index lives in ~/.config/trnscrb and is updated incrementally: only new or
 changed transcripts are re-embedded, so adding a meeting costs one embed pass,
 not a full rebuild.
+
+The embedding model is loaded eagerly at dashboard start (`preload`) so that
+search queries hit the warm path (~8 s) instead of the cold path (~30 s).
+It is released on idle (`unload`) to free the memory, and reloaded on demand.
 """
 
 from __future__ import annotations
@@ -70,6 +74,37 @@ def search(query: str, k: int = 8) -> list[dict]:
         record["score"] = round(float(scores[int(i)]), 3)
         hits.append(record)
     return hits
+
+
+# ── Warm / cold lifecycle ────────────────────────────────────────────────────
+
+
+def preload() -> bool:
+    """Warm the embedding model so search queries hit the warm path.
+
+    Loads the SentenceTransformer on import (blocking, ~30 s on cold start).
+    Safe to call repeatedly — only loads once. Returns True when the model is
+    resident, False when the embedding backend is unavailable.
+    """
+    try:
+        _get_model()
+        return True
+    except (ImportError, RuntimeError):
+        return False
+
+
+def unload() -> None:
+    """Release the embedding model to free memory after a long idle period.
+
+    Safe to call at any time — the model reloads lazily on the next search.
+    """
+    global _model
+    _model = None
+
+
+def is_warmed() -> bool:
+    """True if the embedding model is currently resident in memory."""
+    return _model is not None
 
 
 def build_index(force: bool = False) -> int:

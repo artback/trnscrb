@@ -343,9 +343,9 @@ def install(force: bool):
     if settings.get("auto_record") is not True:
         settings["auto_record"] = True
         changed = True
-    configured_backend = str(settings.get("transcription_backend") or "").strip().lower()
+    configured_backend = str(settings.get("meeting_backend") or "").strip().lower()
     if configured_backend not in {"parakeet", "whisper"}:
-        settings["transcription_backend"] = "parakeet"
+        settings["meeting_backend"] = "parakeet"
         changed = True
     if not settings.get("parakeet_model_id"):
         settings["parakeet_model_id"] = _DEFAULT_PARAKEET_MODEL_ID
@@ -849,6 +849,31 @@ def _semantic_search(query: str) -> None:
         )
         click.echo(click.style(f"\n[{h['score']:.2f}]  {loc}", fg="cyan", bold=True))
         click.echo(f"  {h['text']}")
+
+
+# ── warm-search ───────────────────────────────────────────────────────────────
+
+
+@cli.command()
+def warm_search():
+    """Warm the on-device embedding model so search is fast.
+
+    Downloads and loads the ~90 MB model (~30 s cold start). Subsequent
+    search queries use the cached model (~8 s warm path). The model is
+    auto-warmed at dashboard start, but this command is useful for CLI
+    sessions or when you want to verify the model is available.
+    """
+    from trnscrb import semantic_search as sem
+
+    if not sem.available():
+        raise click.ClickException(
+            "Semantic search needs `sentence-transformers`. Reinstall/upgrade trnscrb."
+        )
+    click.echo("Warming semantic search model (first run downloads ~90 MB)…")
+    if sem.preload():
+        click.echo(click.style("  Model warmed — search is fast now.", fg="green"))
+    else:
+        click.echo(click.style("  Model failed to load; search will fall back to keyword mode.", fg="yellow"))
 
 
 # ── show ──────────────────────────────────────────────────────────────────────
@@ -1708,8 +1733,14 @@ def status():
 
     settings = load_settings()
     _row("Auto-transcribe", bool(settings.get("auto_record")), "")
-    backend = str(settings.get("transcription_backend") or "auto")
-    click.echo(f"  Backend: {backend}")
+
+    from trnscrb import transcriber as _transcriber
+
+    for ctx in ("dictation", "meeting"):
+        try:
+            _row(f"Backend ({ctx})", True, _transcriber._backend(ctx))
+        except RuntimeError:
+            _row(f"Backend ({ctx})", False, f"invalid: {settings.get(ctx + '_backend')}")
     # A missing model is where first-run guidance pays off: name it and point
     # at the catalog's pick for this machine instead of a generic download.
     from trnscrb import catalog
@@ -2784,7 +2815,7 @@ def dictation_command():
         click.echo("No audio captured.", err=True)
         return
     try:
-        segments = transcriber.transcribe(audio_path)
+        segments = transcriber.transcribe(audio_path, context="dictation")
     except Exception as e:
         click.echo(f"Transcription failed: {e}", err=True)
         return
@@ -3002,7 +3033,7 @@ def _parakeet_model_cached(model_id: str) -> bool:
 
 def _normalize_backend(value) -> str:
     backend = str(value or "parakeet").strip().lower()
-    if backend in {"auto", "parakeet", "whisper", "voxtral"}:
+    if backend in {"auto", "parakeet", "whisper", "voxtral", "qwen3", "nemotron"}:
         return backend
     return "auto"
 
