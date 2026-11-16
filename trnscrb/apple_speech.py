@@ -5,6 +5,13 @@ SpeechAnalyzer/SpeechTranscriber API to stream partial recognition text
 with very low latency. The saved / authoritative transcript is *never*
 touched — this layer only feeds live HUD / live-transcription text.
 
+NOTE: the exact PyObjC binding of the macOS 26 SpeechAnalyzer API
+(class/method names below) is written against the public framework
+documentation and has NOT been exercised on a real macOS 26 machine —
+the ``_framework_check`` reason string and the ``Diagnostics`` line in
+the menu bar will show why the layer is off if any symbol is missing.
+Verify on a macOS 26 (Tahoe) Apple Silicon machine before relying on it.
+
 When PyObjC is absent (headless / Linux, or an old macOS), every public
 function degrades cleanly: ``available()`` returns ``(False, reason)``,
 ``start()`` / ``stop()`` are no-ops, and ``live_source()`` falls through.
@@ -33,7 +40,6 @@ will surface the exact missing symbol.
 from __future__ import annotations
 
 import platform
-import subprocess
 import threading
 from typing import Callable
 
@@ -48,7 +54,7 @@ _log = get_logger("trnscrb.apple_speech")
 def available() -> tuple[bool, str]:
     """Check whether Apple SpeechAnalyzer is usable.
 
-    Returns ``(True, "")`` when all three conditions hold, otherwise
+    Returns ``(True, "")`` when all four conditions hold, otherwise
     ``(False, reason)``:
       1. macOS (Darwin) — ``platform.system() == "Darwin"``
       2. Apple Silicon — ``platform.processor() == "arm"``
@@ -61,29 +67,14 @@ def available() -> tuple[bool, str]:
     if platform.processor() != "arm":
         return (False, "not Apple Silicon")
 
-    # 3: kernel version — sw_vers is a lightweight CLI; fall back to
-    #    ``platform.release()`` if missing (headless CI may lack it).
+    # 3: Darwin kernel version — on macOS ``platform.release()`` returns the
+    #    kernel version (macOS 26 = Darwin 25), so no subprocess is needed.
     try:
-        out = subprocess.run(
-            ["sw_vers", "-buildVersion"],
-            capture_output=True,
-            text=True,
-            timeout=3,
-        ).stdout.strip()
-        if out:
-            # sw_vers -buildVersion returns the Darwin kernel version on macOS.
-            # e.g. "25.0.0" — need major >= 25.
-            major = int(out.split(".")[0])
-            if major < 25:
-                return (False, f"macOS kernel {major} < 25 (needs macOS 26+)")
+        major = int(platform.release().split(".")[0])
+        if major < 25:
+            return (False, f"macOS kernel {major} < 25 (needs macOS 26+)")
     except Exception:
-        # Fallback: try platform.release() which is also the Darwin kernel.
-        try:
-            major = int(platform.release().split(".")[0])
-            if major < 25:
-                return (False, f"macOS kernel {major} < 25 (needs macOS 26+)")
-        except Exception:
-            return (False, "could not determine macOS version")
+        return (False, "could not determine macOS version")
 
     # 4: PyObjC + Speech framework.
     ok, reason = _framework_check()
@@ -195,10 +186,8 @@ class LiveSession:
         from Speech import (
             SpeechAnalyzer,
         )
-        from Foundation import NSString, NSRunLoop, NSDate
-        from objc import SEL
 
-        # Delegate — receives partial / final results on a non-main thread.
+        # Delegate — receives partial / final results on a framework thread.
         delegate = _SpeechDelegate(self._callback)
 
         # Create analyzer with the delegate.
@@ -215,24 +204,22 @@ class LiveSession:
             _log.debug("Could not set delegate", exc_info=True)
             return
 
-        # Start analysis.
+        # Start analysis. The real API takes an error pointer
+        # (``startAnalysisWithError:``); call it without one — a start
+        # failure surfaces here as an exception and stops the session.
         try:
-            error = objc.nil  # placeholder — startAnalysis returns via NSError ptr
             self._analyzer.startAnalysis()
         except Exception:
             _log.debug("Could not start analysis", exc_info=True)
             return
 
-        # Keep the thread alive with a run loop so delegate callbacks fire.
-        # We exit when ``_stop_event`` is set.
+        # Keep the thread alive so the delegate (a local of ``_run``) stays
+        # retained while recognition runs; results are delivered by the
+        # framework's own thread straight into the callback. A CFRunLoop may
+        # only be driven from one thread, so no run loop is spun here — just
+        # wait on the stop event (checked at a moderate cadence).
         while not self._stop_event.is_set():
-            try:
-                # Run the loop for a short interval and check again.
-                NSRunLoop.mainRunLoop().runUntilDate_(
-                    NSDate.dateWithTimeIntervalSinceNow_(0.1)
-                )
-            except Exception:
-                break
+            self._stop_event.wait(0.2)
 
         # Stop the analyzer cleanly.
         try:
