@@ -220,5 +220,77 @@ class TestPTTCaptureCapsLock(unittest.TestCase):
         self.assertEqual(captured, [(17, 0)])
 
 
+class TestModifierTracking(unittest.TestCase):
+    """A stale key-down snapshot must not defeat the combo.
+
+    The 2026-11-18 field case: the user held ctrl+shift+k (the terminal
+    reported the combo), but the key-down event delivered to the tap
+    carried flags=256 (no modifier bits) — the window server had not yet
+    merged the held modifiers into the event. The tap's flagsChanged
+    tracking supplies the live state; effective_flags ORs it in.
+    """
+
+    CTRL_SHIFT = hotkey.FLAG_CONTROL | hotkey.FLAG_SHIFT
+    CTRL_SHIFT_K = hotkey.PTTKey(
+        key_code=7,  # K
+        flags=CTRL_SHIFT,
+        spec="ctrl+shift+k",
+    )
+    STALE_EVENT = 256  # 0x100, kCGEventFlagMaskNonCoalesced only
+
+    def _state(self) -> ptt.PTTState:
+        return ptt.PTTState(self.CTRL_SHIFT_K)
+
+    def test_stale_event_recovered_from_tracking(self):
+        """Event without modifier bits + tracked ctrl+shift → matches."""
+        s = self._state()
+        self.assertTrue(
+            ptt.handle_key_down(
+                s, 7, ptt.effective_flags(self.STALE_EVENT, self.CTRL_SHIFT)
+            )
+        )
+
+    def test_bare_press_stays_bare(self):
+        """No modifiers tracked, none in the event → no match."""
+        s = self._state()
+        self.assertFalse(
+            ptt.handle_key_down(s, 7, ptt.effective_flags(self.STALE_EVENT, 0))
+        )
+        self.assertFalse(s.holding)
+
+    def test_fresh_event_needs_no_tracking(self):
+        """Event that carries the modifiers matches on its own (the old
+        behaviour, untouched)."""
+        s = self._state()
+        self.assertTrue(
+            ptt.handle_key_down(
+                s, 7, ptt.effective_flags(self.CTRL_SHIFT | self.STALE_EVENT, 0)
+            )
+        )
+
+    def test_partial_tracking_fills_the_gap(self):
+        """Event carries ctrl, tracking carries shift → both present."""
+        s = self._state()
+        self.assertTrue(
+            ptt.handle_key_down(
+                s,
+                7,
+                ptt.effective_flags(
+                    hotkey.FLAG_CONTROL | self.STALE_EVENT, hotkey.FLAG_SHIFT
+                ),
+            )
+        )
+
+    def test_extra_tracked_modifier_is_fine(self):
+        s = self._state()
+        self.assertTrue(
+            ptt.handle_key_down(
+                s,
+                7,
+                ptt.effective_flags(self.STALE_EVENT, self.CTRL_SHIFT | hotkey.FLAG_COMMAND),
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

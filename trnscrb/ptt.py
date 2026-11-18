@@ -64,6 +64,21 @@ class PTTState:
         self.caps_held = False
 
 
+def effective_flags(event_flags: int, tracked_flags: int) -> int:
+    """Modifier bits to match a key-down against.
+
+    A key-down's own flag snapshot can be stale: a fast modifier-then-key
+    press (or a coalesced session event) can arrive before the window
+    server merges the held modifiers into the event, so the event shows
+    no modifier bits at all while the modifiers are physically held —
+    the terminal still reports the combo, the tap does not see it.
+    The tap's flagsChanged tracking is the live state; OR the two so the
+    match sees the modifiers. A genuinely bare press stays bare: no
+    flagsChanged, nothing to OR in.
+    """
+    return event_flags | tracked_flags
+
+
 def handle_key_down(state: PTTState, code: int, flags: int, autorepeat: bool = False) -> bool:
     """A key-down arrived. True when the caller should start a dictation.
 
@@ -131,6 +146,14 @@ class EventTap:
     The callback runs on the main run loop (the tap source is installed on
     it), so callers may touch UI state directly. It must not block: heavy
     work belongs in a worker thread.
+
+    Also tracks the live modifier state from ``kCGEventFlagsChanged``
+    (stored in ``_modifier_flags``): a key-down's own flag snapshot can be
+    stale — a fast modifier-then-key press can land before the window
+    server merges the held modifiers into the event, arriving with no
+    modifier bits at all while the modifiers are physically held. Key
+    downs are delivered to the callback with the tracked state ORed in
+    (see :func:`effective_flags`).
     """
 
     def __init__(self, callback: Callable[..., None]) -> None:
@@ -140,6 +163,9 @@ class EventTap:
         self.active = False
         # Set when the system disables the tap; the re-arm loop can react.
         self.disabled_reason: str = ""
+        # Live modifier state from flagsChanged events; reset on stop so a
+        # re-armed tap starts from a clean slate.
+        self._modifier_flags: int = 0
 
     def start(self) -> bool:
         """Create and arm the tap. False when it cannot be created
@@ -152,7 +178,11 @@ class EventTap:
             return False
         _log.debug("PTT tap start: creating CGEventTapCreate (session)")
         try:
-            key_mask = (1 << int(Quartz.kCGEventKeyDown)) | (1 << int(Quartz.kCGEventKeyUp))
+            key_mask = (
+                (1 << int(Quartz.kCGEventKeyDown))
+                | (1 << int(Quartz.kCGEventKeyUp))
+                | (1 << int(Quartz.kCGEventFlagsChanged))
+            )
             self._tap = Quartz.CGEventTapCreate(
                 int(Quartz.kCGSessionEventTap),
                 int(Quartz.kCGHeadInsertEventTap),
@@ -212,6 +242,12 @@ class EventTap:
             code = int(Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode))
             flags = int(Quartz.CGEventGetFlags(event))
             _log.debug("PTT key event: code=%d flags=%d event_type=%d", code, flags, event_type)
+            if event_type == int(Quartz.kCGEventFlagsChanged):
+                # Not a key press — the authoritative live modifier state.
+                # Key events that follow may carry a stale snapshot; match
+                # against this instead (see effective_flags).
+                self._modifier_flags = flags
+                return
             if event_type == int(Quartz.kCGEventKeyDown):
                 autorepeat = bool(
                     Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventAutorepeat)
@@ -222,7 +258,9 @@ class EventTap:
                     flags,
                     autorepeat,
                 )
-                self._callback("down", code, flags, autorepeat)
+                self._callback(
+                    "down", code, effective_flags(flags, self._modifier_flags), autorepeat
+                )
                 _log.debug("PTT _callback(down) returned OK")
             else:
                 _log.debug("PTT calling _callback(up, code=%d, flags=%d)", code, flags)
@@ -253,6 +291,7 @@ class EventTap:
         self._source = None
         self.active = False
         self.disabled_reason = ""
+        self._modifier_flags = 0
 
 
 # ── push-to-talk monitor ─────────────────────────────────────────────────────
@@ -320,9 +359,12 @@ class PTTCapture:
     """One-shot capture of the next key press (the menu bar's record mode).
 
     Any non-modifier key with optional modifiers counts — modifier-only
-    presses are ignored because they arrive as flags-changed events, which
-    this tap does not listen for. ``on_capture`` receives (key_code,
-    ptt_modifiers) on the main run loop and is fired exactly once.
+    presses are ignored (the flagsChanged events used to track the live
+    modifier state never fire a capture). ``on_capture`` receives
+    (key_code, ptt_modifiers) on the main run loop and is fired exactly
+    once. The tracked modifier state also repairs a stale key-down
+    snapshot here, so a recorded combo keeps the modifiers that were
+    physically held.
 
     Caps lock is the one "modifier" that does emit a key press (it is a
     toggle key), so the caps key-down itself never fires the capture — it
