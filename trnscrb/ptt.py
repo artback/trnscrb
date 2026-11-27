@@ -51,17 +51,25 @@ class PTTState:
     "modifier" that emits a real key-down/key-up pair — and its
     alpha-shift flag bit latches rather than following the finger, so a
     combo that requires caps lock matches this flag, never the event bit.
+
+    ``pending`` is True while the PTT key is down but a required modifier
+    has not arrived yet: the physical order can put the key down before
+    its modifiers (a fast press, or a stale event flag snapshot), so the
+    press is remembered and re-matched as the modifier state changes
+    (``PTTMonitor`` re-runs the match on every flagsChanged).
     """
 
     key: PTTKey
     holding: bool = False
     started: bool = False
     caps_held: bool = False
+    pending: bool = False
 
     def reset(self) -> None:
         self.holding = False
         self.started = False
         self.caps_held = False
+        self.pending = False
 
 
 def effective_flags(event_flags: int, tracked_flags: int) -> int:
@@ -98,14 +106,24 @@ def handle_key_down(state: PTTState, code: int, flags: int, autorepeat: bool = F
     if code == CAPS_LOCK_CODE:
         state.caps_held = True
         return False
-    if code != state.key.key_code or state.holding:
+    if state.holding:
+        return False
+    if code != state.key.key_code:
+        # A different key press breaks a press waiting on its modifiers.
+        state.pending = False
         return False
     regular = state.key.flags & ~FLAG_CAPS_LOCK
-    if (flags & regular) != regular:
-        return False
-    if state.key.flags & FLAG_CAPS_LOCK and not state.caps_held:
+    if (flags & regular) != regular or (
+        state.key.flags & FLAG_CAPS_LOCK and not state.caps_held
+    ):
+        # Key is down, a required modifier is not (yet): the physical order
+        # can put the key first, or the event's flag snapshot can lag the
+        # held modifiers. Remember the press; the live modifier state
+        # (flagsChanged) completes it — see PTTMonitor._on_flags.
+        state.pending = True
         return False
     state.holding = True
+    state.pending = False
     return True
 
 
@@ -134,6 +152,7 @@ def handle_key_up(state: PTTState, code: int) -> bool:
     was_started = state.started
     state.holding = False
     state.started = False
+    state.pending = False
     return was_started
 
 
@@ -154,10 +173,20 @@ class EventTap:
     modifier bits at all while the modifiers are physically held. Key
     downs are delivered to the callback with the tracked state ORed in
     (see :func:`effective_flags`).
+
+    ``on_flags_changed``, when set, is called on the main run loop with the
+    full live flag state on every ``kCGEventFlagsChanged`` — consumers that
+    must react to the modifiers arriving *after* a key-down (the late-
+    modifier completion in ``PTTMonitor``) hang off it.
     """
 
-    def __init__(self, callback: Callable[..., None]) -> None:
+    def __init__(
+        self,
+        callback: Callable[..., None],
+        on_flags_changed: Callable[[int], None] | None = None,
+    ) -> None:
         self._callback = callback
+        self._on_flags_changed = on_flags_changed
         self._tap = None
         self._source = None
         self.active = False
@@ -166,6 +195,11 @@ class EventTap:
         # Live modifier state from flagsChanged events; reset on stop so a
         # re-armed tap starts from a clean slate.
         self._modifier_flags: int = 0
+
+    @property
+    def modifier_flags(self) -> int:
+        """Live modifier state tracked from flagsChanged events."""
+        return self._modifier_flags
 
     def start(self) -> bool:
         """Create and arm the tap. False when it cannot be created
@@ -245,8 +279,12 @@ class EventTap:
             if event_type == int(Quartz.kCGEventFlagsChanged):
                 # Not a key press — the authoritative live modifier state.
                 # Key events that follow may carry a stale snapshot; match
-                # against this instead (see effective_flags).
+                # against this instead (see effective_flags). A press may
+                # also be *waiting* on these modifiers (late-modifier
+                # completion); hand the new state to the consumer.
                 self._modifier_flags = flags
+                if self._on_flags_changed is not None:
+                    self._on_flags_changed(flags)
                 return
             if event_type == int(Quartz.kCGEventKeyDown):
                 autorepeat = bool(
@@ -310,7 +348,7 @@ class PTTMonitor:
         self.state = PTTState(key)
         self._on_start = on_start
         self._on_stop = on_stop
-        self._tap = EventTap(self._handle)
+        self._tap = EventTap(self._handle, on_flags_changed=self._on_flags)
 
     @property
     def active(self) -> bool:
@@ -341,15 +379,32 @@ class PTTMonitor:
             elif code == self.key.key_code:
                 _log.debug(
                     "PTT combo: down not triggered (holding=%s started=%s "
-                    "event flags=%d required flags=%d)",
+                    "pending=%s event flags=%d required flags=%d)",
                     self.state.holding,
                     self.state.started,
+                    self.state.pending,
                     flags,
                     self.key.flags,
                 )
         else:
             if handle_key_up(self.state, code):
                 self._on_stop()
+
+    def _on_flags(self, flags: int) -> None:
+        """The modifier state changed while a press was waiting on it.
+
+        The physical order can put the PTT key down before its modifiers
+        (a fast press, or a stale event flag snapshot), so the key-down's
+        first match saw no modifiers and left the press pending. Re-match
+        with the live state: the same press now completes the combo and
+        starts. A bare press with no modifier arriving completes nothing.
+        """
+        if not self.state.pending or self.state.holding:
+            return
+        if handle_key_down(self.state, self.key.key_code, flags):
+            ok = bool(self._on_start())
+            confirm_start(self.state, ok)
+            _log.info("PTT combo (late modifiers): dictation start ok=%s", ok)
 
 
 # ── record mode ──────────────────────────────────────────────────────────────

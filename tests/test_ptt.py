@@ -292,5 +292,99 @@ class TestModifierTracking(unittest.TestCase):
         )
 
 
+class TestLateModifiers(unittest.TestCase):
+    """The PTT key may come down before its modifiers.
+
+    A fast press (or a stale event snapshot) can land the key-down before
+    the modifiers are visible, so the first match sees a bare key. The
+    press is kept ``pending`` instead of being dropped; when the modifier
+    state changes (flagsChanged) the monitor re-matches the same press and
+    the combo completes.
+    """
+
+    CTRL_SHIFT = hotkey.FLAG_CONTROL | hotkey.FLAG_SHIFT
+    CTRL_SHIFT_K = hotkey.PTTKey(
+        key_code=7,  # K
+        flags=CTRL_SHIFT,
+        spec="ctrl+shift+k",
+    )
+
+    def _state(self) -> ptt.PTTState:
+        return ptt.PTTState(self.CTRL_SHIFT_K)
+
+    def test_bare_press_is_pending_not_dead(self):
+        s = self._state()
+        self.assertFalse(ptt.handle_key_down(s, 7, 0))
+        self.assertFalse(s.holding)
+        self.assertTrue(s.pending)
+
+    def test_late_modifiers_complete_the_press(self):
+        s = self._state()
+        self.assertFalse(ptt.handle_key_down(s, 7, 0))  # K first
+        self.assertTrue(ptt.handle_key_down(s, 7, self.CTRL_SHIFT))
+        self.assertTrue(s.holding)
+        self.assertFalse(s.pending)
+
+    def test_partial_then_full(self):
+        s = self._state()
+        self.assertFalse(ptt.handle_key_down(s, 7, hotkey.FLAG_CONTROL))
+        self.assertTrue(s.pending)
+        self.assertFalse(s.holding)
+        self.assertTrue(ptt.handle_key_down(s, 7, self.CTRL_SHIFT))
+        self.assertTrue(s.holding)
+
+    def test_autorepeat_keeps_pending(self):
+        s = self._state()
+        ptt.handle_key_down(s, 7, 0, autorepeat=True)
+        ptt.handle_key_down(s, 7, 0, autorepeat=True)
+        self.assertTrue(s.pending)
+        self.assertFalse(s.holding)
+        self.assertTrue(ptt.handle_key_down(s, 7, self.CTRL_SHIFT))
+
+    def test_release_clears_pending(self):
+        s = self._state()
+        ptt.handle_key_down(s, 7, 0)
+        self.assertTrue(s.pending)
+        self.assertFalse(ptt.handle_key_up(s, 7))  # nothing started, nothing stopped
+        self.assertFalse(s.pending)
+        self.assertFalse(s.holding)
+
+    def test_other_key_breaks_pending(self):
+        s = self._state()
+        ptt.handle_key_down(s, 7, 0)
+        self.assertTrue(s.pending)
+        ptt.handle_key_down(s, 5, 0)
+        self.assertFalse(s.pending)
+
+    def test_bare_press_without_modifiers_never_starts(self):
+        """A bare tap of the key, no modifiers arriving, starts nothing."""
+        s = self._state()
+        started = []
+        mon = ptt.PTTMonitor(
+            self.CTRL_SHIFT_K,
+            on_start=lambda: started.append(True) or True,
+            on_stop=lambda: None,
+        )
+        mon._handle("down", 7, 0, False)
+        mon._on_flags(0)  # no modifier state change to complete it
+        self.assertEqual(started, [])
+        self.assertFalse(mon.state.started)
+
+    def test_monitor_starts_when_modifiers_arrive_late(self):
+        started = []
+        mon = ptt.PTTMonitor(
+            self.CTRL_SHIFT_K,
+            on_start=lambda: started.append(True) or True,
+            on_stop=lambda: None,
+        )
+        mon._handle("down", 7, 0, False)
+        self.assertEqual(started, [])
+        mon._on_flags(self.CTRL_SHIFT)
+        self.assertEqual(started, [True])
+        self.assertTrue(mon.state.started)
+        # The release stops what this press started.
+        self.assertTrue(ptt.handle_key_up(mon.state, 7))
+
+
 if __name__ == "__main__":
     unittest.main()
