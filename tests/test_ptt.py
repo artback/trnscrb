@@ -386,5 +386,115 @@ class TestLateModifiers(unittest.TestCase):
         self.assertTrue(ptt.handle_key_up(mon.state, 7))
 
 
+class TestPTTSelfTest(unittest.TestCase):
+    """``trnscrb ptt check``: verify a press without dictating it.
+
+    The self-test must confirm the tap and the combo actually fire, and
+    fail with an actionable reason — while never starting a dictation the
+    check itself caused.
+    """
+
+    KEY = hotkey.PTTKey(
+        key_code=7,  # K
+        flags=hotkey.FLAG_CONTROL | hotkey.FLAG_SHIFT,
+        spec="ctrl+shift+k",
+    )
+    CTRL_SHIFT = hotkey.FLAG_CONTROL | hotkey.FLAG_SHIFT
+
+    def _monitor(self) -> ptt.PTTMonitor:
+        self.started = []
+        self.stopped = []
+        self.notified = []
+        return ptt.PTTMonitor(
+            self.KEY,
+            on_start=lambda: self.started.append(True) or True,
+            on_stop=lambda: self.stopped.append(True),
+            on_selftest=lambda: self.notified.append(True),
+        )
+
+    def test_full_combo_passes_without_dictating(self):
+        mon = self._monitor()
+        mon.arm_selftest(nonce="abc")
+        mon._handle("down", 7, self.CTRL_SHIFT, False)
+        st = mon.selftest_info()
+        self.assertEqual(st["result"], "pass")
+        self.assertEqual(st["nonce"], "abc")
+        self.assertFalse(st["armed"])
+        self.assertEqual(self.started, [])  # verified, not dictated
+        self.assertFalse(mon.state.started)
+
+    def test_late_modifiers_pass(self):
+        mon = self._monitor()
+        mon.arm_selftest()
+        mon._handle("down", 7, 0, False)  # key first, pending
+        self.assertEqual(mon.selftest_info()["result"], None)
+        mon._on_flags(self.CTRL_SHIFT)
+        self.assertEqual(mon.selftest_info()["result"], "pass")
+        self.assertEqual(self.started, [])
+
+    def test_release_without_modifiers_reports_missing(self):
+        mon = self._monitor()
+        mon.arm_selftest()
+        mon._handle("down", 7, 0, False)
+        mon._handle("up", 7, 0, False)
+        st = mon.selftest_info()
+        self.assertEqual(st["result"], "modifiers_missing")
+        self.assertIn("modifiers", st["detail"])
+
+    def test_expiry_reports_no_event(self):
+        mon = self._monitor()
+        mon.arm_selftest(timeout=0.01)
+        st_obj = mon.selftest
+        mon._expire_selftest(st_obj)
+        self.assertEqual(mon.selftest_info()["result"], "no_event")
+
+    def test_expiry_is_noop_after_a_verdict(self):
+        mon = self._monitor()
+        mon.arm_selftest()
+        mon._handle("down", 7, self.CTRL_SHIFT, False)
+        st_obj = mon.selftest
+        mon._expire_selftest(st_obj)
+        self.assertEqual(mon.selftest_info()["result"], "pass")
+
+    def test_release_after_pass_stops_nothing(self):
+        mon = self._monitor()
+        mon.arm_selftest()
+        mon._handle("down", 7, self.CTRL_SHIFT, False)
+        mon._handle("up", 7, 0, False)
+        self.assertEqual(self.stopped, [])  # no dictation was started
+        self.assertEqual(mon.selftest_info()["result"], "pass")
+
+    def test_verdict_is_final(self):
+        mon = self._monitor()
+        mon.arm_selftest(nonce="first")
+        mon._handle("down", 7, 0, False)
+        mon._handle("up", 7, 0, False)
+        # A later press cannot rewrite a finished verdict.
+        mon._handle("down", 7, self.CTRL_SHIFT, False)
+        st = mon.selftest_info()
+        self.assertEqual(st["result"], "modifiers_missing")
+        self.assertEqual(st["nonce"], "first")
+
+    def test_unarmed_press_starts_dictation_as_usual(self):
+        mon = self._monitor()
+        mon._handle("down", 7, self.CTRL_SHIFT, False)
+        self.assertEqual(self.started, [True])
+        self.assertEqual(mon.selftest_info()["result"], None)
+
+    def test_last_event_tracks_the_verdict(self):
+        mon = self._monitor()
+        mon._handle("down", 7, self.CTRL_SHIFT, False)
+        self.assertTrue(mon.last_event["matched"])
+        mon._handle("up", 7, 0, False)
+        mon.state.reset()
+        mon._handle("down", 7, 0, False)
+        self.assertFalse(mon.last_event["matched"])
+
+    def test_arming_notifies(self):
+        mon = self._monitor()
+        mon.arm_selftest()
+        self.assertGreaterEqual(len(self.notified), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

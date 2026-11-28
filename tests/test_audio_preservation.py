@@ -215,5 +215,33 @@ class FindLiveFileTest(unittest.TestCase):
             self.assertEqual(_find_live_file(self.notes), f)
 
 
+class PttCheckRequestTest(unittest.TestCase):
+    """The CLI→app self-test request file: written once, taken once."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        patcher = patch.object(
+            storage,
+            "_PTT_CHECK_REQUEST_FILE",
+            Path(self._tmp.name) / "ptt_check_request.json",
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_round_trip(self):
+        storage.write_ptt_check_request("abc123")
+        req = storage.take_ptt_check_request()
+        self.assertEqual(req["nonce"], "abc123")
+
+    def test_consumed_once(self):
+        storage.write_ptt_check_request("abc123")
+        self.assertIsNotNone(storage.take_ptt_check_request())
+        self.assertIsNone(storage.take_ptt_check_request())
+
+    def test_missing_is_none(self):
+        self.assertIsNone(storage.take_ptt_check_request())
+
+
 if __name__ == "__main__":
     unittest.main()
