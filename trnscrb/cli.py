@@ -1705,8 +1705,10 @@ def status():
     lock = SingleInstance()
     if lock.acquire():
         lock.release()
+        app_running = False
         _row("App running", False, "start with `trnscrb start`")
     else:
+        app_running = True
         _row("App running", True, f"pid {lock.holder_pid()}")
 
     # A running app whose install was replaced looks healthy from the outside
@@ -1788,12 +1790,21 @@ def status():
     ptt_spec = str(settings.get("dictation_ptt_key") or "").strip()
     ptt_key = hotkey.parse(ptt_spec) if ptt_spec else None
     if ptt_key:
-        _row(
-            "Push-to-talk",
-            True,
-            f"{hotkey.display_spec(ptt_key.key_code, ptt_key.flags)} — hold to "
-            "dictate, release to stop",
-        )
+        display = hotkey.display_spec(ptt_key.key_code, ptt_key.flags)
+        detail = f"{display} — hold to dictate, release to stop"
+        if app_running:
+            # Live from the running app's published state: the last PTT key
+            # press and its verdict. Freshness-capped so a stale state file
+            # never reads as current activity.
+            last = ((app_state or {}).get("ptt") or {}).get("last_event") or {}
+            if last:
+                import time as _time
+
+                age = _time.time() - float(last.get("t") or 0)
+                if 0 <= age < 300:
+                    verdict = "matched" if last.get("matched") else "no modifiers"
+                    detail += f" · last press {age:.0f}s ago ({verdict})"
+        _row("Push-to-talk", True, detail)
     elif ptt_spec:
         _row("Push-to-talk", False, f"unrecognized key spec '{ptt_spec}'")
     else:
@@ -3327,3 +3338,100 @@ def glossary_train(term):
     # Merge into glossary: canonical term + ASR transcription as alias.
     entries = g.add_terms([{"term": term, "aliases": [text]}])
     click.echo(f"Trained '{term}' ← ``{text}``. Glossary now has {len(entries)} term(s).")
+
+
+# ── push-to-talk ──────────────────────────────────────────────────────────────
+
+
+@cli.group(name="ptt")
+def ptt_group():
+    """Push-to-talk: hold a key to dictate, release to stop and paste."""
+
+
+@ptt_group.command(name="check")
+def ptt_check():
+    """Verify the PTT combo actually fires — press it once, get a verdict.
+
+    The running app arms a one-shot self-test on its event tap; your press
+    is verified, never dictated (no audio, no note). Reports why a check
+    fails: tap not armed, no event seen, or modifiers never arriving.
+    """
+    import time as _time
+    import uuid
+
+    from trnscrb import hotkey, storage
+    from trnscrb.settings import load as load_settings
+    from trnscrb.single_instance import SingleInstance
+
+    settings = load_settings()
+    spec = str(settings.get("dictation_ptt_key") or "").strip()
+    key = hotkey.parse(spec) if spec else None
+    if key is None:
+        click.echo(
+            "PTT is off — set a combo first: "
+            "`trnscrb config set dictation_ptt_key ctrl+shift+k`"
+        )
+        raise SystemExit(1)
+
+    lock = SingleInstance()
+    if lock.acquire():
+        lock.release()
+        click.echo("The app is not running — start it first: `trnscrb start`")
+        raise SystemExit(1)
+
+    display = hotkey.display_spec(key.key_code, key.flags)
+    nonce = uuid.uuid4().hex[:8]
+    storage.write_ptt_check_request(nonce)
+
+    click.echo(f"Arming the self-test (the app picks it up within ~5s)…")
+    st: dict = {}
+    deadline = _time.time() + 20
+    armed = False
+    while _time.time() < deadline:
+        st = ((storage.read_app_state() or {}).get("ptt") or {}).get("selftest") or {}
+        if st.get("nonce") == nonce and (st.get("armed") or st.get("result")):
+            armed = bool(st.get("armed"))
+            break
+        _time.sleep(0.25)
+    if not armed:
+        detail = st.get("detail") or (
+            "the app never armed the self-test — is `trnscrb status` healthy?"
+        )
+        click.echo(f"✗ TAP NOT ARMED — {detail}")
+        raise SystemExit(1)
+
+    click.echo(f"Hold {display} once now — release when done (15s window).")
+    deadline = _time.time() + 20
+    st = {}
+    while _time.time() < deadline:
+        st = ((storage.read_app_state() or {}).get("ptt") or {}).get("selftest") or {}
+        if st.get("nonce") == nonce and st.get("result"):
+            break
+        _time.sleep(0.25)
+    if not (st.get("nonce") == nonce and st.get("result")):
+        click.echo(
+            "✗ NO VERDICT — the app stopped publishing (restarted mid-check?); retry."
+        )
+        raise SystemExit(1)
+
+    verdicts = {
+        "pass": (
+            "PASS",
+            f"the combo fired — tap alive, {display} seen, dictation would start.",
+        ),
+        "modifiers_missing": (
+            "FAIL",
+            f"the tap saw the key but the modifiers never completed {display}. "
+            "Hold the full combo as one press (modifiers first).",
+        ),
+        "no_event": (
+            "FAIL",
+            "no key event reached the tap — check System Settings → Privacy "
+            "& Security → Input Monitoring (grant Trnscrb), then retry; "
+            "`trnscrb doctor` checks the grant.",
+        ),
+    }
+    verdict, detail = verdicts.get(st.get("result") or "", ("?", str(st)))
+    mark = "✓" if verdict == "PASS" else "✗"
+    click.echo(f"{mark} {verdict} — {detail}")
+    raise SystemExit(0 if verdict == "PASS" else 1)

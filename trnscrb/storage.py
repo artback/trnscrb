@@ -25,6 +25,39 @@ def get_transcript_path(meeting_name: str, started_at: datetime) -> Path:
 
 _LIVE_SESSION_FILE = Path.home() / ".config" / "trnscrb" / "live_session.json"
 _APP_STATE_FILE = Path.home() / ".config" / "trnscrb" / "app_state.json"
+_PTT_CHECK_REQUEST_FILE = Path.home() / ".config" / "trnscrb" / "ptt_check_request.json"
+
+
+def write_ptt_check_request(nonce: str) -> None:
+    """CLI side: ask the running app to arm a PTT self-test.
+
+    The app's 5s PTT tick picks the file up (``take_ptt_check_request``),
+    arms the monitor, and publishes the verdict under ``ptt.selftest`` in
+    the app state — the nonce ties the two ends together.
+    """
+    import json
+    import time
+
+    try:
+        _PTT_CHECK_REQUEST_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _PTT_CHECK_REQUEST_FILE.write_text(
+            json.dumps({"nonce": nonce, "t": time.time()})
+        )
+    except Exception:
+        _log.debug("Could not write PTT check request", exc_info=True)
+
+
+def take_ptt_check_request() -> dict | None:
+    """App side: read and drop a pending PTT self-test request."""
+    import json
+    import os
+
+    try:
+        data = json.loads(_PTT_CHECK_REQUEST_FILE.read_text())
+        os.remove(_PTT_CHECK_REQUEST_FILE)
+        return data
+    except Exception:
+        return None
 
 
 def write_app_state(**fields) -> None:

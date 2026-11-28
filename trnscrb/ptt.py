@@ -21,6 +21,7 @@ app is affected.
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass
 from typing import Callable
 
@@ -332,6 +333,27 @@ class EventTap:
         self._modifier_flags = 0
 
 
+@dataclass
+class PTTSelfTest:
+    """One-shot verification that the tap and the combo actually fire.
+
+    Armed by the menu bar when the CLI asks for a check (``trnscrb ptt
+    check``); the next press of the PTT key is verified, never dictated.
+    ``result`` is ``"pass"`` (the combo completed — the tap is alive and
+    sees the modifiers), ``"modifiers_missing"`` (the tap saw the key but
+    the modifiers never completed the combo), ``"no_event"`` (nothing
+    reached the tap by the deadline), or ``None`` while in flight.
+    ``nonce`` ties the result to the request that armed it.
+    """
+
+    armed: bool = False
+    deadline: float = 0.0
+    nonce: str = ""
+    result: str | None = None
+    detail: str = ""
+    t: float = 0.0
+
+
 # ── push-to-talk monitor ─────────────────────────────────────────────────────
 
 
@@ -343,12 +365,21 @@ class PTTMonitor:
     meeting already running), in which case the release stops nothing.
     """
 
-    def __init__(self, key: PTTKey, on_start: Callable[[], bool], on_stop: Callable[[], None]):
+    def __init__(
+        self,
+        key: PTTKey,
+        on_start: Callable[[], bool],
+        on_stop: Callable[[], None],
+        on_selftest: Callable[[], None] | None = None,
+    ):
         self.key = key
         self.state = PTTState(key)
         self._on_start = on_start
         self._on_stop = on_stop
+        self._on_selftest = on_selftest
         self._tap = EventTap(self._handle, on_flags_changed=self._on_flags)
+        self.selftest = PTTSelfTest()
+        self._last_event: dict | None = None
 
     @property
     def active(self) -> bool:
@@ -364,6 +395,73 @@ class PTTMonitor:
         """
         return self._tap.disabled_reason
 
+    @property
+    def last_event(self) -> dict | None:
+        """The last PTT key press the tap saw: ``{"t": …, "matched": …}``.
+
+        ``matched`` is the verdict at the moment the key went down (a press
+        completed late by its modifiers records ``matched`` True on release).
+        """
+        return self._last_event
+
+    def arm_selftest(self, timeout: float = 15.0, nonce: str = "") -> None:
+        """Arm the one-shot self-check. The next press is verified, not dictated.
+
+        A full match reports ``pass``; a key-down that is released before the
+        modifiers complete reports ``modifiers_missing``; the deadline with
+        nothing at all reports ``no_event``. Never starts a dictation — the
+        press that completes the combo is closed without side effects.
+        """
+        st = PTTSelfTest(armed=True, deadline=time.monotonic() + timeout, nonce=nonce)
+        self.selftest = st
+        timer = threading.Timer(timeout + 0.5, self._expire_selftest, args=(st,))
+        timer.daemon = True
+        timer.start()
+        _log.info("PTT self-test armed (nonce=%s, %.0fs window)", nonce or "-", timeout)
+        self._notify_selftest()
+
+    def selftest_info(self) -> dict:
+        """The current self-test for publishing (``trnscrb status``/``check``)."""
+        st = self.selftest
+        return {
+            "nonce": st.nonce,
+            "armed": st.armed and st.result is None,
+            "result": st.result,
+            "detail": st.detail,
+            "t": st.t,
+        }
+
+    def _expire_selftest(self, st: PTTSelfTest) -> None:
+        """The deadline passed without a press: nothing reached the tap."""
+        if self.selftest is st and st.armed and st.result is None:
+            st.result = "no_event"
+            st.detail = "no key event reached the tap before the deadline"
+            st.t = time.time()
+            st.armed = False
+            _log.info("PTT self-test: no_event")
+            self._notify_selftest()
+
+    def _finish_selftest(self, result: str, detail: str) -> bool:
+        """Record a verdict (once per armed test). True when it was recorded."""
+        st = self.selftest
+        if not st.armed or st.result is not None:
+            return False
+        st.result = result
+        st.detail = detail
+        st.t = time.time()
+        st.armed = False
+        _log.info("PTT self-test: %s — %s", result, detail)
+        self._notify_selftest()
+        return True
+
+    def _notify_selftest(self) -> None:
+        if self._on_selftest is None:
+            return
+        try:
+            self._on_selftest()
+        except Exception:
+            _log.debug("PTT self-test notify failed", exc_info=True)
+
     def start(self) -> bool:
         return self._tap.start()
 
@@ -372,7 +470,17 @@ class PTTMonitor:
 
     def _handle(self, kind: str, code: int, flags: int, autorepeat: bool) -> None:
         if kind == "down":
-            if handle_key_down(self.state, code, flags, autorepeat):
+            matched = handle_key_down(self.state, code, flags, autorepeat)
+            if code == self.key.key_code:
+                self._last_event = {"t": time.time(), "matched": bool(matched)}
+            if matched and self._finish_selftest(
+                "pass", "combo matched — tap alive, modifiers seen"
+            ):
+                # Self-test press: close it without dictating; the key-up
+                # clears the press state.
+                self.state.started = False
+                return
+            if matched:
                 ok = bool(self._on_start())
                 confirm_start(self.state, ok)
                 _log.info("PTT combo: dictation start ok=%s", ok)
@@ -387,8 +495,18 @@ class PTTMonitor:
                     self.key.flags,
                 )
         else:
-            if handle_key_up(self.state, code):
-                self._on_stop()
+            if code == self.key.key_code:
+                started = self.state.started
+                was_pending = self.state.pending
+                if handle_key_up(self.state, code):
+                    self._on_stop()
+                self._last_event = {"t": time.time(), "matched": bool(started)}
+                if was_pending and self.selftest.armed and self.selftest.result is None:
+                    self._finish_selftest(
+                        "modifiers_missing",
+                        "the tap saw the key but the modifiers never completed "
+                        "the combo — hold the full combo as one press",
+                    )
 
     def _on_flags(self, flags: int) -> None:
         """The modifier state changed while a press was waiting on it.
@@ -402,6 +520,11 @@ class PTTMonitor:
         if not self.state.pending or self.state.holding:
             return
         if handle_key_down(self.state, self.key.key_code, flags):
+            if self._finish_selftest(
+                "pass", "combo completed late — modifiers arrived after the key"
+            ):
+                self.state.started = False
+                return
             ok = bool(self._on_start())
             confirm_start(self.state, ok)
             _log.info("PTT combo (late modifiers): dictation start ok=%s", ok)

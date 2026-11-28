@@ -9,6 +9,7 @@ States:
 
 import subprocess
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -879,8 +880,11 @@ class TrnscrbApp(rumps.App):
 
         Runs on a 5s timer, so a changed setting — or a freshly granted
         Input Monitoring permission — applies without a restart. Cheap
-        no-op when the armed combo already matches.
+        no-op when the armed combo already matches. Also picks up a CLI
+        ``ptt check`` request and publishes the PTT state for
+        ``trnscrb status``.
         """
+        self._ptt_pick_up_selftest()
         spec = str(get_setting("dictation_ptt_key") or "").strip()
         key = hotkey.parse(spec)
         if key is None:
@@ -915,7 +919,12 @@ class TrnscrbApp(rumps.App):
                     self._ptt_monitor.disabled_reason,
                 )
             self._ptt_monitor.stop()
-        monitor = ptt.PTTMonitor(key, on_start=self._ptt_start, on_stop=self._ptt_stop)
+        monitor = ptt.PTTMonitor(
+            key,
+            on_start=self._ptt_start,
+            on_stop=self._ptt_stop,
+            on_selftest=self._publish_ptt_state,
+        )
         if monitor.start():
             self._ptt_monitor = monitor
             self._ptt_armed_spec = spec
@@ -933,6 +942,60 @@ class TrnscrbApp(rumps.App):
                     "Trnscrb under System Settings → Privacy & Security → "
                     "Input Monitoring — it is retried automatically.",
                 )
+
+    def _ptt_pick_up_selftest(self) -> None:
+        """A CLI ``ptt check`` request arrived: arm the self-test.
+
+        The CLI writes ``ptt_check_request.json``; this consumes it and
+        arms the monitor (which publishes the verdict as it arrives). If
+        the tap cannot be armed (grant missing, spec off), the verdict is
+        published immediately so the CLI gets a reason, not a timeout.
+        """
+        req = storage.take_ptt_check_request()
+        m = self._ptt_monitor
+        if req:
+            nonce = str(req.get("nonce") or "")
+            if m is None or not m.active or m.disabled_reason:
+                _log.info(
+                    "PTT self-test: tap not armed, publishing verdict (nonce=%s)",
+                    nonce,
+                )
+                self._publish_ptt_state(
+                    selftest={
+                        "nonce": nonce,
+                        "armed": False,
+                        "result": "tap_not_armed",
+                        "detail": (
+                            "the event tap is not armed — grant Input Monitoring "
+                            "(System Settings → Privacy & Security) and retry; "
+                            "`trnscrb doctor` checks the grant"
+                        ),
+                        "t": time.time(),
+                    }
+                )
+                return  # the verdict above is the truth; don't overwrite it
+            m.arm_selftest(nonce=nonce)  # publishes armed + verdict via callback
+            return
+        # No request: keep the published state fresh (the last-event counter).
+        self._publish_ptt_state()
+
+    def _publish_ptt_state(self, selftest: dict | None = None) -> None:
+        """Publish PTT live state for ``trnscrb status`` / ``ptt check``.
+
+        Called on the 5s PTT tick and (via the monitor callback) the moment
+        a self-test verdict lands, so the CLI never waits for the next tick
+        to see the result.
+        """
+        try:
+            m = self._ptt_monitor
+            ptt_state = {
+                "armed": bool(m is not None and m.active and not m.disabled_reason),
+                "last_event": m.last_event if m is not None else None,
+                "selftest": selftest or (m.selftest_info() if m is not None else {}),
+            }
+            storage.write_app_state(ptt=ptt_state)
+        except Exception:
+            _log.debug("Could not publish PTT state", exc_info=True)
 
     def _ptt_start(self) -> bool:
         """PTT key-down: start a dictation that pastes, never saves a note.
